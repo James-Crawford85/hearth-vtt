@@ -1,0 +1,9 @@
+id = "hp-bars"
+type = "module"
+name = "Token HP Bars"
+version = "0.1.0"
+description = "Draws a health bar under tokens whose actor has data.hp.value / data.hp.max."
+license = "MIT"
+
+[client]
+scripts = ["hp-bars.js"]

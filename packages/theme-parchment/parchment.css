@@ -1,0 +1,22 @@
+/* A theme is just CSS. Override the custom properties from web/css/core.css,
+   and add any extra rules you like. */
+:root {
+  --font: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --bg: #e9dcc0;
+  --board-bg: #cdbb96;
+  --panel: #f4ead3;
+  --panel-2: #eadcbd;
+  --panel-3: #dfcda7;
+  --border: #b9a27a;
+  --text: #2b2116;
+  --muted: #6e5b42;
+  --accent: #8c2f1b;
+  --accent-text: #fbf3e1;
+  --danger: #a32020;
+  --ok: #2f6b3a;
+  --shadow: 0 8px 24px rgba(60, 40, 10, .25);
+  color-scheme: light;
+}
+.join { background: radial-gradient(ellipse at top, #f7eedb, var(--bg) 70%); }
+.window-header, .tabs { background: linear-gradient(#efe1c1, #e5d3ad); }

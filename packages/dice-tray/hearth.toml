@@ -1,0 +1,9 @@
+id = "dice-tray"
+type = "module"
+name = "Dice Tray"
+version = "0.1.0"
+description = "Quick-roll buttons above the chat box. Shift-click to roll privately."
+license = "MIT"
+
+[client]
+scripts = ["dice-tray.js"]

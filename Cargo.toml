@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# `cargo build` / `cargo test` at the root skip the desktop app, which needs
+# system GUI libraries. Build it with `cargo run -p hearth-desktop`.
+default-members = ["crates/hearth-dice", "crates/hearth-core", "crates/hearth-packages", "crates/hearth-server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+hearth-core = { path = "crates/hearth-core" }
+hearth-dice = { path = "crates/hearth-dice" }
+hearth-packages = { path = "crates/hearth-packages" }
+
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+rhai = { version = "1.19", features = ["serde", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal", "net"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
+futures = "0.3"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

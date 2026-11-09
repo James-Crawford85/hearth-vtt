@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hearth</title>
+  <link rel="stylesheet" href="/css/core.css">
+</head>
+<body>
+  <section id="join" class="join">
+    <form id="join-form" class="join-card" autocomplete="on">
+      <h1 class="brand">Hearth</h1>
+      <p class="muted" id="join-world">Open-source virtual tabletop</p>
+      <label>Your name
+        <input name="name" required maxlength="40" autocomplete="nickname">
+      </label>
+      <label>GM key <span class="muted">(leave empty to join as a player)</span>
+        <input name="key" type="password" autocomplete="off">
+      </label>
+      <button type="submit" class="primary">Join</button>
+      <p id="join-error" class="error" role="alert"></p>
+    </form>
+  </section>
+
+  <main id="app" hidden>
+    <canvas id="board" tabindex="0" aria-label="Game board"></canvas>
+    <nav id="toolbar" class="toolbar" aria-label="Tools"></nav>
+    <div id="scene-title" class="scene-title"></div>
+    <aside id="sidebar" class="sidebar">
+      <div class="tabs" role="tablist" id="tabs"></div>
+      <div class="tab-panels" id="tab-panels"></div>
+    </aside>
+    <div id="windows"></div>
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <div id="status" class="status" hidden>Reconnecting…</div>
+  </main>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

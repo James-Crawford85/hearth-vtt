@@ -1,0 +1,17 @@
+[package]
+name = "hearth-packages"
+description = "System, module and theme packages plus sandboxed Rhai scripting for Hearth VTT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hearth-core.workspace = true
+hearth-dice.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+rhai.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zip.workspace = true

@@ -1,0 +1,16 @@
+# The smallest possible system: no scripts, no sheets.
+# Hearth generates a form from the template automatically.
+id = "freeform"
+type = "system"
+name = "Freeform"
+version = "0.1.0"
+description = "System-agnostic play: name, HP, and notes. A starting point for your own system."
+license = "CC0-1.0"
+
+[actor_types.character]
+label = "Character"
+template = { hp = { value = 10, max = 10 }, notes = "" }
+
+[item_types.item]
+label = "Item"
+template = { quantity = 1, notes = "" }

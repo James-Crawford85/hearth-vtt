@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hearth</title>
+  <link rel="stylesheet" href="launcher.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="flame.png" alt=""><span>Hearth</span></div>
+    <div class="top-actions">
+      <button class="icon-btn" id="update-btn" title="Check for updates" aria-label="Check for updates">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 19h16" /></svg>
+        <span class="dot" id="update-dot" hidden></span>
+      </button>
+      <button class="icon-btn" data-goto="settings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" /><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" /></svg>
+      </button>
+    </div>
+  </header>
+
+  <section id="hosting" class="hosting" hidden>
+    <span class="live" aria-hidden="true"></span>
+    <div class="hosting-text">
+      <div><strong id="hosting-name"></strong> is running</div>
+      <div class="muted small">Players join at <code id="hosting-url"></code>
+        <button class="link" id="copy-url">Copy</button>
+        · GM key <code id="gm-key">hidden</code> <button class="link" id="show-key">Show</button>
+      </div>
+    </div>
+    <button class="primary" id="return-world">Open world</button>
+    <button id="stop-world">Stop</button>
+  </section>
+
+  <main class="panel">
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button role="tab" data-tab="worlds" aria-selected="true">Game Worlds</button>
+      <button role="tab" data-tab="systems">Game Systems</button>
+      <button role="tab" data-tab="modules">Add-on Modules</button>
+      <button role="tab" data-tab="settings">Settings</button>
+    </nav>
+
+    <!-- Worlds -->
+    <section class="tab-panel" id="tab-worlds" role="tabpanel">
+      <div class="toolbar">
+        <input type="search" class="filter" data-filter="worlds" placeholder="Filter worlds">
+        <button class="primary" id="create-world-btn">+ Create world</button>
+        <button id="join-game-btn">Join a game</button>
+      </div>
+      <h3 class="section-title">Your worlds <span class="muted">· you are the GM</span></h3>
+      <ul class="cards" id="hosted-list"></ul>
+      <p class="empty" id="hosted-empty" hidden>No worlds yet. Create one to start a campaign.</p>
+      <h3 class="section-title">Joined games <span class="muted">· hosted by someone else</span></h3>
+      <ul class="cards" id="joined-list"></ul>
+      <p class="empty" id="joined-empty" hidden>Games you join are saved here so you can rejoin in one click.</p>
+      <p class="small muted" id="deleted-note" hidden>
+        Deleted worlds with backups: <span id="deleted-list"></span>
+      </p>
+    </section>
+
+    <!-- Systems -->
+    <section class="tab-panel" id="tab-systems" role="tabpanel" hidden>
+      <div class="toolbar">
+        <input type="search" class="filter" data-filter="systems" placeholder="Filter systems">
+        <button class="primary" data-install="url">Install from link</button>
+        <button data-install="file">Install from file</button>
+        <button data-open-folder="packages">Open folder</button>
+      </div>
+      <ul class="cards" id="systems-list"></ul>
+      <p class="empty" id="systems-empty" hidden>No game systems installed.</p>
+    </section>
+
+    <!-- Modules -->
+    <section class="tab-panel" id="tab-modules" role="tabpanel" hidden>
+      <div class="toolbar">
+        <input type="search" class="filter" data-filter="modules" placeholder="Filter modules and themes">
+        <button class="primary" data-install="url">Install from link</button>
+        <button data-install="file">Install from file</button>
+        <button data-open-folder="packages">Open folder</button>
+      </div>
+      <p class="small muted">Turn modules on per world from <strong>Game Worlds → Edit</strong>, or in-game under Settings.</p>
+      <ul class="cards" id="modules-list"></ul>
+      <p class="empty" id="modules-empty" hidden>No modules installed.</p>
+    </section>
+
+    <!-- Settings -->
+    <section class="tab-panel" id="tab-settings" role="tabpanel" hidden>
+      <form id="settings-form" class="settings">
+        <fieldset>
+          <legend>You</legend>
+          <label>Your name <input name="player_name" maxlength="40" placeholder="Shown to other players"></label>
+        </fieldset>
+        <fieldset>
+          <legend>Hosting</legend>
+          <label>Port <input name="port" type="number" min="1024" max="65535"></label>
+          <label class="check"><input name="allow_network" type="checkbox"> Let players on other devices join (needed for multiplayer)</label>
+          <label class="check"><input name="backup_on_launch" type="checkbox"> Back up a world automatically each time it launches</label>
+          <label>Automatic backups to keep per world <input name="keep_auto_backups" type="number" min="1" max="100"></label>
+        </fieldset>
+        <fieldset>
+          <legend>Updates</legend>
+          <label class="check"><input name="check_updates" type="checkbox"> Check for updates when Hearth starts</label>
+          <div class="row"><span class="muted" id="version-line"></span><button type="button" id="check-update-btn">Check now</button></div>
+        </fieldset>
+        <fieldset>
+          <legend>Folders</legend>
+          <div class="folder"><span>Worlds</span><code id="path-worlds"></code><button type="button" data-open-folder="worlds">Open</button></div>
+          <div class="folder"><span>Add-on packages</span><code id="path-packages"></code><button type="button" data-open-folder="packages">Open</button></div>
+          <div class="folder"><span>Backups</span><code id="path-backups"></code><button type="button" data-open-folder="backups">Open</button></div>
+        </fieldset>
+        <div class="row"><button class="primary" type="submit">Save settings</button><span class="muted small" id="settings-saved"></span></div>
+      </form>
+    </section>
+  </main>
+
+  <dialog id="dialog" class="dialog"><form method="dialog" id="dialog-form"></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="launcher.js"></script>
+</body>
+</html>

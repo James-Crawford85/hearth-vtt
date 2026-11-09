@@ -1,0 +1,11 @@
+[package]
+name = "hearth-dice"
+description = "Dice expression parser and roller for Hearth VTT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rand.workspace = true
+serde.workspace = true
+thiserror.workspace = true

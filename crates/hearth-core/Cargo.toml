@@ -1,0 +1,13 @@
+[package]
+name = "hearth-core"
+description = "World model, operations and wire protocol for Hearth VTT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hearth-dice.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

@@ -1,0 +1,303 @@
+// Sidebar: Chat, Actors, Scenes (GM), Settings — plus tabs added by packages.
+
+import { hooks } from './hooks.js';
+import { store, isGM, systemInfo } from './store.js';
+import { el, formDialog, openWindow, toast } from './ui.js';
+
+export class Sidebar {
+  constructor(api) {
+    this.api = api;
+    this.tabs = new Map();
+    this.tabBar = document.getElementById('tabs');
+    this.panels = document.getElementById('tab-panels');
+    this.chatControls = el('div.chat-controls');
+
+    this.addTab({ id: 'chat', label: 'Chat', render: (p) => this.renderChat(p) });
+    this.addTab({ id: 'actors', label: 'Actors', render: (p) => this.renderActors(p) });
+    this.addTab({ id: 'scenes', label: 'Scenes', gmOnly: true, render: (p) => this.renderScenes(p) });
+    this.addTab({ id: 'settings', label: 'Settings', render: (p) => this.renderSettings(p) });
+    this.select('chat');
+  }
+
+  addTab({ id, label, render, gmOnly = false }) {
+    const button = el('button.tab', { role: 'tab', text: label, on: { click: () => this.select(id) } });
+    const panel = el('section.panel', { role: 'tabpanel', hidden: true });
+    this.tabs.set(id, { button, panel, render, gmOnly });
+    this.tabBar.append(button);
+    this.panels.append(panel);
+    this.refreshVisibility();
+  }
+
+  refreshVisibility() {
+    for (const t of this.tabs.values()) t.button.hidden = t.gmOnly && !isGM();
+  }
+
+  select(id) {
+    this.current = id;
+    for (const [tid, t] of this.tabs) {
+      t.button.setAttribute('aria-selected', tid === id);
+      t.panel.hidden = tid !== id;
+    }
+    this.refresh(id);
+  }
+
+  refresh(id = this.current) {
+    const t = this.tabs.get(id);
+    if (t && store.world) t.render(t.panel, this.api);
+  }
+
+  refreshAll() {
+    this.refreshVisibility();
+    for (const id of this.tabs.keys()) this.refresh(id);
+  }
+
+  onOp(op) {
+    const kind = op.op.split('_')[0];
+    if (kind === 'chat') {
+      if (op.op === 'chat_create' && this.log) {
+        this.log.append(this.chatMessage(op.message));
+        this.log.scrollTop = this.log.scrollHeight;
+        if (this.current !== 'chat') this.tabs.get('chat').button.classList.add('unread');
+      } else this.refresh('chat');
+    }
+    if (kind === 'actor' || kind === 'item' || kind === 'user') this.refresh('actors');
+    if (kind === 'scene') this.refresh('scenes');
+    if (kind === 'user' || kind === 'world') this.refresh('settings');
+  }
+
+  // ------------------------------------------------------------ chat
+
+  renderChat(panel) {
+    this.tabs.get('chat').button.classList.remove('unread');
+    if (!this.log) {
+      this.log = el('ol.chat-log', { 'aria-live': 'polite' });
+      const input = el('textarea.chat-input', {
+        rows: 2,
+        placeholder: 'Chat, or /r 1d20+5 # Perception · /gmr · /w name msg',
+        on: {
+          keydown: (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              const v = input.value.trim();
+              if (v) this.api.chat(v);
+              input.value = '';
+            }
+          },
+        },
+      });
+      panel.append(this.log, this.chatControls, input);
+    }
+    this.log.replaceChildren(...store.world.chat.map((m) => this.chatMessage(m)));
+    this.log.scrollTop = this.log.scrollHeight;
+  }
+
+  chatMessage(m) {
+    const author = store.world.users[m.author];
+    const speaker = m.speaker_actor ? store.world.actors[m.speaker_actor]?.name : null;
+    const li = el('li.msg', { 'data-id': m.id },
+      el('div.msg-head', {},
+        el('strong', { text: speaker ?? m.author_name, style: `color:${author?.color ?? 'inherit'}` }),
+        speaker ? el('span.muted', { text: ` (${m.author_name})` }) : null,
+        m.whisper.length ? el('span.whisper', { text: ' whisper' }) : null,
+        el('time.muted', { text: new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })),
+      m.flavor ? el('div.flavor', { text: m.flavor }) : null,
+      m.content ? el('div.msg-body', { text: m.content }) : null,
+      m.roll ? this.rollCard(m.roll) : null);
+    hooks.emit('chat:render', li, m);
+    return li;
+  }
+
+  rollCard(r) {
+    const dice = r.groups.flatMap((g) => g.dice.map((d) => {
+      const cls = ['die'];
+      if (!d.kept) cls.push('dropped');
+      if (g.sides > 1 && d.value === g.sides) cls.push('max');
+      if (g.sides > 1 && d.value === 1) cls.push('min');
+      return el(`span.${cls.join('.')}`, { text: d.value, title: `d${g.sides || 'F'}` });
+    }));
+    return el('div.roll', {},
+      el('div.roll-formula', { text: r.formula }),
+      el('div.roll-dice', {}, ...dice),
+      el('div.roll-detail.muted', { text: r.rendered }),
+      el('div.roll-total', { text: r.total }));
+  }
+
+  // ------------------------------------------------------------ actors
+
+  renderActors(panel) {
+    const sys = systemInfo();
+    const types = Object.entries(sys.actor_types ?? {});
+    const actors = Object.values(store.world.actors).sort((a, b) => a.name.localeCompare(b.name));
+    const list = el('ul.entity-list');
+    for (const a of actors) {
+      const mine = a.owners.includes(store.user.id);
+      list.append(el('li.entity', {
+        draggable: isGM(),
+        on: {
+          dragstart: (e) => e.dataTransfer.setData('application/x-hearth-actor', a.id),
+          click: () => this.api.sheets.open(a.id),
+        },
+      },
+      a.img ? el('img.avatar', { src: a.img, alt: '' }) : el('span.avatar', { text: a.name.charAt(0).toUpperCase() }),
+      el('span.grow', {}, el('span', { text: a.name }), el('small.muted', { text: ` ${sys.actor_types?.[a.kind]?.label ?? a.kind}` })),
+      mine ? el('span.badge', { text: 'yours' }) : null,
+      isGM() ? el('button.icon', {
+        title: 'Delete actor', text: '🗑',
+        on: { click: (e) => { e.stopPropagation(); if (confirm(`Delete ${a.name}?`)) this.api.op({ op: 'actor_delete', id: a.id }); } },
+      }) : null));
+    }
+    const children = [];
+    if (isGM()) {
+      children.push(el('div.row', {}, el('button.primary', {
+        text: '+ New actor',
+        on: {
+          click: async () => {
+            const res = await formDialog({
+              title: 'New actor',
+              fields: [
+                { name: 'name', label: 'Name', required: true },
+                { name: 'kind', label: 'Type', type: 'select', options: types.length ? types.map(([k, d]) => [k, d.label]) : [['character', 'Character']] },
+              ],
+              submit: 'Create',
+            });
+            if (res) this.api.create.actor(res.kind, res.name);
+          },
+        },
+      })), el('p.hint.muted', { text: 'Drag an actor onto the board to place a token (hold Alt to place it hidden).' }));
+    }
+    if (!actors.length) children.push(el('p.muted', { text: 'No actors yet.' }));
+    panel.replaceChildren(...children, list);
+  }
+
+  // ------------------------------------------------------------ scenes
+
+  renderScenes(panel) {
+    if (!isGM()) { panel.replaceChildren(); return; }
+    const list = el('ul.entity-list');
+    for (const s of Object.values(store.world.scenes)) {
+      const active = store.world.active_scene === s.id;
+      const viewing = this.api.board.sceneId === s.id;
+      list.append(el('li.entity', {},
+        el('span.grow', {}, el('span', { text: s.name }), active ? el('span.badge', { text: 'active' }) : null,
+          viewing ? el('small.muted', { text: ' viewing' }) : null),
+        el('button', { text: 'View', on: { click: () => { this.api.board.view(s.id); this.refresh('scenes'); } } }),
+        active ? null : el('button', { text: 'Activate', title: 'Move all players to this scene', on: { click: () => this.api.op({ op: 'scene_activate', id: s.id }) } }),
+        el('button.icon', { title: 'Configure', text: '⚙', on: { click: () => this.configureScene(s.id) } })));
+    }
+    panel.replaceChildren(el('div.row', {}, el('button.primary', {
+      text: '+ New scene',
+      on: {
+        click: async () => {
+          const res = await formDialog({
+            title: 'New scene',
+            fields: [
+              { name: 'name', label: 'Name', required: true },
+              { name: 'cols', label: 'Columns', type: 'number', value: 30, min: 1 },
+              { name: 'rows', label: 'Rows', type: 'number', value: 20, min: 1 },
+              { name: 'size', label: 'Grid size (px)', type: 'number', value: 70, min: 10 },
+            ],
+            submit: 'Create',
+          });
+          if (!res) return;
+          this.api.op({
+            op: 'scene_create',
+            scene: {
+              id: '', name: res.name, width: res.cols * res.size, height: res.rows * res.size,
+              grid: { kind: 'square', size: res.size }, tokens: {},
+            },
+          });
+        },
+      },
+    })), list);
+  }
+
+  configureScene(id) {
+    const s = store.world.scenes[id];
+    const win = openWindow({ id: `scene-${id}`, title: `Scene: ${s.name}`, width: 380 });
+    const g = s.grid;
+    const form = el('form.form', {},
+      el('label', {}, 'Name', el('input', { name: 'name', value: s.name })),
+      el('div.row', {},
+        el('label', {}, 'Columns', el('input', { name: 'cols', type: 'number', value: Math.round(s.width / g.size), min: 1 })),
+        el('label', {}, 'Rows', el('input', { name: 'rows', type: 'number', value: Math.round(s.height / g.size), min: 1 }))),
+      el('div.row', {},
+        el('label', {}, 'Grid px', el('input', { name: 'size', type: 'number', value: g.size, min: 10 })),
+        el('label', {}, 'Cell distance', el('input', { name: 'distance', type: 'number', value: g.distance, step: 'any' })),
+        el('label', {}, 'Units', el('input', { name: 'units', value: g.units }))),
+      el('label', {}, 'Grid', el('select', { name: 'kind' },
+        el('option', { value: 'square', text: 'Square', selected: g.kind === 'square' }),
+        el('option', { value: 'none', text: 'None', selected: g.kind === 'none' }))),
+      el('label', {}, 'Background colour', el('input', { name: 'background_color', type: 'color', value: s.background_color })),
+      el('label', {}, 'Background image', el('input', { name: 'file', type: 'file', accept: 'image/*' })),
+      el('div.row', {},
+        el('button.primary', { type: 'submit', text: 'Save' }),
+        el('button.danger', {
+          type: 'button', text: 'Delete scene',
+          on: { click: () => { if (confirm(`Delete ${s.name}?`)) { this.api.op({ op: 'scene_delete', id }); win.close(); } } },
+        })));
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = form.elements;
+      const size = Number(f.size.value);
+      const patch = {
+        name: f.name.value,
+        width: Number(f.cols.value) * size,
+        height: Number(f.rows.value) * size,
+        background_color: f.background_color.value,
+        grid: { kind: f.kind.value, size, distance: Number(f.distance.value), units: f.units.value },
+      };
+      if (f.file.files[0]) {
+        try { patch.background = await this.api.upload(f.file.files[0]); }
+        catch (err) { toast(err.message, 'error'); return; }
+      }
+      this.api.update.scene(id, patch);
+      win.close();
+    });
+    win.body.append(form);
+  }
+
+  // ------------------------------------------------------------ settings
+
+  renderSettings(panel) {
+    const w = store.world;
+    const online = new Set(store.online);
+    const users = Object.values(w.users).sort((a, b) => a.name.localeCompare(b.name));
+    const parts = [
+      el('h3', { text: w.name }),
+      el('p.muted', { text: `System: ${systemInfo().name ?? w.system}` }),
+      el('h4', { text: 'Players' }),
+      el('ul.users', {}, ...users.map((u) => el('li', {},
+        el('span.dot', { style: `background:${online.has(u.id) ? u.color : 'transparent'};border-color:${u.color}` }),
+        el('span', { text: u.name }), u.role === 'gm' ? el('span.badge', { text: 'GM' }) : null,
+        u.id === store.user.id ? el('small.muted', { text: ' (you)' }) : null))),
+    ];
+
+    if (isGM()) {
+      const themes = store.packages.available.filter((p) => p.type === 'theme');
+      const modules = store.packages.available.filter((p) => p.type === 'module' && (!p.systems.length || p.systems.includes(w.system)));
+      parts.push(
+        el('h4', { text: 'Theme' }),
+        el('select', {
+          on: { change: (e) => this.api.op({ op: 'world_update', patch: { theme: e.target.value || null } }) },
+        }, el('option', { value: '', text: 'Hearth (default)' }),
+        ...themes.map((t) => el('option', { value: t.id, text: t.name, selected: w.theme === t.id }))),
+        el('h4', { text: 'Modules' }),
+        modules.length ? el('ul.modules', {}, ...modules.map((m) => el('li', {}, el('label.check', {},
+          el('input', {
+            type: 'checkbox', checked: w.modules.includes(m.id),
+            on: {
+              change: (e) => {
+                const mods = e.target.checked ? [...w.modules, m.id] : w.modules.filter((x) => x !== m.id);
+                this.api.op({ op: 'world_update', patch: { modules: mods } });
+              },
+            },
+          }),
+          el('span', {}, el('strong', { text: m.name }), el('small.muted', { text: ` v${m.version}` }),
+            m.description ? el('div.muted', { text: m.description }) : null))))) : el('p.muted', { text: 'No modules installed.' }),
+        el('p.hint.muted', { text: 'Changing the theme or modules reloads every connected client.' }),
+      );
+    }
+    parts.push(el('div.row', {}, el('button', { text: 'Leave world', on: { click: () => this.api.leave() } })));
+    panel.replaceChildren(...parts);
+  }
+}

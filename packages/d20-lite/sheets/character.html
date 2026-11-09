@@ -1,0 +1,75 @@
+<div class="d20">
+  <header class="d20-head">
+    <input class="title-input" name="name">
+    <label>Level <input type="number" name="data.level" min="1"></label>
+  </header>
+
+  <div class="d20-stats">
+    <label>HP <span class="d20-hp"><input type="number" name="data.hp.value"> / <input type="number" name="data.hp.max"></span></label>
+    <label>AC <input type="number" name="data.ac"></label>
+    <label>Speed <input type="number" name="data.speed"></label>
+    <div class="d20-box">
+      <span class="muted">Proficiency</span>
+      <strong>{{derived.proficiency|signed}}</strong>
+    </div>
+    <button class="d20-box" data-roll="1d20 + @initiative" data-flavor="Initiative">
+      <span class="muted">Initiative</span>
+      <strong>{{derived.initiative|signed}}</strong>
+    </button>
+  </div>
+
+  <div class="d20-abilities">
+    <div class="d20-ability"><button data-roll="1d20 + @abilities.str.mod" data-flavor="Strength check">STR</button>
+      <input type="number" name="data.abilities.str"><span>{{derived.abilities.str.mod|signed}}</span></div>
+    <div class="d20-ability"><button data-roll="1d20 + @abilities.dex.mod" data-flavor="Dexterity check">DEX</button>
+      <input type="number" name="data.abilities.dex"><span>{{derived.abilities.dex.mod|signed}}</span></div>
+    <div class="d20-ability"><button data-roll="1d20 + @abilities.con.mod" data-flavor="Constitution check">CON</button>
+      <input type="number" name="data.abilities.con"><span>{{derived.abilities.con.mod|signed}}</span></div>
+    <div class="d20-ability"><button data-roll="1d20 + @abilities.int.mod" data-flavor="Intelligence check">INT</button>
+      <input type="number" name="data.abilities.int"><span>{{derived.abilities.int.mod|signed}}</span></div>
+    <div class="d20-ability"><button data-roll="1d20 + @abilities.wis.mod" data-flavor="Wisdom check">WIS</button>
+      <input type="number" name="data.abilities.wis"><span>{{derived.abilities.wis.mod|signed}}</span></div>
+    <div class="d20-ability"><button data-roll="1d20 + @abilities.cha.mod" data-flavor="Charisma check">CHA</button>
+      <input type="number" name="data.abilities.cha"><span>{{derived.abilities.cha.mod|signed}}</span></div>
+  </div>
+  <p class="hint muted">Click an ability to roll. Shift-click to roll privately to the GM.</p>
+
+  <h3>Weapons</h3>
+  <table class="d20-table">
+    <thead><tr><th>Name</th><th>Ability</th><th>Damage</th><th>Prof.</th><th></th><th></th></tr></thead>
+    <tbody>
+      {{#each items:weapon}}
+      <tr>
+        <td><input name="items.{{this.id}}.name"></td>
+        <td><select name="items.{{this.id}}.data.ability">
+          <option value="str">STR</option><option value="dex">DEX</option><option value="con">CON</option>
+          <option value="int">INT</option><option value="wis">WIS</option><option value="cha">CHA</option>
+        </select></td>
+        <td><input name="items.{{this.id}}.data.damage" size="6"></td>
+        <td><input type="checkbox" name="items.{{this.id}}.data.proficient"></td>
+        <td class="d20-actions">
+          <button data-roll="1d20 + @attacks.{{this.id}}.bonus" data-flavor="{{this.name}} — attack">Attack</button>
+          <button data-roll="{{this.data.damage}} + @attacks.{{this.id}}.damage_mod" data-flavor="{{this.name}} — damage">Damage</button>
+        </td>
+        <td><button class="icon" data-action="delete-item" data-item-id="{{this.id}}" title="Delete">🗑</button></td>
+      </tr>
+      {{/each}}
+    </tbody>
+  </table>
+  <button data-action="create-item" data-type="weapon">+ Weapon</button>
+
+  <h3>Features</h3>
+  <ul class="d20-features">
+    {{#each items:feature}}
+    <li>
+      <input name="items.{{this.id}}.name">
+      <textarea name="items.{{this.id}}.data.description" rows="2"></textarea>
+      <button class="icon" data-action="delete-item" data-item-id="{{this.id}}" title="Delete">🗑</button>
+    </li>
+    {{/each}}
+  </ul>
+  <button data-action="create-item" data-type="feature">+ Feature</button>
+
+  <h3>Notes</h3>
+  <textarea name="data.notes" rows="4" class="d20-notes"></textarea>
+</div>

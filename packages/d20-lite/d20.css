@@ -1,0 +1,30 @@
+.d20 { display: flex; flex-direction: column; gap: 8px; }
+.d20 input:not([type=checkbox]), .d20 select { min-width: 0; width: 100%; }
+.d20 label { min-width: 0; }
+.d20 h3 { margin-bottom: 0; }
+.d20-head { display: flex; gap: 10px; align-items: end; }
+.d20-head label { width: 70px; }
+.d20-stats { display: grid; grid-template-columns: 1.6fr repeat(4, minmax(0, 1fr)); gap: 8px; align-items: end; }
+.d20-hp { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+.d20-hp input { flex: 1; }
+.d20-box { min-width: 0; display: flex; flex-direction: column; align-items: center; padding: 4px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--panel-2); font-size: 11px; }
+.d20-box strong { font-size: 18px; color: var(--text); }
+.d20-abilities { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.d20-ability { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); }
+.d20-ability button { width: 100%; font-weight: 700; letter-spacing: .05em; }
+.d20-ability input { width: 100%; text-align: center; }
+.d20-ability span { font-size: 18px; font-weight: 700; }
+.d20-table { width: 100%; border-collapse: collapse; }
+.d20-table th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 500; }
+.d20-table td { padding: 2px 3px; }
+.d20-table input:not([type=checkbox]), .d20-table select { width: 100%; }
+.d20-actions { white-space: nowrap; }
+.d20-features { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.d20-features li { display: grid; grid-template-columns: 1fr auto; gap: 4px; }
+.d20-features textarea { grid-column: 1; }
+.d20-notes { width: 100%; resize: vertical; }
+/* Crits flagged by rules.rhai on_roll */
+.msg.d20-crit .roll-total { color: var(--ok); }
+.msg.d20-fumble .roll-total { color: var(--danger); }

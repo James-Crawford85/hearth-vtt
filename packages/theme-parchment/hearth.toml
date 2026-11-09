@@ -1,0 +1,9 @@
+id = "theme-parchment"
+type = "theme"
+name = "Parchment"
+version = "0.1.0"
+description = "A warm, light, paper-and-ink theme."
+license = "MIT"
+
+[client]
+styles = ["parchment.css"]
