@@ -144,6 +144,10 @@ MIT. See [LICENSE](LICENSE). Example packages carry their own license field.
 
 ## Releasing
 
-1. Set the new version in `Cargo.toml` (`[workspace.package]`) and `crates/hearth-desktop/tauri.conf.json`.
-2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+On Windows, double-click **`release.bat`** (or run it from a terminal). It checks that you're on an up-to-date, clean `main` branch, asks for the version, sets it in `Cargo.toml` and `tauri.conf.json`, then commits, tags `vX.Y.Z` and pushes.
+
+By hand on any OS:
+
+1. Set the version: `powershell -File tools/set-version.ps1 0.2.0` (or edit `Cargo.toml` `[workspace.package]` and `crates/hearth-desktop/tauri.conf.json`), then run `cargo update --workspace`.
+2. Commit, then tag and push: `git tag v0.2.0 && git push origin main v0.2.0`.
 3. The **Release** workflow builds installers and server bundles for every platform into a draft release. Review it on GitHub and press **Publish**. Desktop apps then see the update.
