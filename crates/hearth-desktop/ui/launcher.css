@@ -151,3 +151,7 @@ label.check input { width: auto; }
   white-space: pre-wrap; max-height: 220px; overflow: auto; font-size: 13px;
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
 }
+.dev-badge {
+  align-self: center; font: 700 11px var(--font); letter-spacing: .08em; padding: 4px 9px; border-radius: 999px;
+  color: #1c1206; background: #7cc4e8;
+}

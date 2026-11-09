@@ -39,6 +39,17 @@ All paths are relative to the package folder and can't leave it. Files are serve
 
 A world uses exactly one system, chosen when the world is created (`--system`). The smallest possible system is a manifest with one actor type (see `packages/freeform`). Hearth generates a sheet from the template.
 
+## Combat
+
+A system sets how initiative is rolled:
+
+```toml
+[combat]
+initiative = "1d20 + @initiative"   # @paths resolve against the combatant's actor
+```
+
+`@paths` look in the actor's `derived` values (from `prepare_actor`) first, then its `data`. Without a `[combat]` section, initiative is `1d20`. If a combatant's actor lacks a value the formula needs, that roll falls back to `1d20`.
+
 ## Server scripts (Rhai)
 
 Define any of these functions. Each runs for the system and every enabled module that defines it.

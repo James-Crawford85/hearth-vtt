@@ -46,6 +46,14 @@ pub struct ServerSection {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CombatSection {
+    /// Initiative roll, e.g. `1d20 + @initiative`. `@paths` resolve against the
+    /// combatant's actor (derived values first, then data).
+    #[serde(default)]
+    pub initiative: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TypeDef {
     #[serde(default)]
     pub label: Option<String>,
@@ -78,6 +86,9 @@ pub struct Manifest {
     pub client: ClientSection,
     #[serde(default)]
     pub server: ServerSection,
+    /// Systems only: combat rules.
+    #[serde(default)]
+    pub combat: CombatSection,
     #[serde(default)]
     pub actor_types: BTreeMap<String, TypeDef>,
     #[serde(default)]
@@ -274,6 +285,14 @@ impl Registry {
             .and_then(|p| p.manifest.actor_types.get(kind))
             .map(|t| t.template.clone())
             .unwrap_or(Value::Null)
+    }
+
+    /// The system's initiative formula (`1d20` when it doesn't set one).
+    pub fn initiative_formula(&self, system: &str) -> String {
+        self.get(system)
+            .and_then(|p| p.manifest.combat.initiative.clone())
+            .filter(|f| !f.trim().is_empty())
+            .unwrap_or_else(|| "1d20".into())
     }
 
     pub fn item_template(&self, system: &str, kind: &str) -> Value {

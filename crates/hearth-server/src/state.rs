@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hearth_core::patch::merge_patch;
 use hearth_core::protocol::UserAdmin;
-use hearth_core::{new_id, Actor, ChatMessage, Id, Op, Role, ServerMsg, User, World};
+use hearth_core::{new_id, Actor, ChatMessage, Combatant, Id, Op, Role, ServerMsg, User, World};
 
 use crate::credentials::{self, Credentials};
 use hearth_packages::{Registry, ScriptHost};
@@ -383,15 +383,100 @@ impl AppState {
                     deny()
                 }
             }
+            // Players may type in initiative for their own combatants…
+            Op::CombatantUpdate { id, patch } => {
+                let owned = world
+                    .combat
+                    .as_ref()
+                    .and_then(|c| c.combatant(id))
+                    .and_then(|x| x.actor_id.as_deref())
+                    .is_some_and(|a| world.owns_actor(user, a));
+                let initiative_only = patch.as_object().is_some_and(|p| p.keys().all(|k| k == "initiative"));
+                if owned && initiative_only {
+                    Ok(())
+                } else {
+                    deny()
+                }
+            }
+            // …and end their own turn.
+            Op::CombatNext => {
+                let c = world.combat.as_ref().ok_or("There is no combat")?;
+                let theirs = c
+                    .current
+                    .as_deref()
+                    .and_then(|id| c.combatant(id))
+                    .and_then(|x| x.actor_id.as_deref())
+                    .is_some_and(|a| world.owns_actor(user, a));
+                if theirs {
+                    Ok(())
+                } else {
+                    Err("It isn't your turn".into())
+                }
+            }
             _ => deny(),
         }
     }
 
+    /// Fill a combatant's name, image, actor and visibility from its token.
+    fn fill_combatant(world: &World, scene_id: &str, x: &mut Combatant) {
+        if x.id.is_empty() {
+            x.id = new_id();
+        }
+        let Some(token) = x.token_id.as_deref().and_then(|t| world.scenes.get(scene_id)?.tokens.get(t)) else { return };
+        if x.name.is_empty() {
+            x.name = token.name.clone();
+        }
+        if x.actor_id.is_none() {
+            x.actor_id = token.actor_id.clone();
+        }
+        if x.img.is_none() {
+            x.img = token.img.clone().or_else(|| token.actor_id.as_deref().and_then(|a| world.actors.get(a)?.img.clone()));
+        }
+        x.hidden |= token.hidden;
+    }
+
     // ------------------------------------------------------------ ops
 
-    /// Fill in ids and system templates for create ops.
-    fn normalize(&self, world: &World, user: &User, op: &mut Op) {
+    /// Fill in ids and system templates for create ops, and turn combat turn
+    /// requests into concrete updates.
+    fn normalize(&self, world: &World, user: &User, op: &mut Op) -> Result<(), String> {
         match op {
+            Op::CombatCreate { combat } => {
+                if combat.id.is_empty() {
+                    combat.id = new_id();
+                }
+                if combat.scene_id.is_empty() {
+                    combat.scene_id = world.active_scene.clone().ok_or("There is no scene to fight on")?;
+                }
+                world.scenes.get(&combat.scene_id).ok_or("Scene not found")?;
+                combat.round = 0;
+                combat.current = None;
+                let scene_id = combat.scene_id.clone();
+                for x in &mut combat.combatants {
+                    Self::fill_combatant(world, &scene_id, x);
+                }
+                // One entry per token.
+                let mut seen = HashSet::new();
+                combat.combatants.retain(|x| x.token_id.as_ref().is_none_or(|t| seen.insert(t.clone())));
+            }
+            Op::CombatantAdd { combatant } => {
+                let c = world.combat.as_ref().ok_or("Start a combat first")?;
+                if let Some(t) = &combatant.token_id {
+                    if c.combatants.iter().any(|x| x.token_id.as_ref() == Some(t)) {
+                        return Err("That token is already in the combat".into());
+                    }
+                }
+                Self::fill_combatant(world, &c.scene_id, combatant);
+            }
+            Op::CombatStart | Op::CombatNext | Op::CombatPrev => {
+                let c = world.combat.as_ref().ok_or("There is no combat")?;
+                let (round, current) = match op {
+                    Op::CombatStart => c.start_turn(),
+                    Op::CombatNext => c.next_turn(),
+                    _ => c.prev_turn(),
+                };
+                *op = Op::CombatUpdate { patch: serde_json::json!({ "round": round, "current": current }) };
+            }
             Op::SceneCreate { scene } => {
                 if scene.id.is_empty() {
                     scene.id = new_id();
@@ -434,6 +519,11 @@ impl AppState {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    fn combatant_hidden(world: &World, id: &str) -> Option<bool> {
+        world.combat.as_ref()?.combatant(id).map(|x| x.hidden)
     }
 
     fn token_hidden(world: &World, scene_id: &str, id: &str) -> Option<bool> {
@@ -475,6 +565,29 @@ impl AppState {
                 public.tokens.retain(|_, t| !t.hidden);
                 split(op, Some(Op::SceneCreate { scene: public }))
             }
+            // Hidden combatants follow the same rules as hidden tokens.
+            Op::CombatCreate { combat } if combat.combatants.iter().any(|x| x.hidden) => {
+                let mut public = combat.clone();
+                public.combatants.retain(|x| !x.hidden);
+                split(op, Some(Op::CombatCreate { combat: public }))
+            }
+            Op::CombatantAdd { combatant } if combatant.hidden => split(op, None),
+            Op::CombatantRemove { .. } if hidden_before == Some(true) => split(op, None),
+            Op::CombatantUpdate { id, .. } => {
+                let now = Self::combatant_hidden(world, id).unwrap_or(false);
+                match (hidden_before.unwrap_or(false), now) {
+                    (false, false) => all(op),
+                    (true, true) => split(op, None),
+                    (false, true) => {
+                        let rm = Op::CombatantRemove { id: id.clone() };
+                        split(op, Some(rm))
+                    }
+                    (true, false) => {
+                        let combatant = world.combat.as_ref().and_then(|c| c.combatant(id)).cloned();
+                        split(op, combatant.map(|combatant| Op::CombatantAdd { combatant }))
+                    }
+                }
+            }
             _ => all(op),
         }
     }
@@ -483,21 +596,61 @@ impl AppState {
     pub async fn submit(&self, user: &User, mut op: Op) -> Result<(), String> {
         let mut world = self.world.write().await;
         Self::permitted(&world, user, &op)?;
-        self.normalize(&world, user, &mut op);
+        self.normalize(&world, user, &mut op)?;
+        self.commit(&mut world, &user.id, op, 0)?;
+        self.dirty.store(true, Ordering::Release);
+        Ok(())
+    }
 
+    /// Apply an already-permitted op, broadcast it, and run its follow-ups
+    /// (derived data, combat bookkeeping). `depth` stops runaway chains.
+    fn commit(&self, world: &mut World, by: &Id, op: Op, depth: u8) -> Result<(), String> {
         let hidden_before = match &op {
             Op::TokenUpdate { scene_id, id, .. } | Op::TokenDelete { scene_id, id } => {
-                Self::token_hidden(&world, scene_id, id)
+                Self::token_hidden(world, scene_id, id)
             }
+            Op::CombatantUpdate { id, .. } | Op::CombatantRemove { id } => Self::combatant_hidden(world, id),
             _ => None,
         };
         let modules_changed = matches!(&op, Op::WorldUpdate { patch } if patch.get("modules").is_some());
+        // If this removes whoever's turn it is, work out who's next beforehand.
+        let next_if_current_removed = world.combat.as_ref().and_then(|c| {
+            let cur = c.current.as_deref()?;
+            let removes_current = match &op {
+                Op::CombatantRemove { id } => id == cur,
+                Op::TokenDelete { scene_id, id } => {
+                    scene_id == &c.scene_id && c.combatant(cur).is_some_and(|x| x.token_id.as_deref() == Some(id))
+                }
+                _ => false,
+            };
+            removes_current.then(|| c.next_turn())
+        });
+        // Hiding or revealing a token hides or reveals its combatant too.
+        let hide_sync = match &op {
+            Op::TokenUpdate { scene_id, id, patch } => patch.get("hidden").and_then(|h| h.as_bool()).and_then(|h| {
+                let c = world.combat.as_ref().filter(|c| &c.scene_id == scene_id)?;
+                let x = c.combatants.iter().find(|x| x.token_id.as_deref() == Some(id))?;
+                (x.hidden != h).then(|| Op::CombatantUpdate { id: x.id.clone(), patch: serde_json::json!({ "hidden": h }) })
+            }),
+            _ => None,
+        };
 
         world.apply(&op).map_err(|e| e.to_string())?;
         let affected = op.affected_actor().map(str::to_string);
 
-        for ev in Self::fan_out(&world, op, &user.id, hidden_before) {
+        for ev in Self::fan_out(world, op, by, hidden_before) {
             let _ = self.tx.send(Arc::new(ev));
+        }
+
+        if depth < 3 {
+            if let (Some((round, next)), Some(c)) = (next_if_current_removed, world.combat.as_ref()) {
+                let next = next.filter(|n| c.combatant(n).is_some());
+                let fix = Op::CombatUpdate { patch: serde_json::json!({ "round": round, "current": next }) };
+                self.commit(world, by, fix, depth + 1)?;
+            }
+            if let Some(sync) = hide_sync {
+                self.commit(world, by, sync, depth + 1)?;
+            }
         }
 
         if modules_changed {
@@ -508,13 +661,11 @@ impl AppState {
             *self.scripts.write().unwrap() = host;
             let ids: Vec<Id> = world.actors.keys().cloned().collect();
             for id in ids {
-                self.derive(&mut world, &id);
+                self.derive(world, &id);
             }
         } else if let Some(id) = affected {
-            self.derive(&mut world, &id);
+            self.derive(world, &id);
         }
-
-        self.dirty.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -603,6 +754,61 @@ impl AppState {
             msg.whisper = gm_ids;
         }
         self.post_chat(msg).await;
+        Ok(())
+    }
+
+    /// Roll initiative for combatants using the system's formula
+    /// (`[combat] initiative` in its hearth.toml, default `1d20`). Each roll is
+    /// posted to chat (privately to GMs for hidden combatants).
+    pub async fn roll_initiative(&self, user: &User, ids: Vec<Id>) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let (formula, todo, gm_ids) = {
+            let world = self.world.read().await;
+            let c = world.combat.as_ref().ok_or("There is no combat")?;
+            let formula = self.registry.initiative_formula(&world.system);
+            let mut todo = vec![];
+            for id in &ids {
+                let x = c.combatant(id).ok_or("Combatant not found")?.clone();
+                let owned = user.role == Role::Gm || x.actor_id.as_deref().is_some_and(|a| world.owns_actor(user, a));
+                if !owned {
+                    return Err(format!("You can't roll initiative for {}", x.name));
+                }
+                let actor = x.actor_id.as_deref().and_then(|a| world.actors.get(a)).cloned();
+                todo.push((x, actor));
+            }
+            let gms: Vec<Id> = world.users.values().filter(|u| u.role == Role::Gm).map(|u| u.id.clone()).collect();
+            (formula, todo, gms)
+        };
+
+        for (x, actor) in todo {
+            let resolve = |path: &str| -> Option<i64> {
+                let a = actor.as_ref()?;
+                lookup_int(&a.derived, path).or_else(|| lookup_int(&a.data, path))
+            };
+            // A formula referencing missing data (e.g. an NPC without the
+            // stat) falls back to a plain d20 rather than failing the batch.
+            let result = hearth_dice::roll_with(&formula, &resolve, &mut rand_rng())
+                .or_else(|_| hearth_dice::roll("1d20"))
+                .map_err(|e| e.to_string())?;
+            let total = result.total;
+            let mut msg = Self::message(user, x.actor_id.clone());
+            msg.flavor = Some(format!("{} rolls initiative", x.name));
+            msg.roll = Some(result);
+            if x.hidden {
+                msg.whisper = gm_ids.clone();
+            }
+            self.post_chat(msg).await;
+
+            let mut world = self.world.write().await;
+            // The combatant may have been removed while we rolled.
+            if Self::combatant_hidden(&world, &x.id).is_some() {
+                let op = Op::CombatantUpdate { id: x.id.clone(), patch: serde_json::json!({ "initiative": total }) };
+                self.commit(&mut world, &user.id, op, 0)?;
+                self.dirty.store(true, Ordering::Release);
+            }
+        }
         Ok(())
     }
 

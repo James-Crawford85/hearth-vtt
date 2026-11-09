@@ -9,6 +9,10 @@ license = "CC0-1.0"
 [server]
 script = "rules.rhai"
 
+[combat]
+# @initiative is the DEX modifier, computed in rules.rhai.
+initiative = "1d20 + @initiative"
+
 [client]
 styles = ["d20.css"]
 scripts = ["d20.js"]

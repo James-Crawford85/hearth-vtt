@@ -106,11 +106,23 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<RunningServer> {
         .route("/api/info", get(http::info))
         .route("/api/upload", post(http::upload).layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
         .route("/packages/{id}/{*path}", get(http::package_file))
-        .nest_service("/assets", ServeDir::new(&assets))
+        // Uploaded files get unique names, so they can be cached for good.
+        .nest_service(
+            "/assets",
+            tower::ServiceBuilder::new()
+                .layer(SetResponseHeaderLayer::overriding(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=31536000, immutable"),
+                ))
+                .service(ServeDir::new(&assets)),
+        )
         .fallback_service(ServeDir::new(&cfg.web_dir))
-        // Client and package files are edited live; make browsers revalidate
-        // on every load (cheap: unchanged files answer 304).
-        .layer(SetResponseHeaderLayer::if_not_present(header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
+        // The web client and packages are always sent fresh. Revalidating by
+        // date isn't safe: different Hearth versions (an installed app, a dev
+        // build, a standalone server) serve the same address and share one
+        // browser cache, and an older file can carry a *newer* date.
+        .layer(SetResponseHeaderLayer::if_not_present(header::CACHE_CONTROL, HeaderValue::from_static("no-store")))
+        .layer(axum::middleware::map_request(strip_conditional_headers))
         .with_state(state.clone());
 
     let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse().context("bad host/port")?;
@@ -134,6 +146,17 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<RunningServer> {
     });
 
     Ok(RunningServer { addr, gm_key, world_name, world_dir: cfg.world_dir, state: server_state, shutdown: Some(tx), task })
+}
+
+/// Drop "has it changed since…?" headers so file requests always get the
+/// current file rather than a 304 that would keep a stale cached copy.
+/// Uploaded assets are unaffected in practice: they're cached as immutable.
+async fn strip_conditional_headers(mut req: axum::extract::Request) -> axum::extract::Request {
+    let h = req.headers_mut();
+    h.remove(header::IF_MODIFIED_SINCE);
+    h.remove(header::IF_NONE_MATCH);
+    h.remove(header::IF_UNMODIFIED_SINCE);
+    req
 }
 
 /// Best guess at this machine's LAN address (no packets are sent).

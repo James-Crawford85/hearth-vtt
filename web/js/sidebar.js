@@ -1,7 +1,7 @@
-// Sidebar: Chat, Actors, Scenes (GM), Settings — plus tabs added by packages.
+// Sidebar: Chat, Actors, Combat, Scenes (GM), Settings — plus tabs added by packages.
 
 import { hooks } from './hooks.js';
-import { store, isGM, systemInfo } from './store.js';
+import { store, isGM, ownsActor, systemInfo, combatOrder } from './store.js';
 import { el, formDialog, openWindow, toast } from './ui.js';
 
 export class Sidebar {
@@ -14,6 +14,7 @@ export class Sidebar {
 
     this.addTab({ id: 'chat', label: 'Chat', render: (p) => this.renderChat(p) });
     this.addTab({ id: 'actors', label: 'Actors', render: (p) => this.renderActors(p) });
+    this.addTab({ id: 'combat', label: 'Combat', render: (p) => this.renderCombat(p) });
     this.addTab({ id: 'scenes', label: 'Scenes', gmOnly: true, render: (p) => this.renderScenes(p) });
     this.addTab({ id: 'settings', label: 'Settings', render: (p) => this.renderSettings(p) });
     this.select('chat');
@@ -61,6 +62,7 @@ export class Sidebar {
       } else this.refresh('chat');
     }
     if (kind === 'actor' || kind === 'item' || kind === 'user') this.refresh('actors');
+    if (kind === 'combat' || kind === 'combatant' || kind === 'token' || kind === 'actor' || kind === 'scene') this.refresh('combat');
     if (kind === 'scene') this.refresh('scenes');
     if (kind === 'user' || kind === 'world') this.refresh('settings');
   }
@@ -167,6 +169,139 @@ export class Sidebar {
     }
     if (!actors.length) children.push(el('p.muted', { text: 'No actors yet.' }));
     panel.replaceChildren(...children, list);
+  }
+
+  // ------------------------------------------------------------ combat
+
+  renderCombat(panel) {
+    const w = store.world;
+    const c = w.combat;
+    const gm = isGM();
+    const api = this.api;
+    const op = (o) => api.op(o);
+
+    if (!c) {
+      panel.replaceChildren(...[
+        el('p.muted', { text: gm ? 'No combat is running.' : 'No combat right now.' }),
+        gm ? el('div.row', {},
+          el('button.primary', {
+            text: 'Start combat',
+            title: 'Create an encounter on the scene you are viewing',
+            on: { click: () => this.startCombat(false) },
+          }),
+          el('button', { text: 'Start with all tokens', on: { click: () => this.startCombat(true) } })) : null,
+        gm ? el('p.hint.muted', { text: 'Select tokens on the board (shift-click for several) and use "Add selected", or start with every token on the scene.' }) : null,
+      ].filter(Boolean));
+      return;
+    }
+
+    const scene = w.scenes[c.scene_id];
+    const order = combatOrder(c);
+    const started = c.round > 0;
+    const owns = (x) => !!x.actor_id && ownsActor(x.actor_id);
+    const current = c.combatants.find((x) => x.id === c.current);
+    const myTurn = started && current && !gm && owns(current);
+
+    const header = el('div.combat-head', {},
+      el('div', {},
+        el('strong', { text: started ? `Round ${c.round}` : 'Not started' }),
+        el('div.muted.small', { text: scene ? scene.name : 'Scene removed' })),
+      started && current ? el('div.combat-now', {}, el('span.muted.small', { text: 'Turn: ' }), el('strong', { text: current.name })) : null);
+
+    const controls = [];
+    if (gm) {
+      controls.push(el('div.row.combat-controls', {},
+        el('button', { text: '+ Selected', title: 'Add the tokens selected on the board (shift-click for several)', on: { click: () => this.addSelected() } }),
+        el('button', {
+          text: '🎲 NPCs', title: 'Roll initiative for combatants no player owns',
+          on: { click: () => this.rollInitiative(order.filter((x) => x.initiative == null && !this.playerOwned(x)).map((x) => x.id)) },
+        }),
+        el('button', {
+          text: '🎲 All', title: 'Roll initiative for everyone who hasn\'t rolled',
+          on: { click: () => this.rollInitiative(order.filter((x) => x.initiative == null).map((x) => x.id)) },
+        })));
+      controls.push(el('div.row.combat-controls', {},
+        started
+          ? [el('button', { text: '◀ Prev', on: { click: () => op({ op: 'combat_prev' }) } }),
+            el('button.primary', { text: 'Next turn ▶', on: { click: () => op({ op: 'combat_next' }) } })]
+          : el('button.primary', { text: 'Begin combat', disabled: !c.combatants.length, on: { click: () => op({ op: 'combat_start' }) } }),
+        el('button.danger', { text: 'End', title: 'End this combat', on: { click: () => { if (confirm('End this combat?')) op({ op: 'combat_end' }); } } })));
+    }
+    if (myTurn) {
+      controls.push(el('div.row', {}, el('button.primary', { text: 'End my turn', on: { click: () => op({ op: 'combat_next' }) } })));
+    }
+
+    const list = el('ol.combat-list');
+    for (const x of order) {
+      const isCurrent = started && x.id === c.current;
+      const canRoll = gm || owns(x);
+      const initCell = x.initiative != null
+        ? (gm
+          ? el('input.init-input', {
+            type: 'number', value: x.initiative, step: 'any', title: 'Initiative (edit to change)',
+            on: { change: (e) => op({ op: 'combatant_update', id: x.id, patch: { initiative: e.target.value === '' ? null : Number(e.target.value) } }) },
+          })
+          : el('span.init', { text: x.initiative }))
+        : canRoll
+          ? el('button.icon.roll-init', { title: 'Roll initiative', text: '🎲', on: { click: (e) => { e.stopPropagation(); this.rollInitiative([x.id]); } } })
+          : el('span.init.muted', { text: '–' });
+      const avatar = x.img ? el('img.avatar', { src: x.img, alt: '' }) : el('span.avatar', { text: (x.name || '?').charAt(0).toUpperCase() });
+      list.append(el(`li.combatant${isCurrent ? '.current' : ''}${x.defeated ? '.defeated' : ''}${x.hidden ? '.hidden-c' : ''}`, {
+        title: 'Click to show this token',
+        on: { click: () => { if (x.token_id && c.scene_id === api.board.sceneId) api.board.focusToken(x.token_id); } },
+      },
+      avatar,
+      el('span.grow', {}, el('span', { text: x.name }),
+        x.hidden ? el('small.muted', { text: ' (hidden)' }) : null,
+        owns(x) && !gm ? el('span.badge', { text: 'yours' }) : null),
+      gm ? el('span.combat-actions', {},
+        el('button.icon', {
+          title: x.defeated ? 'Mark as not defeated' : 'Mark defeated (skipped in turns)', text: x.defeated ? '♥' : '☠',
+          on: { click: (e) => { e.stopPropagation(); op({ op: 'combatant_update', id: x.id, patch: { defeated: !x.defeated } }); } },
+        }),
+        el('button.icon', {
+          title: x.hidden ? 'Reveal to players' : 'Hide from players', text: x.hidden ? '👁' : '🙈',
+          on: { click: (e) => { e.stopPropagation(); op({ op: 'combatant_update', id: x.id, patch: { hidden: !x.hidden } }); } },
+        }),
+        el('button.icon', { title: 'Remove from combat', text: '✕', on: { click: (e) => { e.stopPropagation(); op({ op: 'combatant_remove', id: x.id }); } } })) : null,
+      initCell));
+    }
+
+    panel.replaceChildren(header, ...controls,
+      order.length ? list : el('p.muted', { text: gm ? 'No combatants yet. Select tokens and press "Add selected".' : 'Waiting for the GM to add combatants.' }));
+  }
+
+  /** True when a non-GM user owns the combatant's actor. */
+  playerOwned(x) {
+    const a = x.actor_id && store.world.actors[x.actor_id];
+    return !!a && a.owners.some((id) => store.world.users[id]?.role !== 'gm');
+  }
+
+  startCombat(withAll) {
+    const sceneId = this.api.board.sceneId;
+    const scene = store.world.scenes[sceneId];
+    if (!scene) { toast('Open a scene first.', 'error'); return; }
+    const tokens = withAll ? Object.values(scene.tokens) : [...this.api.board.selected].map((id) => scene.tokens[id]).filter(Boolean);
+    this.api.op({
+      op: 'combat_create',
+      combat: { id: '', scene_id: sceneId, combatants: tokens.map((t) => ({ id: '', token_id: t.id })) },
+    });
+    this.select('combat');
+  }
+
+  addSelected() {
+    const c = store.world.combat;
+    const scene = store.world.scenes[c.scene_id];
+    if (this.api.board.sceneId !== c.scene_id) { toast('Switch to the combat\'s scene to add its tokens.', 'error'); return; }
+    const already = new Set(c.combatants.map((x) => x.token_id));
+    const ids = [...this.api.board.selected].filter((id) => scene?.tokens[id] && !already.has(id));
+    if (!ids.length) { toast('Select tokens on the board first (shift-click for several).'); return; }
+    for (const id of ids) this.api.op({ op: 'combatant_add', combatant: { id: '', token_id: id } });
+  }
+
+  rollInitiative(ids) {
+    if (!ids.length) { toast('Nobody left to roll for.'); return; }
+    this.api.combat.rollInitiative(ids);
   }
 
   // ------------------------------------------------------------ scenes

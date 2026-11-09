@@ -411,6 +411,12 @@ impl<R: Rng> Eval<'_, R> {
                         (floor, '/')
                     }
                 };
+                // Show `x + -1` as `x - 1` (and `x - -1` as `x + 1`).
+                let (sym, sb) = match (sym, sb.strip_prefix('-')) {
+                    ('+', Some(rest)) if y < 0 => ('-', rest.to_string()),
+                    ('-', Some(rest)) if y < 0 => ('+', rest.to_string()),
+                    _ => (sym, sb),
+                };
                 (v.ok_or(DiceError::Overflow)?, format!("{sa} {sym} {sb}"))
             }
             Expr::Dice(spec) => self.roll_dice(spec),
@@ -605,5 +611,22 @@ mod tests {
         assert!(parse("(1").is_err());
         assert!(parse("2 3").is_err());
         assert_eq!(roll("1/0").unwrap_err(), DiceError::DivideByZero);
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn negative_modifiers_read_naturally() {
+        let r = roll_with("1d20 + @m", &|_| Some(-1), &mut StdRng::seed_from_u64(1)).unwrap();
+        assert!(r.rendered.ends_with("] - 1"), "{}", r.rendered);
+        let r = roll_with("10 - @m", &|_| Some(-2), &mut StdRng::seed_from_u64(1)).unwrap();
+        assert_eq!((r.rendered.as_str(), r.total), ("10 + 2", 12));
+        let r = roll_with("3 + 4", &|_| None, &mut StdRng::seed_from_u64(1)).unwrap();
+        assert_eq!(r.rendered, "3 + 4");
     }
 }

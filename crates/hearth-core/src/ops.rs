@@ -43,6 +43,22 @@ pub enum Op {
     UserUpsert { user: User },
     /// Server-only: remove a user (and their actor ownership).
     UserDelete { id: Id },
+
+    /// Begin an encounter (replaces any existing one).
+    CombatCreate { combat: Combat },
+    /// Merge-patch the encounter (`round`, `current`, `flags`).
+    CombatUpdate { patch: Value },
+    CombatEnd,
+    /// Clients may send just `token_id`; the server fills in name, image,
+    /// actor and hidden from the token.
+    CombatantAdd { combatant: Combatant },
+    CombatantUpdate { id: Id, patch: Value },
+    CombatantRemove { id: Id },
+    /// Requests the server turns into a `combat_update` with the new round
+    /// and current combatant, so every client agrees on the turn order.
+    CombatStart,
+    CombatNext,
+    CombatPrev,
 }
 
 #[derive(Debug, Error)]
@@ -82,12 +98,16 @@ fn actor_mut<'a>(w: &'a mut World, id: &str) -> Result<&'a mut Actor, OpError> {
     w.actors.get_mut(id).ok_or_else(|| OpError::NotFound("actor", id.into()))
 }
 
+fn combat_mut(w: &mut World) -> Result<&mut Combat, OpError> {
+    w.combat.as_mut().ok_or_else(|| OpError::NotFound("combat", "current".into()))
+}
+
 impl World {
     /// Apply an op. On error the world is unchanged.
     pub fn apply(&mut self, op: &Op) -> Result<(), OpError> {
         match op {
             Op::WorldUpdate { patch } => {
-                patch_entity(self, patch, &["system", "scenes", "actors", "users", "chat", "active_scene"])?
+                patch_entity(self, patch, &["system", "scenes", "actors", "users", "chat", "active_scene", "combat"])?
             }
 
             Op::SceneCreate { scene } => {
@@ -104,6 +124,9 @@ impl World {
                 self.scenes.remove(id).ok_or_else(|| OpError::NotFound("scene", id.clone()))?;
                 if self.active_scene.as_deref() == Some(id) {
                     self.active_scene = self.scenes.keys().next().cloned();
+                }
+                if self.combat.as_ref().is_some_and(|c| &c.scene_id == id) {
+                    self.combat = None;
                 }
             }
             Op::SceneActivate { id } => {
@@ -130,6 +153,10 @@ impl World {
                     .tokens
                     .remove(id)
                     .ok_or_else(|| OpError::NotFound("token", id.clone()))?;
+                // A deleted token leaves the fight too.
+                if let Some(c) = self.combat.as_mut().filter(|c| &c.scene_id == scene_id) {
+                    c.combatants.retain(|x| x.token_id.as_deref() != Some(id));
+                }
             }
 
             Op::ActorCreate { actor } => {
@@ -141,6 +168,11 @@ impl World {
             Op::ActorUpdate { id, patch } => patch_entity(actor_mut(self, id)?, patch, &["items", "derived"])?,
             Op::ActorDelete { id } => {
                 self.actors.remove(id).ok_or_else(|| OpError::NotFound("actor", id.clone()))?;
+                if let Some(c) = &mut self.combat {
+                    for x in c.combatants.iter_mut().filter(|x| x.actor_id.as_deref() == Some(id)) {
+                        x.actor_id = None;
+                    }
+                }
                 for s in self.scenes.values_mut() {
                     for t in s.tokens.values_mut() {
                         if t.actor_id.as_deref() == Some(id) {
@@ -191,6 +223,45 @@ impl World {
                 for a in self.actors.values_mut() {
                     a.owners.retain(|o| o != id);
                 }
+            }
+
+            Op::CombatCreate { combat } => self.combat = Some(combat.clone()),
+            Op::CombatUpdate { patch } => patch_entity(combat_mut(self)?, patch, &["combatants", "scene_id"])?,
+            Op::CombatEnd => {
+                self.combat.take().ok_or_else(|| OpError::NotFound("combat", "current".into()))?;
+            }
+            Op::CombatantAdd { combatant } => {
+                let c = combat_mut(self)?;
+                if c.combatant(&combatant.id).is_some() {
+                    return Err(OpError::Exists("combatant", combatant.id.clone()));
+                }
+                c.combatants.push(combatant.clone());
+            }
+            Op::CombatantUpdate { id, patch } => {
+                let x = combat_mut(self)?
+                    .combatants
+                    .iter_mut()
+                    .find(|x| &x.id == id)
+                    .ok_or_else(|| OpError::NotFound("combatant", id.clone()))?;
+                patch_entity(x, patch, &["token_id", "actor_id"])?
+            }
+            Op::CombatantRemove { id } => {
+                let c = combat_mut(self)?;
+                let before = c.combatants.len();
+                c.combatants.retain(|x| &x.id != id);
+                if c.combatants.len() == before {
+                    return Err(OpError::NotFound("combatant", id.clone()));
+                }
+            }
+            Op::CombatStart | Op::CombatNext | Op::CombatPrev => {
+                let c = combat_mut(self)?;
+                let (round, current) = match op {
+                    Op::CombatStart => c.start_turn(),
+                    Op::CombatNext => c.next_turn(),
+                    _ => c.prev_turn(),
+                };
+                c.round = round;
+                c.current = current;
             }
         }
         Ok(())
@@ -261,5 +332,97 @@ mod tests {
         assert_eq!(a.data, json!({"hp": {"value": 7, "max": 10}}));
         assert_eq!(a.derived, json!({"x": 1}));
         assert!(a.items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod combat_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn cb(id: &str, name: &str, init: Option<f64>) -> Combatant {
+        Combatant {
+            id: id.into(),
+            token_id: None,
+            actor_id: None,
+            name: name.into(),
+            img: None,
+            initiative: init,
+            hidden: false,
+            defeated: false,
+        }
+    }
+
+    fn world_with_combat() -> World {
+        let mut w = World::new("T", "freeform");
+        let scene_id = w.active_scene.clone().unwrap();
+        w.apply(&Op::CombatCreate {
+            combat: Combat {
+                id: "c".into(),
+                scene_id,
+                round: 0,
+                current: None,
+                combatants: vec![cb("a", "Ann", Some(12.0)), cb("b", "Bo", Some(18.0)), cb("c", "Cy", None), cb("d", "Di", Some(12.0))],
+                flags: Value::Null,
+            },
+        })
+        .unwrap();
+        w
+    }
+
+    fn turn(w: &World) -> (u32, Option<String>) {
+        let c = w.combat.as_ref().unwrap();
+        (c.round, c.current.clone())
+    }
+
+    #[test]
+    fn order_by_initiative_then_name_unrolled_last() {
+        let w = world_with_combat();
+        let names: Vec<_> = w.combat.as_ref().unwrap().order().iter().map(|c| c.name.clone()).collect();
+        assert_eq!(names, ["Bo", "Ann", "Di", "Cy"]);
+    }
+
+    #[test]
+    fn turns_rounds_and_defeated() {
+        let mut w = world_with_combat();
+        w.apply(&Op::CombatStart).unwrap();
+        assert_eq!(turn(&w), (1, Some("b".into())));
+        w.apply(&Op::CombatNext).unwrap();
+        assert_eq!(turn(&w), (1, Some("a".into())));
+        // Di is defeated: skipped.
+        w.apply(&Op::CombatantUpdate { id: "d".into(), patch: json!({"defeated": true}) }).unwrap();
+        w.apply(&Op::CombatNext).unwrap();
+        assert_eq!(turn(&w), (1, Some("c".into())));
+        w.apply(&Op::CombatNext).unwrap();
+        assert_eq!(turn(&w), (2, Some("b".into())), "wraps to a new round");
+        w.apply(&Op::CombatPrev).unwrap();
+        assert_eq!(turn(&w), (1, Some("c".into())), "back into the previous round");
+    }
+
+    #[test]
+    fn removed_current_still_advances() {
+        let mut w = world_with_combat();
+        w.apply(&Op::CombatStart).unwrap();
+        w.apply(&Op::CombatNext).unwrap(); // Ann
+        let next = w.combat.as_ref().unwrap().next_turn();
+        assert_eq!(next, (1, Some("d".into())));
+        w.apply(&Op::CombatantRemove { id: "a".into() }).unwrap();
+        // current now points at a missing combatant; next_turn restarts sensibly.
+        assert_eq!(w.combat.as_ref().unwrap().next_turn().1, Some("b".into()));
+    }
+
+    #[test]
+    fn deleting_token_or_scene_cleans_up() {
+        let mut w = world_with_combat();
+        let sid = w.active_scene.clone().unwrap();
+        w.combat.as_mut().unwrap().combatants[0].token_id = Some("t1".into());
+        w.scenes.get_mut(&sid).unwrap().tokens.insert(
+            "t1".into(),
+            serde_json::from_value(json!({"id": "t1", "name": "Ann", "x": 0, "y": 0})).unwrap(),
+        );
+        w.apply(&Op::TokenDelete { scene_id: sid.clone(), id: "t1".into() }).unwrap();
+        assert!(w.combat.as_ref().unwrap().combatant("a").is_none());
+        w.apply(&Op::SceneDelete { id: sid }).unwrap();
+        assert!(w.combat.is_none());
     }
 }

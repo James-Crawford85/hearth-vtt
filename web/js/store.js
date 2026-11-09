@@ -57,6 +57,7 @@ export function applyOp(op) {
     case 'scene_delete':
       delete w.scenes[op.id];
       if (w.active_scene === op.id) w.active_scene = Object.keys(w.scenes)[0] ?? null;
+      if (w.combat?.scene_id === op.id) w.combat = null;
       break;
     case 'scene_activate': w.active_scene = op.id; break;
     case 'token_create': if (scene(op.scene_id)) scene(op.scene_id).tokens[op.token.id] = op.token; break;
@@ -65,11 +66,15 @@ export function applyOp(op) {
       if (t) patchEntity(t, op.patch);
       break;
     }
-    case 'token_delete': if (scene(op.scene_id)) delete scene(op.scene_id).tokens[op.id]; break;
+    case 'token_delete':
+      if (scene(op.scene_id)) delete scene(op.scene_id).tokens[op.id];
+      if (w.combat?.scene_id === op.scene_id) w.combat.combatants = w.combat.combatants.filter((x) => x.token_id !== op.id);
+      break;
     case 'actor_create': w.actors[op.actor.id] = op.actor; break;
     case 'actor_update': if (actor(op.id)) patchEntity(actor(op.id), op.patch, ['items', 'derived']); break;
     case 'actor_delete':
       delete w.actors[op.id];
+      for (const x of w.combat?.combatants ?? []) if (x.actor_id === op.id) x.actor_id = null;
       for (const s of Object.values(w.scenes)) for (const t of Object.values(s.tokens)) if (t.actor_id === op.id) t.actor_id = null;
       break;
     case 'actor_derive': if (actor(op.id)) actor(op.id).derived = op.derived; break;
@@ -95,6 +100,16 @@ export function applyOp(op) {
       delete w.users[op.id];
       for (const a of Object.values(w.actors)) a.owners = a.owners.filter((o) => o !== op.id);
       break;
+    case 'combat_create': w.combat = op.combat; break;
+    case 'combat_update': if (w.combat) patchEntity(w.combat, op.patch, ['combatants', 'scene_id']); break;
+    case 'combat_end': w.combat = null; break;
+    case 'combatant_add': if (w.combat && !w.combat.combatants.some((x) => x.id === op.combatant.id)) w.combat.combatants.push(op.combatant); break;
+    case 'combatant_update': {
+      const x = w.combat?.combatants.find((c) => c.id === op.id);
+      if (x) patchEntity(x, op.patch, ['token_id', 'actor_id']);
+      break;
+    }
+    case 'combatant_remove': if (w.combat) w.combat.combatants = w.combat.combatants.filter((x) => x.id !== op.id); break;
     default: console.warn('[hearth] unknown op', op);
   }
 }
@@ -105,6 +120,16 @@ export function ownsActor(actorId) {
   if (isGM()) return true;
   const a = store.world?.actors[actorId];
   return !!a && a.owners.includes(store.user.id);
+}
+
+/** Turn order, matching the server: initiative high→low, unrolled last, then name, then id. */
+export function combatOrder(combat) {
+  if (!combat) return [];
+  const init = (x) => (x.initiative == null ? -Infinity : x.initiative);
+  const cmp = (p, q) => (p < q ? -1 : p > q ? 1 : 0); // plain code-point order, like Rust's String::cmp
+  return [...combat.combatants].sort((a, b) => cmp(init(b), init(a))
+    || cmp(a.name.toLowerCase(), b.name.toLowerCase())
+    || cmp(a.id, b.id));
 }
 
 export function systemInfo() {

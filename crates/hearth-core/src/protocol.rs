@@ -71,6 +71,8 @@ pub enum ClientMsg {
     Admin(UserAdmin),
     /// End this session; the token stops working.
     Logout,
+    /// Roll initiative for these combatants (GM: any; players: their own).
+    RollInitiative { ids: Vec<Id> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

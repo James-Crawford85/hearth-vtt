@@ -62,6 +62,21 @@ hearth.hooks.once(name, fn); hearth.hooks.off(name, fn)
 | `board:drawToken` | ctx, token, actor, rect, board | after a token is drawn |
 | `board:drawOverlay` | ctx, scene, board | above tokens |
 | `board:tokenMove` | token, {x, y} | return `false` to block a move |
+| `combat:turn` | combat, combatant | the active combatant changed (combatant is `null` if hidden from you) |
+
+## Combat
+
+```js
+hearth.combat.current            // the encounter: { scene_id, round, current, combatants: [...] } or null
+hearth.combat.rollInitiative([combatantId, …])   // GM: anyone; players: their own
+hearth.combat.next(); hearth.combat.prev()       // players may call next() on their own turn
+hearth.op({ op: 'combat_create', combat: { id: '', scene_id, combatants: [{ id: '', token_id }] } })
+hearth.op({ op: 'combatant_add', combatant: { id: '', token_id } })   // name/actor filled from the token
+hearth.op({ op: 'combatant_update', id, patch: { defeated: true } })
+hearth.op({ op: 'combat_start' }); hearth.op({ op: 'combat_end' })
+```
+
+Turn order is initiative high→low, then name. The server works out turns and rounds, so every client agrees.
 
 ## Messaging between clients
 

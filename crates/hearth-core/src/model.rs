@@ -61,6 +61,9 @@ pub struct World {
     pub users: BTreeMap<Id, User>,
     #[serde(default)]
     pub chat: Vec<ChatMessage>,
+    /// The running encounter, if any.
+    #[serde(default)]
+    pub combat: Option<Combat>,
     /// Free-form world settings, namespaced by package id.
     #[serde(default)]
     pub settings: Value,
@@ -254,6 +257,106 @@ pub struct ChatMessage {
     pub flags: Value,
 }
 
+/// One encounter. Turn order is derived from initiative (see [`Combat::order`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Combat {
+    pub id: Id,
+    pub scene_id: Id,
+    /// 0 until the GM starts the combat.
+    #[serde(default)]
+    pub round: u32,
+    /// Combatant whose turn it is.
+    #[serde(default)]
+    pub current: Option<Id>,
+    #[serde(default)]
+    pub combatants: Vec<Combatant>,
+    #[serde(default)]
+    pub flags: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Combatant {
+    pub id: Id,
+    #[serde(default)]
+    pub token_id: Option<Id>,
+    #[serde(default)]
+    pub actor_id: Option<Id>,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub img: Option<String>,
+    #[serde(default)]
+    pub initiative: Option<f64>,
+    /// Hidden from players (e.g. an ambush).
+    #[serde(default)]
+    pub hidden: bool,
+    /// Skipped in the turn order.
+    #[serde(default)]
+    pub defeated: bool,
+}
+
+impl Combat {
+    /// Turn order: highest initiative first; unrolled last; ties by name, then id.
+    pub fn order(&self) -> Vec<&Combatant> {
+        let mut v: Vec<&Combatant> = self.combatants.iter().collect();
+        v.sort_by(|a, b| {
+            let ia = a.initiative.unwrap_or(f64::NEG_INFINITY);
+            let ib = b.initiative.unwrap_or(f64::NEG_INFINITY);
+            ib.partial_cmp(&ia)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        v
+    }
+
+    fn active_ids(&self) -> Vec<Id> {
+        self.order().into_iter().filter(|c| !c.defeated).map(|c| c.id.clone()).collect()
+    }
+
+    /// (round, current) for beginning the combat.
+    pub fn start_turn(&self) -> (u32, Option<Id>) {
+        (1, self.active_ids().into_iter().next())
+    }
+
+    /// (round, current) after the current combatant's turn ends.
+    pub fn next_turn(&self) -> (u32, Option<Id>) {
+        let ids = self.active_ids();
+        if ids.is_empty() {
+            return (self.round.max(1), None);
+        }
+        // Position of the current combatant in the full order, so a defeated
+        // or removed current still advances to whoever comes after it.
+        let order = self.order();
+        let pos = self.current.as_ref().and_then(|cur| order.iter().position(|c| &c.id == cur));
+        let Some(pos) = pos else { return (self.round.max(1), Some(ids[0].clone())) };
+        match order.iter().skip(pos + 1).find(|c| !c.defeated) {
+            Some(c) => (self.round.max(1), Some(c.id.clone())),
+            None => (self.round.max(1) + 1, Some(ids[0].clone())),
+        }
+    }
+
+    /// (round, current) going back one turn.
+    pub fn prev_turn(&self) -> (u32, Option<Id>) {
+        let ids = self.active_ids();
+        if ids.is_empty() {
+            return (self.round.max(1), None);
+        }
+        let order = self.order();
+        let pos = self.current.as_ref().and_then(|cur| order.iter().position(|c| &c.id == cur));
+        let Some(pos) = pos else { return (self.round.max(1), Some(ids[0].clone())) };
+        match order.iter().take(pos).rev().find(|c| !c.defeated) {
+            Some(c) => (self.round.max(1), Some(c.id.clone())),
+            None if self.round > 1 => (self.round - 1, ids.last().cloned()),
+            None => (1, Some(ids[0].clone())),
+        }
+    }
+
+    pub fn combatant(&self, id: &str) -> Option<&Combatant> {
+        self.combatants.iter().find(|c| c.id == id)
+    }
+}
+
 impl ChatMessage {
     pub fn visible_to(&self, user: &User) -> bool {
         user.role == Role::Gm || self.whisper.is_empty() || self.whisper.contains(&user.id) || self.author == user.id
@@ -277,6 +380,7 @@ impl World {
             actors: BTreeMap::new(),
             users: BTreeMap::new(),
             chat: vec![],
+            combat: None,
             settings: Value::Object(Default::default()),
         }
     }
@@ -297,6 +401,9 @@ impl World {
             scene.tokens.retain(|_, t| !t.hidden);
         }
         w.chat.retain(|m| m.visible_to(user));
+        if let Some(c) = &mut w.combat {
+            c.combatants.retain(|x| !x.hidden);
+        }
         w
     }
 }

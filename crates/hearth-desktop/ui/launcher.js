@@ -574,7 +574,15 @@ $('check-update-btn').addEventListener('click', () => checkUpdate());
     $('path-worlds').textContent = state.info.worlds_dir;
     $('path-packages').textContent = state.info.packages_dir;
     $('path-backups').textContent = state.info.backups_dir;
-    $('version-line').textContent = `Hearth ${state.info.version}`;
+    $('version-line').textContent = `Hearth ${state.info.version}${state.info.dev_build ? ' (development build)' : ''}`;
+    if (state.info.dev_build) {
+      // Make it obvious which Hearth is open when an installed copy exists too.
+      document.querySelector('.top-actions').prepend(h('span', {
+        class: 'dev-badge', text: 'DEV BUILD',
+        title: `Running from source. Game client: ${state.info.web_dir}`,
+      }));
+      document.title = 'Hearth (dev)';
+    }
     await refreshPackages();
     await refreshWorlds();
     if (state.settings.check_updates && state.info.updates_configured) checkUpdate({ quiet: true });

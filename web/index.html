@@ -19,15 +19,23 @@
       <div class="join-col">
         <form id="join-form" class="join-card" autocomplete="on">
           <h2 class="join-title">Join Game Session</h2>
-          <label>Player
-            <select name="user" required autocomplete="username"></select>
-          </label>
-          <label>Password
-            <input name="password" type="password" autocomplete="current-password">
-          </label>
-          <button type="submit" class="primary">Join game session</button>
+          <div class="player-login">
+            <label>Player
+              <select name="user" autocomplete="username"></select>
+            </label>
+            <label>Password
+              <input name="password" type="password" autocomplete="current-password">
+            </label>
+            <button type="submit" class="primary">Join game session</button>
+          </div>
           <p id="join-error" class="error" role="alert"></p>
-          <p id="join-empty" class="muted small" hidden>No players have been set up for this world yet. Ask your GM to add you.</p>
+          <div id="join-empty" class="join-empty" hidden>
+            <p><strong>This world has no players yet.</strong></p>
+            <p class="muted small">Game master: join with the GM key below, then add your players under <em>Settings → Players</em>.
+              The key is printed in the server's window when it starts (and saved as <code>gm.key</code> in the world folder);
+              in the desktop app, press <em>Show</em> next to "GM key" on the launcher.</p>
+            <p class="muted small">Player: ask your GM to add you.</p>
+          </div>
           <details class="gm-key">
             <summary>Game master? Join with the GM key</summary>
             <label>Your name <input name="gm_name" maxlength="40" autocomplete="nickname"></label>

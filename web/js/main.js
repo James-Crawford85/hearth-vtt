@@ -72,7 +72,15 @@ async function loadInfo() {
   );
   select.value = byName?.id ?? (info.users.some((u) => u.id === chosen) ? chosen : '');
   if (byName) preferredName = null;
-  document.getElementById('join-empty').hidden = info.users.length > 0;
+  // A brand-new world has nobody to pick yet: lead the GM to the key login.
+  const empty = info.users.length === 0;
+  document.getElementById('join-empty').hidden = !empty;
+  form.querySelector('.player-login').hidden = empty;
+  const gmBox = form.querySelector('details.gm-key');
+  if (empty && !gmBox.open) {
+    gmBox.open = true;
+    if (!form.elements.gm_name.value) form.elements.gm_name.focus();
+  }
 }
 
 function showJoin(message = '') {
@@ -191,6 +199,27 @@ function applyTheme() {
   document.body.dataset.theme = store.world.theme ?? 'default';
 }
 
+/** Tell people when combat starts, ends, and when it's their turn. */
+function announceCombat(op, before) {
+  const c = store.world.combat;
+  if (op.op === 'combat_create') {
+    toast('Combat! Roll initiative.');
+    api.sidebar.select('combat');
+  } else if (op.op === 'combat_end') {
+    toast('The combat is over.');
+  } else if (op.op === 'combat_update' && c && c.round > 0) {
+    if (!before || before.round === 0) toast(`Round ${c.round} — the fight begins!`);
+    else if (c.round > before.round) toast(`Round ${c.round}`);
+    if (c.current !== before?.current) {
+      const x = c.combatants.find((m) => m.id === c.current);
+      hooks.emit('combat:turn', c, x ?? null);
+      if (x && !isGM() && x.actor_id && store.world.actors[x.actor_id]?.owners.includes(store.user.id)) {
+        toast(`It's your turn: ${x.name}`);
+      }
+    }
+  }
+}
+
 function reloadSoon(reason) {
   toast(reason);
   // The session token in sessionStorage logs us straight back in.
@@ -225,8 +254,10 @@ function handle(msg) {
       break;
     case 'applied': {
       const op = msg.op;
+      const before = store.world.combat ? { round: store.world.combat.round, current: store.world.combat.current } : null;
       applyOp(op);
       api._applied();
+      announceCombat(op, before);
       if (op.op === 'world_update' && ('modules' in op.patch || 'theme' in op.patch)) {
         return reloadSoon('World packages changed — reloading');
       }

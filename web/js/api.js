@@ -99,6 +99,14 @@ export function createApi(conn) {
 
     util: { mergePatch, getPath },
 
+    /** Combat helpers. The encounter itself is `hearth.world.combat`. */
+    combat: {
+      get current() { return store.world?.combat ?? null; },
+      rollInitiative: (ids) => conn.send({ type: 'roll_initiative', ids }),
+      next: () => op({ op: 'combat_next' }),
+      prev: () => op({ op: 'combat_prev' }),
+    },
+
     /** GM-only account management. Results arrive as a toast (notice) or error. */
     admin: {
       createUser: (name, role = 'player', password = '') => conn.send({ type: 'admin', action: 'create', name, role, password }),

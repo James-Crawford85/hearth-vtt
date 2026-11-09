@@ -101,15 +101,20 @@ fn home_button_script(launcher: &str) -> String {
 }
 
 /// Bundled web client and packages: next to the executable in an installed
-/// build, or straight from the source tree when running with `cargo run`.
+/// build, or straight from the source tree in a debug build (`cargo run`), so
+/// edits to web/ and packages/ show up without rebuilding.
 fn resource(app: &tauri::App, name: &str) -> PathBuf {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(name);
+    if cfg!(debug_assertions) && source.is_dir() {
+        return source;
+    }
     if let Ok(dir) = app.path().resource_dir() {
         let p = dir.join(name);
         if p.is_dir() {
             return p;
         }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(name)
+    source
 }
 
 fn main() {
@@ -146,10 +151,13 @@ fn main() {
             // Same origin the app serves `ui/` from on each platform.
             let launcher = if cfg!(windows) { "http://tauri.localhost/" } else { "tauri://localhost/" };
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("Hearth")
+                .title(if cfg!(debug_assertions) { "Hearth (development build)" } else { "Hearth" })
                 .inner_size(1360.0, 860.0)
                 .min_inner_size(960.0, 640.0)
                 .initialization_script(&home_button_script(launcher))
+                // Tauri's own file-drop handler swallows HTML5 drag-and-drop
+                // on Windows; the game needs it (actors → board).
+                .disable_drag_drop_handler()
                 .build()?;
             Ok(())
         })

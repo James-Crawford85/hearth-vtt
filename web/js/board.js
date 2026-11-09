@@ -35,7 +35,9 @@ export class Board {
     this.bind();
     new ResizeObserver(() => this.resize()).observe(canvas);
     this.resize();
-    const loop = () => { if (this.dirty || this.pings.length) this.draw(); requestAnimationFrame(loop); };
+    // Redraw when something changed, or every frame while something animates
+    // (pings, the active-turn glow).
+    const loop = () => { if (this.dirty || this.pings.length || this.animating) this.draw(); requestAnimationFrame(loop); };
     requestAnimationFrame(loop);
   }
 
@@ -118,6 +120,7 @@ export class Board {
 
   draw() {
     this.dirty = false;
+    this.animating = false; // set again by anything that wants the next frame
     const { ctx, canvas } = this;
     const dpr = devicePixelRatio || 1;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -159,6 +162,20 @@ export class Board {
     const r = { ...this.tokenRect(t), x: pos.x, y: pos.y };
     const actor = t.actor_id ? store.world.actors[t.actor_id] : null;
     const cx = r.x + r.w / 2, cy = r.y + r.h / 2, rad = Math.min(r.w, r.h) / 2 - 2;
+    if (this.isActiveCombatant(t)) {
+      // Pulsing glow under the token whose turn it is.
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 350);
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, rad + 6 + pulse * 4, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255, 190, 80, ${0.55 + pulse * 0.4})`;
+      ctx.lineWidth = 5;
+      ctx.shadowColor = '#ffb347';
+      ctx.shadowBlur = 18;
+      ctx.stroke();
+      ctx.restore();
+      this.animating = true;
+    }
     ctx.save();
     if (t.hidden) ctx.globalAlpha = 0.45;
     ctx.translate(cx, cy);
@@ -371,6 +388,27 @@ export class Board {
         hidden: e.altKey,
       });
     });
+  }
+
+  /** Is it this token's turn in the running combat? */
+  isActiveCombatant(t) {
+    const c = store.world?.combat;
+    if (!c || c.round < 1 || c.scene_id !== this.sceneId || !c.current) return false;
+    return c.combatants.some((x) => x.id === c.current && x.token_id === t.id);
+  }
+
+  /** Centre the view on a token and select it. */
+  focusToken(id) {
+    const t = this.scene?.tokens[id];
+    if (!t) return;
+    const r = this.tokenRect(t);
+    const view = this.canvas.getBoundingClientRect();
+    const usableW = view.width - 360; // the sidebar covers the right edge
+    this.cam.x = r.x + r.w / 2 - (usableW / 2) / this.cam.z;
+    this.cam.y = r.y + r.h / 2 - (view.height / 2) / this.cam.z;
+    this.selected.clear();
+    this.selected.add(id);
+    this.invalidate();
   }
 
   snapCenter(v) {

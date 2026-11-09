@@ -114,6 +114,7 @@ async fn run<S, R>(
                     ClientMsg::Roll { formula, flavor, actor_id, gm_only } => {
                         (None, state.roll(user, &formula, flavor, actor_id, gm_only).await)
                     }
+                    ClientMsg::RollInitiative { ids } => (None, state.roll_initiative(user, ids).await),
                     ClientMsg::Emit { channel, payload, to } => {
                         state.emit(user, channel, payload, to);
                         (None, Ok(()))

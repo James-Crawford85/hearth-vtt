@@ -41,6 +41,10 @@ pub struct AppInfo {
     packages_dir: String,
     backups_dir: String,
     updates_configured: bool,
+    /// A development build (`cargo run`), not an installed release.
+    dev_build: bool,
+    /// Where the game's web client is served from.
+    web_dir: String,
 }
 
 #[tauri::command]
@@ -51,6 +55,8 @@ pub fn app_info(state: State<'_, Desktop>) -> AppInfo {
         packages_dir: state.user_packages.display().to_string(),
         backups_dir: state.backups_dir.display().to_string(),
         updates_configured: UPDATE_REPO.is_some(),
+        dev_build: cfg!(debug_assertions),
+        web_dir: state.web_dir.display().to_string(),
     }
 }
 
@@ -286,6 +292,16 @@ pub fn host_info(h: &Hosted, lan: bool) -> HostInfo {
     }
 }
 
+const PORT_TRIES: u16 = 20;
+
+/// The preferred port if it's free, else the next free one after it. Another
+/// Hearth (a second app window or a standalone server) may hold the default.
+fn free_port(host: &str, preferred: u16) -> Option<u16> {
+    (0..PORT_TRIES)
+        .filter_map(|i| preferred.checked_add(i))
+        .find(|p| std::net::TcpListener::bind((host, *p)).is_ok())
+}
+
 /// Drop automatic backups beyond the configured number.
 fn prune_auto(dir: &std::path::Path, keep: usize) {
     for b in backups::list(dir).into_iter().filter(|b| b.label == "auto").skip(keep) {
@@ -317,12 +333,23 @@ pub async fn host_world(state: State<'_, Desktop>, id: String) -> R<HostInfo> {
             Err(e) => tracing::warn!("automatic backup failed: {e:#}"),
         }
     }
+    let host = if settings.allow_network { "0.0.0.0" } else { "127.0.0.1" };
+    let port = free_port(host, settings.port).ok_or_else(|| {
+        format!(
+            "Ports {}–{} are all in use. Close other Hearth windows or servers, or pick another port in Settings.",
+            settings.port,
+            settings.port.saturating_add(PORT_TRIES - 1)
+        )
+    })?;
+    if port != settings.port {
+        tracing::warn!(wanted = settings.port, using = port, "hosting port was busy; using the next free one");
+    }
     let server = hearth_server::start(ServerConfig {
         world_dir,
         package_dirs: state.package_dirs(),
         web_dir: state.web_dir.clone(),
-        host: if settings.allow_network { "0.0.0.0".into() } else { "127.0.0.1".into() },
-        port: settings.port,
+        host: host.into(),
+        port,
         new_world_system: String::new(),
         new_world_name: None,
     })
@@ -637,5 +664,20 @@ mod tests {
         assert!(newer("1.0.0", "0.9.9"));
         assert!(!newer("v0.1.0", "0.1.0"));
         assert!(!newer("0.1.0-beta", "0.1.0"));
+    }
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    #[test]
+    fn skips_a_busy_port() {
+        // Hold a port, then ask for it: we should get a different, free one.
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let busy = held.local_addr().unwrap().port();
+        let got = free_port("127.0.0.1", busy).unwrap();
+        assert_ne!(got, busy);
+        assert!(got > busy && got < busy + PORT_TRIES);
     }
 }
