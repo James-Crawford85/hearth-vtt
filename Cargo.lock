@@ -1732,7 +1732,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hearth-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "hearth-dice",
  "serde",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "hearth-desktop"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "hearth-server",
@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "hearth-dice"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "rand 0.8.8",
  "serde",
@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "hearth-packages"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "hearth-core",
  "hearth-dice",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "hearth-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "argon2",
