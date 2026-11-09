@@ -40,6 +40,9 @@ pub struct World {
     /// Shown on the launcher and join screen.
     #[serde(default)]
     pub description: String,
+    /// When the group next plays, as set by the GM (ISO `YYYY-MM-DDTHH:MM`, local time).
+    #[serde(default)]
+    pub next_session: Option<String>,
     /// Package id of the game system (e.g. `d20-lite`).
     pub system: String,
     /// Enabled module package ids, in load order.
@@ -265,6 +268,7 @@ impl World {
             id: crate::new_id(),
             name: name.into(),
             description: String::new(),
+            next_session: None,
             system: system.into(),
             modules: vec![],
             theme: None,

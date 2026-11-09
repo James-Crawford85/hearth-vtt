@@ -5,7 +5,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use futures::{SinkExt, StreamExt};
-use hearth_core::{ClientMsg, ServerMsg, User};
+use hearth_core::{ClientMsg, Op, ServerMsg, User};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::state::AppState;
@@ -27,9 +27,9 @@ async fn connection(socket: WebSocket, state: Arc<AppState>) {
 
     // ---- handshake: the first message must be `join`
     let first = tokio::time::timeout(Duration::from_secs(30), stream.next()).await;
-    let (name, key) = match first {
+    let req = match first {
         Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str::<ClientMsg>(t.as_str()) {
-            Ok(ClientMsg::Join { name, key }) => (name, key),
+            Ok(ClientMsg::Join(req)) => req,
             _ => {
                 let _ = send(&mut sink, &ServerMsg::Error { message: "expected join".into() }).await;
                 return;
@@ -37,13 +37,14 @@ async fn connection(socket: WebSocket, state: Arc<AppState>) {
         },
         _ => return,
     };
-    let user = match state.join(&name, key.as_deref()).await {
-        Ok(u) => u,
+    let joined = match state.join(req).await {
+        Ok(j) => j,
         Err(message) => {
             let _ = send(&mut sink, &ServerMsg::Error { message }).await;
             return;
         }
     };
+    let mut user = joined.user;
 
     // Subscribe while holding the world lock so no event slips between the
     // snapshot and the subscription (all writers broadcast under the lock).
@@ -57,13 +58,15 @@ async fn connection(socket: WebSocket, state: Arc<AppState>) {
             world: world.view_for(&user),
             packages: state.packages_for(&world),
             online: state.online_ids(),
+            session: joined.session.clone(),
+            must_change_password: joined.must_change_password,
         };
         (welcome, rx)
     };
     tracing::info!(user = %user.name, role = ?user.role, "joined");
     if send(&mut sink, &welcome).await {
         state.broadcast_presence();
-        run(&state, &user, &mut sink, &mut stream, &mut rx).await;
+        run(&state, &mut user, &joined.session, &mut sink, &mut stream, &mut rx).await;
     }
 
     state.online.lock().unwrap().remove(&conn);
@@ -73,7 +76,8 @@ async fn connection(socket: WebSocket, state: Arc<AppState>) {
 
 async fn run<S, R>(
     state: &AppState,
-    user: &User,
+    user: &mut User,
+    session: &str,
     sink: &mut S,
     stream: &mut R,
     rx: &mut tokio::sync::broadcast::Receiver<Arc<crate::state::Event>>,
@@ -98,8 +102,13 @@ async fn run<S, R>(
                         continue;
                     }
                 };
+                let user: &User = user;
                 let (req, result) = match msg {
-                    ClientMsg::Join { .. } => (None, Err("already joined".to_string())),
+                    ClientMsg::Join(_) => (None, Err("already joined".to_string())),
+                    ClientMsg::Logout => {
+                        state.end_session(session);
+                        return;
+                    }
                     ClientMsg::Op { op, req } => (req, state.submit(user, op).await),
                     ClientMsg::Chat { content, speaker_actor } => (None, state.chat(user, &content, speaker_actor).await),
                     ClientMsg::Roll { formula, flavor, actor_id, gm_only } => {
@@ -109,6 +118,24 @@ async fn run<S, R>(
                         state.emit(user, channel, payload, to);
                         (None, Ok(()))
                     }
+                    ClientMsg::SetPassword { current, new } => match state.set_password(user, current, new).await {
+                        Ok(()) => {
+                            if !send(sink, &ServerMsg::PasswordChanged).await {
+                                return;
+                            }
+                            (None, Ok(()))
+                        }
+                        Err(e) => (None, Err(e)),
+                    },
+                    ClientMsg::Admin(action) => match state.admin(user, action).await {
+                        Ok(message) => {
+                            if !send(sink, &ServerMsg::Notice { message }).await {
+                                return;
+                            }
+                            (None, Ok(()))
+                        }
+                        Err(e) => (None, Err(e)),
+                    },
                 };
                 if let Err(reason) = result {
                     if !send(sink, &ServerMsg::Rejected { req, reason }).await {
@@ -119,6 +146,18 @@ async fn run<S, R>(
             event = rx.recv() => {
                 match event {
                     Ok(ev) => {
+                        // Keep this connection's view of its own account current
+                        // (role changes take effect at once; removal disconnects).
+                        if let ServerMsg::Applied { op, .. } = &ev.msg {
+                            match op {
+                                Op::UserUpsert { user: u } if u.id == user.id => *user = u.clone(),
+                                Op::UserDelete { id } if *id == user.id => {
+                                    let _ = send(sink, &ServerMsg::Error { message: "Your account was removed by the GM.".into() }).await;
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
                         if ev.wants(user) && !send(sink, &ev.msg).await {
                             return;
                         }

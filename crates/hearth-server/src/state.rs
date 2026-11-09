@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hearth_core::patch::merge_patch;
+use hearth_core::protocol::UserAdmin;
 use hearth_core::{new_id, Actor, ChatMessage, Id, Op, Role, ServerMsg, User, World};
+
+use crate::credentials::{self, Credentials};
 use hearth_packages::{Registry, ScriptHost};
 use serde_json::Value;
 use tokio::sync::{broadcast, RwLock};
@@ -52,8 +55,18 @@ pub struct AppState {
     pub online: Mutex<HashMap<u64, Id>>,
     pub dirty: AtomicBool,
     pub world_dir: PathBuf,
+    pub credentials: Mutex<Credentials>,
+    /// session token -> user id. In memory only: a server restart logs everyone out.
+    sessions: Mutex<HashMap<String, Id>>,
     gm_key: String,
     next_conn: AtomicU64,
+}
+
+/// Result of a successful join.
+pub struct Joined {
+    pub user: User,
+    pub session: String,
+    pub must_change_password: bool,
 }
 
 const USER_COLORS: &[&str] = &["#e0a040", "#5b8def", "#e05f5f", "#57c785", "#b07ce8", "#e87cc2", "#4cc9d6", "#c9d64c"];
@@ -104,6 +117,8 @@ impl AppState {
             tx,
             online: Mutex::new(HashMap::new()),
             dirty: AtomicBool::new(true),
+            credentials: Mutex::new(Credentials::load(&world_dir)),
+            sessions: Mutex::new(HashMap::new()),
             world_dir,
             gm_key,
             next_conn: AtomicU64::new(1),
@@ -137,38 +152,197 @@ impl AppState {
         self.registry.client_index(&world.system, &world.modules, world.theme.as_deref())
     }
 
-    /// Find or create the user for a join request.
-    pub async fn join(&self, name: &str, key: Option<&str>) -> Result<User, String> {
-        let name = name.trim();
-        if name.is_empty() || name.chars().count() > 40 {
-            return Err("name must be 1-40 characters".into());
-        }
-        let is_gm = key.is_some_and(|k| self.check_gm_key(k));
-        if key.is_some_and(|k| !k.is_empty()) && !is_gm {
-            return Err("wrong GM key".into());
-        }
-        let role = if is_gm { Role::Gm } else { Role::Player };
+    fn new_session(&self, user_id: &str) -> String {
+        let token = format!("{}{}{}", new_id(), new_id(), new_id());
+        self.sessions.lock().unwrap().insert(token.clone(), user_id.to_string());
+        token
+    }
 
-        let mut world = self.world.write().await;
-        let existing = world.users.values().find(|u| u.name.eq_ignore_ascii_case(name)).cloned();
-        let user = match existing {
-            Some(u) if u.role == Role::Gm && !is_gm => return Err("that name belongs to a GM".into()),
-            Some(mut u) => {
-                u.role = role;
-                u
+    fn end_sessions_of(&self, user_id: &str) {
+        self.sessions.lock().unwrap().retain(|_, id| id != user_id);
+    }
+
+    pub fn end_session(&self, token: &str) {
+        self.sessions.lock().unwrap().remove(token);
+    }
+
+    /// The user a session token belongs to, if it's still valid.
+    pub async fn session_user(&self, token: &str) -> Option<User> {
+        let id = self.sessions.lock().unwrap().get(token).cloned()?;
+        self.world.read().await.users.get(&id).cloned()
+    }
+
+    /// Check a join request: a session token, the GM key, or a player's password.
+    pub async fn join(&self, req: hearth_core::protocol::JoinRequest) -> Result<Joined, String> {
+        // 1. Rejoining with a session token (e.g. after a page reload).
+        if let Some(token) = req.session.as_deref().filter(|t| !t.is_empty()) {
+            if let Some(user) = self.session_user(token).await {
+                let must_change_password = self.credentials.lock().unwrap().get(&user.id).must_change;
+                return Ok(Joined { user, session: token.to_string(), must_change_password });
             }
-            None => User {
-                id: new_id(),
-                name: name.to_string(),
-                role,
-                color: USER_COLORS[world.users.len() % USER_COLORS.len()].to_string(),
-            },
+            return Err("Your session has expired. Please log in again.".into());
+        }
+
+        // 2. The GM key (desktop app hand-off, or a GM on a standalone server).
+        if let Some(key) = req.key.as_deref().filter(|k| !k.is_empty()) {
+            if !self.check_gm_key(key) {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                return Err("Wrong GM key".into());
+            }
+            let name = req.name.as_deref().unwrap_or("").trim().to_string();
+            if name.is_empty() || name.chars().count() > 40 {
+                return Err("Name must be 1-40 characters".into());
+            }
+            let mut world = self.world.write().await;
+            let user = match world.users.values().find(|u| u.name.eq_ignore_ascii_case(&name)).cloned() {
+                Some(mut u) => {
+                    u.role = Role::Gm;
+                    u
+                }
+                None => User {
+                    id: new_id(),
+                    name,
+                    role: Role::Gm,
+                    color: USER_COLORS[world.users.len() % USER_COLORS.len()].to_string(),
+                },
+            };
+            let op = Op::UserUpsert { user: user.clone() };
+            world.apply(&op).map_err(|e| e.to_string())?;
+            self.dirty.store(true, Ordering::Release);
+            self.send(ServerMsg::Applied { op, by: None }, Audience::All);
+            let session = self.new_session(&user.id);
+            return Ok(Joined { user, session, must_change_password: false });
+        }
+
+        // 3. A player account set up by the GM.
+        let id = req.user_id.as_deref().filter(|i| !i.is_empty()).ok_or("Choose your player name")?;
+        let user = self.world.read().await.users.get(id).cloned().ok_or("That player no longer exists")?;
+        let cred = self.credentials.lock().unwrap().get(id);
+        if let Some(stored) = cred.hash.clone() {
+            let password = req.password.clone().unwrap_or_default();
+            let ok = tokio::task::spawn_blocking(move || credentials::verify(&stored, &password))
+                .await
+                .unwrap_or(false);
+            if !ok {
+                // Slow down guessing.
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                return Err("Wrong password".into());
+            }
+        }
+        let session = self.new_session(&user.id);
+        // No password yet: they must pick one now.
+        let must_change_password = cred.must_change || cred.hash.is_none();
+        Ok(Joined { user, session, must_change_password })
+    }
+
+    /// A player changes their own password.
+    pub async fn set_password(&self, user: &User, current: Option<String>, new: String) -> Result<(), String> {
+        if new.chars().count() < credentials::MIN_LEN {
+            return Err(format!("Password must be at least {} characters", credentials::MIN_LEN));
+        }
+        let cred = self.credentials.lock().unwrap().get(&user.id);
+        // Right after logging in with a temporary password (or none), the old one isn't needed.
+        if let (Some(stored), false) = (cred.hash.clone(), cred.must_change) {
+            let cur = current.unwrap_or_default();
+            let ok = tokio::task::spawn_blocking(move || credentials::verify(&stored, &cur)).await.unwrap_or(false);
+            if !ok {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                return Err("Current password is wrong".into());
+            }
+        }
+        let hashed = tokio::task::spawn_blocking(move || credentials::hash(&new)).await.map_err(|e| e.to_string())??;
+        self.credentials.lock().unwrap().set(&user.id, Some(hashed), false)
+    }
+
+    /// GM account management. Replies with a notice for the GM.
+    pub async fn admin(&self, gm: &User, action: UserAdmin) -> Result<String, String> {
+        if gm.role != Role::Gm {
+            return Err("Only a GM can manage players".into());
+        }
+        let clean_name = |n: &str| -> Result<String, String> {
+            let n = n.trim();
+            if n.is_empty() || n.chars().count() > 40 {
+                Err("Name must be 1-40 characters".into())
+            } else {
+                Ok(n.to_string())
+            }
         };
-        let op = Op::UserUpsert { user: user.clone() };
-        world.apply(&op).map_err(|e| e.to_string())?;
-        self.dirty.store(true, Ordering::Release);
-        self.send(ServerMsg::Applied { op, by: None }, Audience::All);
-        Ok(user)
+        let temp_hash = |p: String| async move {
+            if p.chars().count() < credentials::MIN_TEMP_LEN {
+                return Err(format!("Temporary password must be at least {} characters", credentials::MIN_TEMP_LEN));
+            }
+            tokio::task::spawn_blocking(move || credentials::hash(&p)).await.map_err(|e| e.to_string())?
+        };
+
+        match action {
+            UserAdmin::Create { name, role, password } => {
+                let name = clean_name(&name)?;
+                let hash = if password.is_empty() { None } else { Some(temp_hash(password).await?) };
+                let mut world = self.world.write().await;
+                if world.users.values().any(|u| u.name.eq_ignore_ascii_case(&name)) {
+                    return Err(format!("There is already a player called {name}"));
+                }
+                let user = User {
+                    id: new_id(),
+                    name: name.clone(),
+                    role,
+                    color: USER_COLORS[world.users.len() % USER_COLORS.len()].to_string(),
+                };
+                self.credentials.lock().unwrap().set(&user.id, hash, true)?;
+                let op = Op::UserUpsert { user };
+                world.apply(&op).map_err(|e| e.to_string())?;
+                self.dirty.store(true, Ordering::Release);
+                self.send(ServerMsg::Applied { op, by: Some(gm.id.clone()) }, Audience::All);
+                Ok(format!("Added {name}"))
+            }
+            UserAdmin::Update { id, name, role, color } => {
+                let mut world = self.world.write().await;
+                let mut user = world.users.get(&id).cloned().ok_or("Player not found")?;
+                if let Some(n) = name {
+                    let n = clean_name(&n)?;
+                    if world.users.values().any(|u| u.id != id && u.name.eq_ignore_ascii_case(&n)) {
+                        return Err(format!("There is already a player called {n}"));
+                    }
+                    user.name = n;
+                }
+                if let Some(r) = role {
+                    if id == gm.id && r != Role::Gm {
+                        return Err("You can't remove your own GM role".into());
+                    }
+                    user.role = r;
+                }
+                if let Some(c) = color.filter(|c| c.starts_with('#') && c.len() <= 9) {
+                    user.color = c;
+                }
+                let msg = format!("Updated {}", user.name);
+                let op = Op::UserUpsert { user };
+                world.apply(&op).map_err(|e| e.to_string())?;
+                self.dirty.store(true, Ordering::Release);
+                self.send(ServerMsg::Applied { op, by: Some(gm.id.clone()) }, Audience::All);
+                Ok(msg)
+            }
+            UserAdmin::ResetPassword { id, password } => {
+                let name = self.world.read().await.users.get(&id).map(|u| u.name.clone()).ok_or("Player not found")?;
+                let hash = temp_hash(password).await?;
+                self.credentials.lock().unwrap().set(&id, Some(hash), true)?;
+                self.end_sessions_of(&id);
+                Ok(format!("Password reset for {name}. They'll choose a new one when they next log in."))
+            }
+            UserAdmin::Delete { id } => {
+                if id == gm.id {
+                    return Err("You can't remove yourself".into());
+                }
+                let mut world = self.world.write().await;
+                let name = world.users.get(&id).map(|u| u.name.clone()).ok_or("Player not found")?;
+                let op = Op::UserDelete { id: id.clone() };
+                world.apply(&op).map_err(|e| e.to_string())?;
+                self.credentials.lock().unwrap().remove(&id)?;
+                self.end_sessions_of(&id);
+                self.dirty.store(true, Ordering::Release);
+                self.send(ServerMsg::Applied { op, by: Some(gm.id.clone()) }, Audience::All);
+                Ok(format!("Removed {name}"))
+            }
+        }
     }
 
     // ------------------------------------------------------------ permissions

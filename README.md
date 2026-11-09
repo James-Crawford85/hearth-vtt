@@ -18,6 +18,7 @@ The desktop app hosts your world (or joins someone else's); players join from th
 - **Sheets:** HTML templates with two-way binding and roll buttons, or a fully custom JS renderer, or an auto-generated form if the system defines nothing.
 - **Dice engine:** `4d6dl1`, `2d20kh1 + @abilities.dex.mod`, `3d6!`, `2d6r1`, `4dF`, `d%`, arithmetic, and variables pulled from actor data.
 - **Chat:** `/r`, `/gmr` (private to GM), `/w name` whispers.
+- **Player accounts:** the GM adds players (Settings → Players) with a temporary password. Players pick their name on the join page; on first login they choose their own password. Passwords are stored as Argon2 hashes, separately from the world data. The join page also shows the world description, the next session and who's online.
 - **Packages:**
   - **Systems** define the rules: actor/item types, sheets, server-side rules in sandboxed [Rhai](https://rhai.rs) scripts.
   - **Modules** add features through a hook-based client API and/or server scripts.

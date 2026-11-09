@@ -51,12 +51,49 @@ label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--t
 h1, h2, h3, h4 { font-family: var(--font-display); margin: .6em 0 .3em; }
 
 /* ---------------------------------------------------------------- join */
-.join { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px;
-  background: radial-gradient(ellipse at top, #2a2116, var(--bg) 70%); }
-.join-card { width: min(380px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 28px;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); }
-.brand { font-size: 40px; margin: 0; color: var(--accent); letter-spacing: .02em; }
+.join {
+  position: fixed; inset: 0; overflow-y: auto; padding: 40px 16px 24px;
+  display: flex; flex-direction: column; align-items: center; gap: 28px;
+  background:
+    radial-gradient(ellipse 70% 50% at 50% 110%, rgba(200, 100, 44, .35), transparent 70%),
+    radial-gradient(ellipse 50% 35% at 50% -5%, rgba(224, 160, 64, .18), transparent 70%),
+    var(--bg);
+}
+.join-brand { display: flex; align-items: center; gap: 16px; text-align: left; }
+.join-brand img { width: 72px; height: 72px; filter: drop-shadow(0 6px 18px rgba(224, 160, 64, .4)); }
+.join-brand h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); color: var(--accent); line-height: 1.1; }
+.join-brand p { margin: 2px 0 0; }
+.join-grid { display: grid; grid-template-columns: minmax(0, 440px) minmax(0, 440px); gap: 18px; width: min(900px, 100%); }
+.join-col { display: flex; flex-direction: column; gap: 18px; }
+.join-card {
+  display: flex; flex-direction: column; gap: 12px; padding: 20px 22px 22px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow);
+}
+.join-title {
+  display: flex; align-items: center; gap: 12px; margin: 0 0 4px; font-size: 20px; text-align: center;
+}
+.join-title::before, .join-title::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, transparent, var(--accent)); }
+.join-title::after { background: linear-gradient(90deg, var(--accent), transparent); }
 .join-card .muted { margin: 0; }
+.join-card .error:empty { display: none; }
+.gm-key { border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 10px; }
+.gm-key summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.gm-key[open] { gap: 10px; }
+.gm-key[open] > label, .gm-key[open] > button { margin-top: 8px; }
+.details { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0; }
+.details dt { color: var(--muted); }
+.details dd { margin: 0; text-align: right; font-weight: 600; }
+.join-desc { min-height: 100%; }
+.world-desc { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; color: var(--text); }
+.world-desc.empty { color: var(--muted); font-style: italic; }
+.small { font-size: 12px; }
+@media (max-width: 760px) { .join-grid { grid-template-columns: 1fr; } }
+
+.pw-dialog { border: 1px solid var(--border); border-radius: 14px; background: var(--panel); color: var(--text); padding: 0; width: min(420px, calc(100vw - 32px)); box-shadow: var(--shadow); }
+.pw-dialog::backdrop { background: rgba(0, 0, 0, .65); }
+.pw-dialog form { display: flex; flex-direction: column; gap: 12px; padding: 22px; }
+.pw-dialog h2 { margin: 0; }
+.pw-dialog .error:empty { display: none; }
 
 /* ---------------------------------------------------------------- layout */
 #board { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; cursor: grab; }
@@ -105,6 +142,8 @@ h1, h2, h3, h4 { font-family: var(--font-display); margin: .6em 0 .3em; }
 .avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex: none;
   display: grid; place-items: center; background: var(--panel-3); font-weight: 700; }
 .users li, .modules li { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.user-actions { display: flex; gap: 2px; flex: none; }
+.user-actions .icon { padding: 2px 5px; }
 .modules label.check { align-items: flex-start; }
 .modules label.check input { margin-top: 4px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid; flex: none; }

@@ -262,17 +262,37 @@ export class Sidebar {
     const w = store.world;
     const online = new Set(store.online);
     const users = Object.values(w.users).sort((a, b) => a.name.localeCompare(b.name));
+    const gm = isGM();
+    const userRow = (u) => {
+      const me = u.id === store.user.id;
+      const actions = gm ? el('span.user-actions', {},
+        el('button.icon', { title: 'Reset password', text: '🔑', on: { click: () => this.resetPassword(u) } }),
+        me ? null : el('button.icon', {
+          title: u.role === 'gm' ? 'Make player' : 'Make GM', text: u.role === 'gm' ? '⬇' : '⬆',
+          on: { click: () => this.api.admin.updateUser(u.id, { role: u.role === 'gm' ? 'player' : 'gm' }) },
+        }),
+        me ? null : el('button.icon', {
+          title: 'Remove player', text: '🗑',
+          on: { click: () => { if (confirm(`Remove ${u.name}? They won't be able to log in, and lose ownership of their actors.`)) this.api.admin.deleteUser(u.id); } },
+        })) : null;
+      return el('li', {},
+        el('span.dot', { style: `background:${online.has(u.id) ? u.color : 'transparent'};border-color:${u.color}`, title: online.has(u.id) ? 'Online' : 'Offline' }),
+        el('span.grow', {}, el('span', { text: u.name }), u.role === 'gm' ? el('span.badge', { text: 'GM' }) : null,
+          me ? el('small.muted', { text: ' (you)' }) : null),
+        actions);
+    };
     const parts = [
       el('h3', { text: w.name }),
       el('p.muted', { text: `System: ${systemInfo().name ?? w.system}` }),
+      w.next_session ? el('p.muted', { text: `Next session: ${new Date(w.next_session).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}` }) : null,
       el('h4', { text: 'Players' }),
-      el('ul.users', {}, ...users.map((u) => el('li', {},
-        el('span.dot', { style: `background:${online.has(u.id) ? u.color : 'transparent'};border-color:${u.color}` }),
-        el('span', { text: u.name }), u.role === 'gm' ? el('span.badge', { text: 'GM' }) : null,
-        u.id === store.user.id ? el('small.muted', { text: ' (you)' }) : null))),
-    ];
+      el('ul.users', {}, ...users.map(userRow)),
+      gm ? el('div.row', {}, el('button.primary', { text: '+ Add player', on: { click: () => this.addPlayer() } }),
+        el('button', { text: 'Game details…', on: { click: () => this.editDetails() } })) : null,
+      gm ? el('p.hint.muted', { text: 'Players log in by picking their name and entering the password you give them; they choose their own on first login.' }) : null,
+    ].filter(Boolean);
 
-    if (isGM()) {
+    if (gm) {
       const themes = store.packages.available.filter((p) => p.type === 'theme');
       const modules = store.packages.available.filter((p) => p.type === 'module' && (!p.systems.length || p.systems.includes(w.system)));
       parts.push(
@@ -297,7 +317,51 @@ export class Sidebar {
         el('p.hint.muted', { text: 'Changing the theme or modules reloads every connected client.' }),
       );
     }
-    parts.push(el('div.row', {}, el('button', { text: 'Leave world', on: { click: () => this.api.leave() } })));
+    parts.push(el('div.row', {},
+      el('button', { text: 'Change my password', on: { click: () => this.api.changePassword?.() } }),
+      el('button', { text: 'Leave world', on: { click: () => this.api.leave() } })));
     panel.replaceChildren(...parts);
+  }
+
+  async addPlayer() {
+    const res = await formDialog({
+      title: 'Add a player',
+      fields: [
+        { name: 'name', label: 'Name', required: true },
+        { name: 'role', label: 'Role', type: 'select', options: [['player', 'Player'], ['gm', 'Game master']], value: 'player' },
+        { name: 'password', label: 'Temporary password (they change it on first login; leave empty to let them pick one)', type: 'text' },
+      ],
+      submit: 'Add',
+    });
+    if (res) this.api.admin.createUser(res.name.trim(), res.role, res.password);
+  }
+
+  async resetPassword(u) {
+    const res = await formDialog({
+      title: `Reset ${u.name}'s password`,
+      fields: [{ name: 'password', label: 'Temporary password (at least 4 characters)', type: 'text', required: true }],
+      submit: 'Reset',
+    });
+    if (res) this.api.admin.resetPassword(u.id, res.password);
+  }
+
+  editDetails() {
+    const w = store.world;
+    const win = openWindow({ id: 'game-details', title: 'Game details', width: 460 });
+    const desc = el('textarea', { name: 'description', rows: 8, maxlength: 2000 });
+    desc.value = w.description ?? '';
+    const form = el('form.form', {},
+      el('label', {}, 'Next session', el('input', { name: 'next', type: 'datetime-local', value: w.next_session ?? '' })),
+      el('label', {}, 'World description (shown on the join page)', desc),
+      el('div.row', {},
+        el('button.primary', { type: 'submit', text: 'Save' }),
+        el('button', { type: 'button', text: 'Clear date', on: { click: () => { form.elements.next.value = ''; } } })));
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.api.update.world({ description: desc.value.trim(), next_session: form.elements.next.value || null });
+      win.close();
+      toast('Game details saved.');
+    });
+    win.body.append(form);
   }
 }

@@ -91,6 +91,10 @@ export function applyOp(op) {
       w.users[op.user.id] = op.user;
       if (store.user && op.user.id === store.user.id) store.user = op.user;
       break;
+    case 'user_delete':
+      delete w.users[op.id];
+      for (const a of Object.values(w.actors)) a.owners = a.owners.filter((o) => o !== op.id);
+      break;
     default: console.warn('[hearth] unknown op', op);
   }
 }

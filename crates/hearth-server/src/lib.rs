@@ -2,6 +2,7 @@
 //! or embedded inside the desktop app, which hosts a world in-process.
 
 pub mod backups;
+pub mod credentials;
 mod http;
 mod persist;
 mod state;

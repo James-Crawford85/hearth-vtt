@@ -12,14 +12,28 @@ use crate::state::AppState;
 
 const ALLOWED_EXT: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "avif", "mp3", "ogg", "wav", "webm", "mp4"];
 
+/// Public information shown on the join page (no secrets: names, roles and
+/// colours of accounts, world description, who's online).
 pub async fn info(State(state): State<Arc<AppState>>) -> Json<Value> {
     let w = state.world.read().await;
+    let online: std::collections::HashSet<_> = state.online_ids().into_iter().collect();
+    let mut users: Vec<&hearth_core::User> = w.users.values().collect();
+    users.sort_by(|a, b| (a.role != hearth_core::Role::Gm, a.name.to_lowercase()).cmp(&(b.role != hearth_core::Role::Gm, b.name.to_lowercase())));
+    let players: Vec<_> = users.iter().filter(|u| u.role != hearth_core::Role::Gm).collect();
+    let system_name = state.registry.get(&w.system).map(|p| p.manifest.name.clone()).unwrap_or_else(|| w.system.clone());
     Json(json!({
         "name": "hearth",
         "version": env!("CARGO_PKG_VERSION"),
         "world": w.name,
         "description": w.description,
+        "next_session": w.next_session,
         "system": w.system,
+        "system_name": system_name,
+        "users": users.iter().map(|u| json!({
+            "id": u.id, "name": u.name, "role": u.role, "color": u.color, "online": online.contains(&u.id),
+        })).collect::<Vec<_>>(),
+        "players_online": players.iter().filter(|u| online.contains(&u.id)).count(),
+        "players_total": players.len(),
     }))
 }
 
@@ -58,16 +72,21 @@ fn sanitize(name: &str) -> Option<(String, String)> {
     Some((stem, ext))
 }
 
-/// `POST /api/upload` (multipart field `file`, header `x-hearth-key`: GM key).
+/// `POST /api/upload` (multipart field `file`). GM only: send either header
+/// `x-hearth-session` (a GM's session token) or `x-hearth-key` (the GM key).
 /// Returns `{ "url": "/assets/<name>" }`.
 pub async fn upload(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     mut form: Multipart,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let key = headers.get("x-hearth-key").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if !state.check_gm_key(key) {
-        return Err((StatusCode::FORBIDDEN, "GM key required".into()));
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let by_session = match header("x-hearth-session") {
+        s if s.is_empty() => false,
+        s => state.session_user(&s).await.is_some_and(|u| u.role == hearth_core::Role::Gm),
+    };
+    if !by_session && !state.check_gm_key(&header("x-hearth-key")) {
+        return Err((StatusCode::FORBIDDEN, "Only a GM can upload files".into()));
     }
     while let Some(field) = form.next_field().await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))? {
         if field.name() != Some("file") {

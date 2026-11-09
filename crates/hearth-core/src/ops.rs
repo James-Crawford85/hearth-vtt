@@ -41,6 +41,8 @@ pub enum Op {
 
     /// Server-only: add or update a user.
     UserUpsert { user: User },
+    /// Server-only: remove a user (and their actor ownership).
+    UserDelete { id: Id },
 }
 
 #[derive(Debug, Error)]
@@ -56,7 +58,7 @@ pub enum OpError {
 impl Op {
     /// Ops only the server itself may originate.
     pub fn is_server_only(&self) -> bool {
-        matches!(self, Op::ActorDerive { .. } | Op::UserUpsert { .. } | Op::ChatCreate { .. })
+        matches!(self, Op::ActorDerive { .. } | Op::UserUpsert { .. } | Op::UserDelete { .. } | Op::ChatCreate { .. })
     }
 
     /// The actor an op touches, if any (used to re-run `prepare_actor`).
@@ -183,6 +185,12 @@ impl World {
 
             Op::UserUpsert { user } => {
                 self.users.insert(user.id.clone(), user.clone());
+            }
+            Op::UserDelete { id } => {
+                self.users.remove(id).ok_or_else(|| OpError::NotFound("user", id.clone()))?;
+                for a in self.actors.values_mut() {
+                    a.owners.retain(|o| o != id);
+                }
             }
         }
         Ok(())

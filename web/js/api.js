@@ -92,12 +92,23 @@ export function createApi(conn) {
     async upload(file) {
       const body = new FormData();
       body.append('file', file);
-      const res = await fetch('/api/upload', { method: 'POST', body, headers: { 'x-hearth-key': sessionStorage.getItem('hearth.key') ?? '' } });
+      const res = await fetch('/api/upload', { method: 'POST', body, headers: { 'x-hearth-session': api.session ?? '' } });
       if (!res.ok) throw new Error(`Upload failed: ${await res.text()}`);
       return (await res.json()).url;
     },
 
     util: { mergePatch, getPath },
+
+    /** GM-only account management. Results arrive as a toast (notice) or error. */
+    admin: {
+      createUser: (name, role = 'player', password = '') => conn.send({ type: 'admin', action: 'create', name, role, password }),
+      updateUser: (id, changes) => conn.send({ type: 'admin', action: 'update', id, ...changes }),
+      resetPassword: (id, password) => conn.send({ type: 'admin', action: 'reset_password', id, password }),
+      deleteUser: (id) => conn.send({ type: 'admin', action: 'delete', id }),
+    },
+    /** Set by main.js: the current session token and a "change my password" dialog. */
+    session: null,
+    changePassword: null,
 
     // filled in by main.js
     board: null,

@@ -196,7 +196,8 @@ function hostedCard(w) {
       h('div', { class: 'badge-icon', text: initial(w.name) }),
       h('div', {},
         h('div', { class: 'card-title' }, w.name, running ? h('span', { class: 'tag ok', text: 'Running' }) : null),
-        h('div', { class: 'card-meta', text: `${pkgName(w.system)} · ${w.actors} actors · ${w.scenes} scenes · played ${ago(w.modified)}` }))),
+        h('div', { class: 'card-meta', text: `${pkgName(w.system)} · ${w.players} players · ${w.actors} actors · played ${ago(w.modified)}` }),
+        w.next_session ? h('div', { class: 'card-meta', text: `Next session: ${new Date(w.next_session).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}` }) : null)),
     w.description ? h('div', { class: 'card-desc', text: w.description }) : null,
     h('div', { class: 'card-actions' },
       launchBtn,
@@ -293,7 +294,8 @@ async function editWorld(w) {
     body: [
       h('label', {}, 'World name', h('input', { name: 'name', required: true, maxlength: 80, value: w.name })),
       h('label', {}, 'Description', (() => { const t = h('textarea', { name: 'description', maxlength: 2000 }); t.value = w.description; return t; })()),
-      h('div', { class: 'small muted', text: `Game system: ${pkgName(w.system)} (fixed when the world is created)` }),
+      h('div', { class: 'small muted', text: `Game system: ${pkgName(w.system)} (fixed when the world is created). Add players and their passwords in-game under Settings.` }),
+      h('label', {}, 'Next session', h('input', { name: 'next_session', type: 'datetime-local', value: w.next_session ?? '' })),
       h('label', {}, 'Theme', h('select', { name: 'theme' },
         h('option', { value: '', text: 'Hearth (default)' }),
         themes.map((t) => h('option', { value: t.id, text: t.name, selected: w.theme === t.id })))),
@@ -310,6 +312,7 @@ async function editWorld(w) {
         name: f.elements.name.value,
         description: f.elements.description.value,
         theme: f.elements.theme.value || null,
+        next_session: f.elements.next_session.value || null,
         modules: [...f.querySelectorAll('input[name=module]:checked')].map((i) => i.value),
       },
     }),
@@ -500,6 +503,8 @@ async function checkUpdate({ quiet = false } = {}) {
   } else if (u.available) {
     const go = await dialog({ title: 'Update available', body: [h('p', { text: `Hearth ${u.latest} is available (you have ${u.current}).` })], ok: 'Download', cancel: 'Later' });
     if (go && u.url) call('open_url', { url: u.url }).catch(() => {});
+  } else if (!u.latest) {
+    toast(`You're running Hearth ${u.current}. No releases have been published on GitHub yet.`);
   } else {
     toast(`You're up to date (Hearth ${u.current}).`);
   }

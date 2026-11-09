@@ -16,6 +16,8 @@ pub struct WorldSummary {
     pub system: String,
     pub modules: Vec<String>,
     pub theme: Option<String>,
+    pub next_session: Option<String>,
+    pub players: usize,
     pub actors: usize,
     pub scenes: usize,
     /// Last saved, unix milliseconds.
@@ -39,6 +41,8 @@ fn summarize(dir: &Path) -> Option<WorldSummary> {
         system: world.system,
         modules: world.modules,
         theme: world.theme,
+        next_session: world.next_session,
+        players: world.users.values().filter(|u| u.role != hearth_core::Role::Gm).count(),
         actors: world.actors.len(),
         scenes: world.scenes.len(),
         modified,
@@ -102,6 +106,8 @@ pub struct WorldEdit {
     pub description: String,
     pub modules: Vec<String>,
     pub theme: Option<String>,
+    #[serde(default)]
+    pub next_session: Option<String>,
 }
 
 /// Apply launcher edits to a stopped world's `world.json`.
@@ -114,6 +120,7 @@ pub fn update(dir: &Path, edit: WorldEdit) -> anyhow::Result<WorldSummary> {
     world.description = edit.description.trim().chars().take(2000).collect();
     world.modules = edit.modules;
     world.theme = edit.theme.filter(|t| !t.is_empty());
+    world.next_session = edit.next_session.filter(|s| !s.trim().is_empty());
     let tmp = dir.join("world.json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&world)?)?;
     std::fs::rename(tmp, &file)?;

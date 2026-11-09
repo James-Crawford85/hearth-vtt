@@ -8,19 +8,63 @@
 </head>
 <body>
   <section id="join" class="join">
-    <form id="join-form" class="join-card" autocomplete="on">
-      <h1 class="brand">Hearth</h1>
-      <p class="muted" id="join-world">Open-source virtual tabletop</p>
-      <label>Your name
-        <input name="name" required maxlength="40" autocomplete="nickname">
-      </label>
-      <label>GM key <span class="muted">(leave empty to join as a player)</span>
-        <input name="key" type="password" autocomplete="off">
-      </label>
-      <button type="submit" class="primary">Join</button>
-      <p id="join-error" class="error" role="alert"></p>
-    </form>
+    <header class="join-brand">
+      <img src="/img/hearth.png" alt="">
+      <div>
+        <h1 id="join-world">Hearth</h1>
+        <p class="muted" id="join-system"></p>
+      </div>
+    </header>
+
+    <div class="join-grid">
+      <div class="join-col">
+        <form id="join-form" class="join-card" autocomplete="on">
+          <h2 class="join-title">Join Game Session</h2>
+          <label>Player
+            <select name="user" required autocomplete="username"></select>
+          </label>
+          <label>Password
+            <input name="password" type="password" autocomplete="current-password">
+          </label>
+          <button type="submit" class="primary">Join game session</button>
+          <p id="join-error" class="error" role="alert"></p>
+          <p id="join-empty" class="muted small" hidden>No players have been set up for this world yet. Ask your GM to add you.</p>
+          <details class="gm-key">
+            <summary>Game master? Join with the GM key</summary>
+            <label>Your name <input name="gm_name" maxlength="40" autocomplete="nickname"></label>
+            <label>GM key <input name="key" type="password" autocomplete="off"></label>
+            <button type="button" id="gm-join">Join as GM</button>
+          </details>
+        </form>
+
+        <section class="join-card">
+          <h2 class="join-title">Game Details</h2>
+          <dl class="details">
+            <dt>Next session</dt><dd id="detail-next">Not scheduled</dd>
+            <dt>Players online</dt><dd id="detail-players">0 / 0</dd>
+            <dt>Game system</dt><dd id="detail-system">–</dd>
+          </dl>
+        </section>
+      </div>
+
+      <section class="join-card join-desc">
+        <h2 class="join-title">World Description</h2>
+        <div id="world-desc" class="world-desc"></div>
+      </section>
+    </div>
+    <footer class="muted small" id="join-version"></footer>
   </section>
+
+  <dialog id="password-dialog" class="pw-dialog">
+    <form id="password-form" method="dialog">
+      <h2>Choose your password</h2>
+      <p class="muted" id="password-reason">Your GM gave you a temporary password. Choose your own to continue.</p>
+      <label>New password <input name="new" type="password" required minlength="6" autocomplete="new-password"></label>
+      <label>Repeat it <input name="repeat" type="password" required minlength="6" autocomplete="new-password"></label>
+      <p class="error" id="password-error" role="alert"></p>
+      <button type="submit" class="primary">Save password</button>
+    </form>
+  </dialog>
 
   <main id="app" hidden>
     <canvas id="board" tabindex="0" aria-label="Game board"></canvas>

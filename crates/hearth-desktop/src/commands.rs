@@ -110,18 +110,28 @@ pub async fn check_update() -> R<UpdateInfo> {
         return Ok(UpdateInfo { configured: false, current, latest: None, url: None, available: false });
     };
     let api = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let body: serde_json::Value = tokio::task::spawn_blocking(move || {
-        ureq::get(&api)
+    let body: Option<serde_json::Value> = tokio::task::spawn_blocking(move || {
+        let resp = ureq::get(&api)
             .set("User-Agent", "hearth-desktop")
             .set("Accept", "application/vnd.github+json")
             .timeout(Duration::from_secs(10))
-            .call()
-            .map_err(err)?
-            .into_json::<serde_json::Value>()
-            .map_err(err)
+            .call();
+        match resp {
+            Ok(r) => r.into_json::<serde_json::Value>().map(Some).map_err(err),
+            // GitHub answers 404 until a release is *published* (drafts don't count).
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(ureq::Error::Status(403 | 429, _)) => {
+                Err("GitHub is rate-limiting update checks; try again in a few minutes".to_string())
+            }
+            Err(ureq::Error::Status(code, _)) => Err(format!("GitHub answered with status {code}")),
+            Err(ureq::Error::Transport(_)) => Err("Couldn't reach GitHub. Are you online?".to_string()),
+        }
     })
     .await
     .map_err(err)??;
+    let Some(body) = body else {
+        return Ok(UpdateInfo { configured: true, current, latest: None, url: None, available: false });
+    };
     let latest = body["tag_name"].as_str().map(str::to_string);
     let url = body["html_url"].as_str().map(str::to_string);
     let available = latest.as_deref().is_some_and(|l| newer(l, &current));
@@ -158,7 +168,8 @@ pub fn create_world(state: State<'_, Desktop>, name: String, system: String, des
         return Ok(w);
     }
     let dir = worlds::dir_for(&state.worlds_dir, &w.id).map_err(errs)?;
-    worlds::update(&dir, WorldEdit { name: w.name, description, modules: vec![], theme: None }).map_err(errs)
+    worlds::update(&dir, WorldEdit { name: w.name, description, modules: vec![], theme: None, next_session: None })
+        .map_err(errs)
 }
 
 #[tauri::command]

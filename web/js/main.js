@@ -24,48 +24,135 @@ const conn = new Connection({
 api = createApi(conn);
 window.Hearth = api;
 
-fetch('/api/info').then((r) => r.json()).then((info) => {
-  document.getElementById('join-world').textContent = `${info.world} · ${info.system}`;
+// ------------------------------------------------------------------ join page
+//
+// Players pick their account from the list and enter their password. The
+// server answers with a session token, kept per tab in sessionStorage, so a
+// reload (e.g. when the GM changes modules) logs straight back in.
+
+const SESSION = 'hearth.session';
+const store_ = {
+  get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { sessionStorage.setItem(k, v); } catch { /* private mode */ } },
+  del: (k) => { try { sessionStorage.removeItem(k); } catch { /* private mode */ } },
+  getLocal: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  setLocal: (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+};
+let preferredName = null; // from the desktop launcher's hand-off
+let infoTimer = null;
+
+function formatSession(iso) {
+  if (!iso) return 'Not scheduled';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+async function loadInfo() {
+  let info;
+  try { info = await fetch('/api/info', { cache: 'no-store' }).then((r) => r.json()); } catch { return; }
   document.title = `${info.world} · Hearth`;
-}).catch(() => {});
+  document.getElementById('join-world').textContent = info.world;
+  document.getElementById('join-system').textContent = info.system_name;
+  document.getElementById('join-version').textContent = `Hearth ${info.version}`;
+  document.getElementById('detail-next').textContent = formatSession(info.next_session);
+  document.getElementById('detail-players').textContent = `${info.players_online} / ${info.players_total}`;
+  document.getElementById('detail-system').textContent = info.system_name;
+  const desc = document.getElementById('world-desc');
+  desc.textContent = info.description || 'The GM hasn\'t written a description yet.';
+  desc.classList.toggle('empty', !info.description);
+
+  // Rebuild the player list, keeping the current choice.
+  const select = form.elements.user;
+  const chosen = select.value || store_.getLocal('hearth.user');
+  const byName = preferredName && info.users.find((u) => u.name.toLowerCase() === preferredName.toLowerCase());
+  select.replaceChildren(
+    new Option('Choose your player…', ''),
+    ...info.users.map((u) => new Option(`${u.name}${u.role === 'gm' ? ' (GM)' : ''}${u.online ? ' · online' : ''}`, u.id)),
+  );
+  select.value = byName?.id ?? (info.users.some((u) => u.id === chosen) ? chosen : '');
+  if (byName) preferredName = null;
+  document.getElementById('join-empty').hidden = info.users.length > 0;
+}
+
+function showJoin(message = '') {
+  joinError.textContent = message;
+  joinScreen.hidden = false;
+  appScreen.hidden = true;
+  loadInfo();
+  clearInterval(infoTimer);
+  infoTimer = setInterval(() => { if (!joinScreen.hidden) loadInfo(); }, 10000);
+}
+
+form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  joinError.textContent = '';
+  const userId = form.elements.user.value;
+  if (!userId) { joinError.textContent = 'Choose your player first.'; return; }
+  store_.setLocal('hearth.user', userId);
+  conn.connect({ user_id: userId, password: form.elements.password.value });
+  form.elements.password.value = '';
+});
+
+document.getElementById('gm-join').addEventListener('click', () => {
+  joinError.textContent = '';
+  const name = form.elements.gm_name.value.trim();
+  const key = form.elements.key.value.trim();
+  if (!name || !key) { joinError.textContent = 'Enter your name and the GM key.'; return; }
+  store_.setLocal('hearth.gm_name', name);
+  conn.connect({ key, name });
+  form.elements.key.value = '';
+});
+form.elements.gm_name.value = store_.getLocal('hearth.gm_name') ?? '';
 
 // The desktop launcher opens the game as `/#join={"name":…,"key":…}`. The
 // fragment never reaches the server; drop it from the address bar right away.
+let handoff = null;
 if (location.hash.startsWith('#join=')) {
-  try {
-    const j = JSON.parse(decodeURIComponent(location.hash.slice(6)));
-    if (j.name) sessionStorage.setItem('hearth.name', j.name);
-    if (j.key) sessionStorage.setItem('hearth.key', j.key); else sessionStorage.removeItem('hearth.key');
-    sessionStorage.setItem('hearth.autojoin', '1');
-  } catch { /* ignore a malformed link */ }
+  try { handoff = JSON.parse(decodeURIComponent(location.hash.slice(6))); } catch { /* malformed link */ }
   history.replaceState(null, '', location.pathname + location.search);
 }
 // A join link opened on an already-loaded page only changes the hash; reload to apply it.
 addEventListener('hashchange', () => { if (location.hash.startsWith('#join=')) location.reload(); });
 
-// sessionStorage is per tab, so a GM and a test player in two tabs don't
-// overwrite each other's identity; localStorage only pre-fills new tabs.
-form.elements.name.value = sessionStorage.getItem('hearth.name') ?? localStorage.getItem('hearth.name') ?? '';
-form.elements.key.value = sessionStorage.getItem('hearth.key') ?? '';
-form.addEventListener('submit', (e) => {
-  e.preventDefault();
-  joinError.textContent = '';
-  const name = form.elements.name.value.trim();
-  const key = form.elements.key.value.trim();
-  localStorage.setItem('hearth.name', name);
-  sessionStorage.setItem('hearth.name', name);
-  sessionStorage.setItem('hearth.key', key);
-  conn.connect(name, key);
-});
-// Rejoin automatically after a reload (e.g. when modules change).
-if (sessionStorage.getItem('hearth.autojoin') && form.elements.name.value) {
-  sessionStorage.removeItem('hearth.autojoin');
-  form.requestSubmit();
+if (handoff?.key && handoff?.name) {
+  conn.connect({ key: handoff.key, name: handoff.name });          // GM launching from the app
+} else if (store_.get(SESSION)) {
+  conn.connect({ session: store_.get(SESSION) });                  // reload: rejoin quietly
+} else {
+  preferredName = handoff?.name ?? null;                           // joined game: preselect name
 }
+showJoin();
+
+// ------------------------------------------------------------------ password change
+
+const pwDialog = document.getElementById('password-dialog');
+const pwForm = document.getElementById('password-form');
+const pwError = document.getElementById('password-error');
+let pwRequired = false;
+
+function askNewPassword(required, reason) {
+  pwRequired = required;
+  pwForm.reset();
+  pwError.textContent = '';
+  document.getElementById('password-reason').textContent = reason;
+  if (!pwDialog.open) pwDialog.showModal();
+}
+api.changePassword = () => askNewPassword(false, 'Choose a new password for your account.');
+// A required change can't be skipped with Esc.
+pwDialog.addEventListener('cancel', (e) => { if (pwRequired) e.preventDefault(); });
+pwForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const { new: pw, repeat } = pwForm.elements;
+  if (pw.value !== repeat.value) { pwError.textContent = 'The passwords don\'t match.'; return; }
+  pwError.textContent = '';
+  conn.send({ type: 'set_password', new: pw.value, current: null });
+});
 
 api.leave = () => {
+  conn.send({ type: 'logout' });
   conn.close();
-  sessionStorage.removeItem('hearth.key');
+  store_.del(SESSION);
   // In the desktop app, go back to the launcher (a hosted world keeps running there).
   if (window.__HEARTH_DESKTOP__) location.href = window.__HEARTH_DESKTOP__.launcher;
   else location.reload();
@@ -106,7 +193,7 @@ function applyTheme() {
 
 function reloadSoon(reason) {
   toast(reason);
-  sessionStorage.setItem('hearth.autojoin', '1');
+  // The session token in sessionStorage logs us straight back in.
   setTimeout(() => location.reload(), 800);
 }
 
@@ -118,10 +205,24 @@ function handle(msg) {
       store.world = msg.world;
       store.packages = msg.packages;
       store.online = msg.online;
+      store_.set(SESSION, msg.session);
+      api.session = msg.session;
+      clearInterval(infoTimer);
       if (packagesChanged) return reloadSoon('Packages changed — reloading');
       start();
+      if (msg.must_change_password) {
+        askNewPassword(true, 'Welcome! Your GM set a temporary password (or none). Choose your own password to continue.');
+      }
       break;
     }
+    case 'password_changed':
+      pwRequired = false;
+      if (pwDialog.open) pwDialog.close();
+      toast('Password saved.');
+      break;
+    case 'notice':
+      toast(msg.message);
+      break;
     case 'applied': {
       const op = msg.op;
       applyOp(op);
@@ -143,6 +244,8 @@ function handle(msg) {
       break;
     }
     case 'rejected':
+      // Errors from the password dialog belong in the dialog.
+      if (pwDialog.open && msg.req == null) { pwError.textContent = msg.reason; break; }
       api._rejected(msg.req, msg.reason);
       break;
     case 'presence':
@@ -154,10 +257,11 @@ function handle(msg) {
       api._emit(msg.from, msg.channel, msg.payload);
       break;
     case 'error':
-      if (!started || joinScreen.hidden === false) {
-        joinError.textContent = msg.message;
-        joinScreen.hidden = false;
-        appScreen.hidden = true;
+      if (msg.refused) {
+        // Join refused or account removed: back to the login page.
+        store_.del(SESSION);
+        if (pwDialog.open) { pwRequired = false; pwDialog.close(); }
+        showJoin(msg.message);
       } else if (msg.message !== 'resync') {
         toast(msg.message, 'error');
       }
