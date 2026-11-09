@@ -28,6 +28,18 @@
     "resources": {
       "../../web/": "web/",
       "../../packages/": "packages/"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYzRTdENjNGOEM3QTkwMEMKUldRTWtIcU1QOWJuWS9aUm9RSm43TURNTVhOYmhyd3NUMmlkQUN6UHRLSklhSE43bTg3VTBzcVEK",
+      "endpoints": [
+        "https://github.com/James-Crawford85/hearth-vtt/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

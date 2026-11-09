@@ -500,7 +500,10 @@ async function checkUpdate({ quiet = false } = {}) {
   if (quiet) return;
   if (!u.configured) {
     await dialog({ title: 'Updates', body: [h('p', { text: `You're running Hearth ${u.current}. Update checks switch on once Hearth publishes releases on GitHub.` })], ok: null, cancel: 'Close' });
+  } else if (u.available && u.can_install) {
+    await installDialog(u);
   } else if (u.available) {
+    // Older releases can't be installed from inside the app; send them to the page.
     const go = await dialog({ title: 'Update available', body: [h('p', { text: `Hearth ${u.latest} is available (you have ${u.current}).` })], ok: 'Download', cancel: 'Later' });
     if (go && u.url) call('open_url', { url: u.url }).catch(() => {});
   } else if (!u.latest) {
@@ -509,6 +512,58 @@ async function checkUpdate({ quiet = false } = {}) {
     toast(`You're up to date (Hearth ${u.current}).`);
   }
 }
+/** "Update now" dialog: download with a progress bar, install, relaunch. */
+async function installDialog(u) {
+  const bar = h('progress', { max: 100, value: 0, class: 'update-progress', hidden: true });
+  const status = h('p', { class: 'small muted', text: '' });
+  const notes = u.notes ? h('div', { class: 'release-notes', text: u.notes }) : null;
+  const hostingNote = state.hosting
+    ? h('p', { class: 'small', text: `“${state.hosting.world_name}” is running. It will be saved and stopped before updating.` })
+    : null;
+  let unlisten = null;
+  try {
+    unlisten = await window.__TAURI__.event.listen('update-progress', ({ payload }) => {
+      bar.hidden = false;
+      if (payload.installing) {
+        bar.removeAttribute('value'); // indeterminate
+        status.textContent = 'Installing… Hearth will restart in a moment.';
+      } else if (payload.total) {
+        bar.value = Math.round((payload.downloaded / payload.total) * 100);
+        status.textContent = `Downloading… ${size(payload.downloaded)} of ${size(payload.total)}`;
+      } else {
+        status.textContent = `Downloading… ${size(payload.downloaded)}`;
+      }
+    });
+  } catch { /* progress is nice-to-have */ }
+  await dialog({
+    title: `Update to Hearth ${u.latest}`,
+    wide: true,
+    body: [
+      h('p', { text: `You have ${u.current}. Hearth downloads the right version for this computer, installs it and restarts.` }),
+      notes, hostingNote, bar, status,
+      u.url ? h('button', { type: 'button', class: 'link', text: 'View the release on GitHub', on: { click: () => call('open_url', { url: u.url }).catch(() => {}) } }) : null,
+    ],
+    ok: 'Update now',
+    cancel: 'Later',
+    onOk: async (f) => {
+      const buttons = [...f.querySelectorAll('button')];
+      buttons.forEach((b) => { b.disabled = true; });
+      status.textContent = 'Starting download…';
+      bar.hidden = false;
+      try {
+        await call('install_update'); // on success the app restarts and this never returns
+      } catch (e) {
+        buttons.forEach((b) => { b.disabled = false; });
+        bar.hidden = true;
+        status.textContent = 'The update didn\'t finish. Check your connection and try again, or download it from GitHub.';
+        throw e;
+      }
+      return false;
+    },
+  });
+  unlisten?.();
+}
+
 $('update-btn').addEventListener('click', () => checkUpdate());
 $('check-update-btn').addEventListener('click', () => checkUpdate());
 

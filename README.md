@@ -152,3 +152,15 @@ By hand on any OS:
 1. Set the version: `powershell -File tools/set-version.ps1 0.2.0` (or edit `Cargo.toml` `[workspace.package]` and `crates/hearth-desktop/tauri.conf.json`), then run `cargo update --workspace`.
 2. Commit, then tag and push: `git tag v0.2.0 && git push origin main v0.2.0`.
 3. The **Release** workflow builds installers and server bundles for every platform into a draft release. Review it on GitHub and press **Publish**. Desktop apps then see the update.
+
+### In-app updates
+
+The desktop app updates itself: **Update now** downloads the right installer for the user's system from the latest published release, verifies it, installs it and restarts. This relies on:
+
+- an **updater signing key**, created once with `cargo tauri signer generate -w ~/.tauri/hearth-updater.key`. Its public half is `plugins.updater.pubkey` in `crates/hearth-desktop/tauri.conf.json`;
+- two **repository secrets** (Settings → Secrets and variables → Actions): `TAURI_SIGNING_PRIVATE_KEY` (the contents of the key file) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The Release workflow refuses to run without them;
+- the `latest.json` file the workflow attaches to each release, which tells apps which file to download.
+
+Keep a backup of the key file and its password. If either is lost, installed apps can't verify new updates and everyone has to reinstall once by hand.
+
+Building installers locally needs the key too: set `TAURI_SIGNING_PRIVATE_KEY` to the key file's path (and the password variable) before `cargo tauri build`.

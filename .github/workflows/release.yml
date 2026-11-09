@@ -28,7 +28,15 @@ jobs:
   create-release:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - name: Check the updater signing key is configured
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::Add the TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD secrets (Settings → Secrets → Actions). Without them installed apps can't update."
+            exit 1
+          fi
+      - uses: actions/checkout@v7
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -60,7 +68,7 @@ jobs:
             args: --target x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
 
@@ -75,16 +83,22 @@ jobs:
           targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2
 
+      # Signs each installer with the updater key and adds latest.json to the
+      # release, which installed apps read to find and verify their update.
       - name: Build and upload installers
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/hearth-desktop
           tagName: ${{ env.TAG }}
           releaseName: Hearth ${{ env.TAG }}
           releaseDraft: true
           args: ${{ matrix.args }}
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
 
   server:
     name: Server (${{ matrix.name }})
@@ -98,7 +112,7 @@ jobs:
           - { name: macOS arm64, os: macos-latest, target: aarch64-apple-darwin, exe: '' }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable

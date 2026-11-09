@@ -11,9 +11,10 @@ use hearth_server::hearth_packages::{PackageKind, Registry};
 use hearth_server::worlds::{self, WorldEdit, WorldSummary};
 use hearth_server::ServerConfig;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 
 use crate::store::{self, now_ms, JoinedGame, Settings};
 use crate::{Desktop, Hosted};
@@ -93,6 +94,10 @@ pub struct UpdateInfo {
     latest: Option<String>,
     url: Option<String>,
     available: bool,
+    /// The update can be downloaded and installed from inside the app.
+    can_install: bool,
+    /// Release notes, when the updater provides them.
+    notes: Option<String>,
 }
 
 /// Compare `1.2.3` style versions (ignores a leading `v` and pre-release tags).
@@ -103,11 +108,82 @@ fn newer(latest: &str, current: &str) -> bool {
     parse(latest) > parse(current)
 }
 
+/// Check for an update. Prefers Tauri's signed updater (one-click install,
+/// picks the right file for this OS); falls back to the GitHub releases API,
+/// which can only point the user at the release page.
 #[tauri::command]
-pub async fn check_update() -> R<UpdateInfo> {
+pub async fn check_update(app: AppHandle, state: State<'_, Desktop>) -> R<UpdateInfo> {
     let current = env!("CARGO_PKG_VERSION").to_string();
+    let release_page = |v: &str| UPDATE_REPO.map(|r| format!("https://github.com/{r}/releases/tag/v{}", v.trim_start_matches('v')));
+    match app.updater().map_err(err) {
+        Ok(updater) => match updater.check().await {
+            Ok(Some(update)) => {
+                let info = UpdateInfo {
+                    configured: true,
+                    current,
+                    latest: Some(update.version.clone()),
+                    url: release_page(&update.version),
+                    available: true,
+                    can_install: true,
+                    notes: update.body.clone().filter(|b| !b.trim().is_empty()),
+                };
+                *state.pending_update.lock().unwrap() = Some(update);
+                return Ok(info);
+            }
+            Ok(None) => {
+                *state.pending_update.lock().unwrap() = None;
+                let url = release_page(&current);
+                return Ok(UpdateInfo { configured: true, latest: Some(current.clone()), current, url, available: false, can_install: false, notes: None });
+            }
+            // e.g. the latest release predates the updater and has no latest.json
+            Err(e) => tracing::info!("updater check failed, falling back to GitHub API: {e}"),
+        },
+        Err(e) => tracing::warn!("updater unavailable: {e}"),
+    }
+    github_latest(current).await
+}
+
+/// Download, verify and install the update found by `check_update`, then
+/// relaunch. Progress is sent to the launcher as `update-progress` events.
+#[tauri::command]
+pub async fn install_update(app: AppHandle, state: State<'_, Desktop>) -> R<()> {
+    let update = state.pending_update.lock().unwrap().take().ok_or("Check for updates first")?;
+    // The installer replaces the running app; save and stop any hosted world first.
+    state.stop().await?;
+    let progress = app.clone();
+    let finished = app.clone();
+    let mut downloaded: u64 = 0;
+    let result = update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = progress.emit("update-progress", serde_json::json!({ "downloaded": downloaded, "total": total }));
+            },
+            move || {
+                let _ = finished.emit("update-progress", serde_json::json!({ "installing": true }));
+            },
+        )
+        .await;
+    if let Err(e) = result {
+        return Err(format!("Update failed: {e}"));
+    }
+    // Windows: the installer has already taken over and restarts Hearth itself.
+    // macOS/Linux: the new files are in place; start them.
+    app.restart();
+}
+
+async fn github_latest(current: String) -> R<UpdateInfo> {
+    let none = |current: String, configured: bool| UpdateInfo {
+        configured,
+        current,
+        latest: None,
+        url: None,
+        available: false,
+        can_install: false,
+        notes: None,
+    };
     let Some(repo) = UPDATE_REPO else {
-        return Ok(UpdateInfo { configured: false, current, latest: None, url: None, available: false });
+        return Ok(none(current, false));
     };
     let api = format!("https://api.github.com/repos/{repo}/releases/latest");
     let body: Option<serde_json::Value> = tokio::task::spawn_blocking(move || {
@@ -130,12 +206,12 @@ pub async fn check_update() -> R<UpdateInfo> {
     .await
     .map_err(err)??;
     let Some(body) = body else {
-        return Ok(UpdateInfo { configured: true, current, latest: None, url: None, available: false });
+        return Ok(none(current, true));
     };
     let latest = body["tag_name"].as_str().map(str::to_string);
     let url = body["html_url"].as_str().map(str::to_string);
     let available = latest.as_deref().is_some_and(|l| newer(l, &current));
-    Ok(UpdateInfo { configured: true, current, latest, url, available })
+    Ok(UpdateInfo { configured: true, current, latest, url, available, can_install: false, notes: None })
 }
 
 #[tauri::command]

@@ -37,6 +37,8 @@ pub struct Desktop {
     pub web_dir: PathBuf,
     pub settings: std::sync::Mutex<Settings>,
     pub hosted: Mutex<Option<Hosted>>,
+    /// Update found by the last check, ready to install.
+    pub pending_update: std::sync::Mutex<Option<tauri_plugin_updater::Update>>,
 }
 
 impl Desktop {
@@ -120,6 +122,7 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             let settings: Settings = store::load(&data.join("settings.json"));
@@ -131,6 +134,7 @@ fn main() {
                 web_dir: resource(app, "web"),
                 settings: std::sync::Mutex::new(settings),
                 hosted: Mutex::new(None),
+                pending_update: std::sync::Mutex::new(None),
                 data_dir: data.clone(),
             };
             for d in [&desktop.worlds_dir, &desktop.backups_dir, &desktop.user_packages] {
@@ -156,6 +160,7 @@ fn main() {
             commands::open_folder,
             commands::open_url,
             commands::check_update,
+            commands::install_update,
             commands::list_worlds,
             commands::create_world,
             commands::update_world,
