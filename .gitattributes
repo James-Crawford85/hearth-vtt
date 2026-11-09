@@ -3,3 +3,8 @@
 *.cmd text eol=crlf
 *.png binary
 *.ico binary
+
+# Maintainer tooling: kept in the repo, left out of GitHub's "Source code"
+# downloads attached to each release.
+release.bat export-ignore
+tools/set-version.ps1 export-ignore
