@@ -59,9 +59,14 @@ h1, h2, h3, h4 { font-family: var(--font-display); margin: .6em 0 .3em; }
     radial-gradient(ellipse 50% 35% at 50% -5%, rgba(224, 160, 64, .18), transparent 70%),
     var(--bg);
 }
-.join-brand { display: flex; align-items: center; gap: 16px; text-align: left; }
-.join-brand img { width: 72px; height: 72px; filter: drop-shadow(0 6px 18px rgba(224, 160, 64, .4)); }
-.join-brand h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); color: var(--accent); line-height: 1.1; }
+.join-brand { display: flex; flex-direction: column; align-items: center; text-align: center; }
+/* The logo art has a dark vignette; fade its edges into the page. */
+.join-logo {
+  width: min(400px, 80vw); height: auto; margin-bottom: -16px;
+  -webkit-mask-image: radial-gradient(ellipse 50% 50% at 50% 50%, #000 60%, transparent 100%);
+  mask-image: radial-gradient(ellipse 50% 50% at 50% 50%, #000 60%, transparent 100%);
+}
+.join-brand h1 { margin: 0; font-size: clamp(22px, 3vw, 32px); color: var(--accent); line-height: 1.2; }
 .join-brand p { margin: 2px 0 0; }
 .join-grid { display: grid; grid-template-columns: minmax(0, 440px) minmax(0, 440px); gap: 18px; width: min(900px, 100%); }
 .join-col { display: flex; flex-direction: column; gap: 18px; }

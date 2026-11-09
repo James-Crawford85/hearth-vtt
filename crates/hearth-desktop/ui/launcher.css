@@ -54,8 +54,12 @@ label.check input { width: auto; }
 
 /* ---------------------------------------------------------------- header */
 .top { display: flex; align-items: center; justify-content: space-between; }
-.brand { display: flex; align-items: center; gap: 12px; font: 600 32px var(--font-display); color: var(--accent); letter-spacing: .01em; }
-.brand img { width: 44px; height: 44px; filter: drop-shadow(0 4px 12px rgba(232, 162, 74, .35)); }
+/* The logo art has a dark vignette; fade its edges into the page. */
+.brand-logo {
+  height: 104px; width: auto; display: block; margin: -6px 0 -10px -10px;
+  -webkit-mask-image: radial-gradient(ellipse 50% 50% at 50% 50%, #000 62%, transparent 100%);
+  mask-image: radial-gradient(ellipse 50% 50% at 50% 50%, #000 62%, transparent 100%);
+}
 .top-actions { display: flex; gap: 8px; }
 .icon-btn { position: relative; width: 42px; height: 42px; padding: 0; display: grid; place-items: center; background: var(--panel); }
 .icon-btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
