@@ -128,7 +128,6 @@ function selectTab(name) {
   if (name === 'settings') fillSettings();
 }
 for (const b of document.querySelectorAll('[role=tab]')) b.addEventListener('click', () => selectTab(b.dataset.tab));
-for (const b of document.querySelectorAll('[data-goto]')) b.addEventListener('click', () => selectTab(b.dataset.goto));
 
 function applyFilter(panel) {
   const input = panel.querySelector('.filter');
