@@ -1,0 +1,11 @@
+[
+  { "id": "dagger", "name": "Dagger", "kind": "weapon", "data": { "ability": "dex", "damage": "1d4", "proficient": true } },
+  { "id": "shortsword", "name": "Shortsword", "kind": "weapon", "data": { "ability": "dex", "damage": "1d6", "proficient": true } },
+  { "id": "longsword", "name": "Longsword", "kind": "weapon", "data": { "ability": "str", "damage": "1d8", "proficient": true } },
+  { "id": "battleaxe", "name": "Battleaxe", "kind": "weapon", "data": { "ability": "str", "damage": "1d8", "proficient": true } },
+  { "id": "greatsword", "name": "Greatsword", "kind": "weapon", "data": { "ability": "str", "damage": "2d6", "proficient": true } },
+  { "id": "spear", "name": "Spear", "kind": "weapon", "data": { "ability": "str", "damage": "1d6", "proficient": true } },
+  { "id": "shortbow", "name": "Shortbow", "kind": "weapon", "data": { "ability": "dex", "damage": "1d6", "proficient": true } },
+  { "id": "longbow", "name": "Longbow", "kind": "weapon", "data": { "ability": "dex", "damage": "1d8", "proficient": true } },
+  { "id": "quarterstaff", "name": "Quarterstaff", "kind": "weapon", "data": { "ability": "str", "damage": "1d6", "proficient": true } }
+]

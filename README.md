@@ -18,6 +18,15 @@ The desktop app hosts your world (or joins someone else's); players join from th
 - **Sheets:** HTML templates with two-way binding and roll buttons, or a fully custom JS renderer, or an auto-generated form if the system defines nothing.
 - **Dice engine:** `4d6dl1`, `2d20kh1 + @abilities.dex.mod`, `3d6!`, `2d6r1`, `4dF`, `d%`, arithmetic, and variables pulled from actor data.
 - **Chat:** `/r`, `/gmr` (private to GM), `/w name` whispers.
+- **Walls, vision and fog of war:** the GM draws walls (solid, terrain, invisible, ethereal, windows) and doors (normal or secret) from the left controls. With vision on, players see only what their tokens can see; walls and closed doors block sight and movement (movement is checked on the server). With fog of war, explored areas stay visible but dimmed and are remembered per player. Doors open with a click; the GM can lock them.
+- **Lighting and day/night:** each scene has a darkness level (scene settings, or the Day / Night button fades between day and night). The GM places lights (click for a torch, drag to set the reach; plain or coloured, switchable on/off), and tokens can carry light and have darkvision (right-click a token for its settings). At night, players see only lit areas and what their darkvision reaches, and light stops at walls.
+- **Drawings:** rectangles, ellipses, polygons, freehand lines and text, from the Drawing tools on the left. Everyone can draw; players can move, restyle (line colour and width, fill, text and size) and delete their own drawings, the GM all of them.
+- **Journal:** notes, handouts and lore in folders, written in Markdown with an optional image. Link entries with `[[Entry name]]` and add roll buttons with `[[/r 1d20 + 3]]`. The GM chooses who sees each entry (hidden, name only, read, or read and edit, for everyone or per player) and can pop an entry up on players' screens with **Show to players**. Players never receive entries they can't see.
+- **Items directory:** a library of items built from the system's item types, in folders. Share them with players (all or per player) and drag one onto an actor's sheet to give them a copy.
+- **Rollable tables:** results with weights (paste a list to fill one quickly). The server rolls and posts the result in chat. Players can roll on tables the GM shares, and the GM can roll privately.
+- **Macros and hotbar:** chat macros (`/r 1d20 + 5 # Attack`) for everyone; script macros with the full client API for the GM, who can share them. Ten hotbar slots per player along the bottom: drag a macro onto a slot, then click it or press 1–0.
+- **Collections:** content libraries. Systems and modules ship packs (d20 Lite comes with weapons, a small bestiary and a rules reference); the GM browses them, previews entries and imports copies into the world. The GM can also build world collections from their own actors, items, journal entries, tables and macros, and share them with players. Players can drag items from shared collections onto their characters.
+- **Playlists and ambient sound:** the GM uploads audio into playlists (in order, shuffled, or all at once) and plays them for everyone, in sync, even for players who join late. Ambient sounds placed on the map loop and get louder as tokens approach; walls muffle them. The GM can preview what a spot sounds like. Every player sets their own music, ambience and map-sound volume.
 - **Combat tracker:** start an encounter from the scene's tokens, roll initiative with the system's formula (GM for NPCs, players for their own characters), step through turns and rounds, mark combatants defeated or hidden. The active token glows on the board and players are told when it's their turn.
 - **Player accounts:** the GM adds players (Settings → Players) with a temporary password. Players pick their name on the join page; on first login they choose their own password. Passwords are stored as Argon2 hashes, separately from the world data. The join page also shows the world description, the next session and who's online.
 - **Packages:**
@@ -86,6 +95,11 @@ To play over the internet, forward the port on your router, or use a tunnel (Tai
 | Arrow keys | Nudge selected tokens |
 | `H` / `Delete` (GM) | Hide/show / delete selected tokens |
 | Drag actor from sidebar (GM) | Place a token (hold Alt for hidden) |
+| Right-click token (GM) | Token settings: name, size, colour, image, hidden, darkvision, carried light |
+| Lighting tools (GM) | Place light: click for a torch or drag to set its reach. Select lights: drag to move, double-click to configure, right-click to switch on/off, `Delete` removes |
+| Sound tools (GM) | Place sound: click where it plays. Select sounds: drag to move, double-click to configure, right-click to switch on/off, `Delete` removes. Preview: hear from the mouse pointer |
+| Drawing tools | Drag a rectangle, ellipse or freehand line; click polygon corners (Enter, double-click or the first corner finishes, Esc cancels); click to place text |
+| Select drawings | Drag to move, double-click to restyle, `Delete` removes |
 
 ## Project layout
 
@@ -130,15 +144,20 @@ The web client and packages are served straight from disk, so edit and refresh. 
 
 - [x] Desktop app that hosts or joins a world
 - [ ] Signed Windows/macOS/Linux installers built by GitHub Actions
-- [ ] Per-player passwords / invite links; finer permissions (limited/observer)
-- [ ] Walls, dynamic lighting and fog of war
-- [ ] Hex grids, drawings, templates (cones, circles)
-- [ ] Combat tracker / initiative
-- [ ] Journals, roll tables, compendium packs
-- [ ] Audio playlists
+- [x] Player accounts with their own passwords; per-player access (limited/observer/owner) for journal, items, tables and collections
+- [ ] Invite links
+- [x] Walls, vision and fog of war
+- [x] Dynamic lighting and day/night
+- [x] Drawings
+- [ ] Hex grids, templates (cones, circles)
+- [x] Combat tracker / initiative
+- [x] Journals
+- [x] Items directory, roll tables, macros and hotbar
+- [x] Collections (content packs)
+- [x] Audio playlists and ambient sound
 - [ ] WebAssembly plugins for heavier server-side logic
 - [ ] Package browser: install systems/modules from a git URL
-- [ ] Multi-world launcher and world backups
+- [x] Multi-world launcher and world backups
 
 ## License
 

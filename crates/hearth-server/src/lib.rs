@@ -3,6 +3,7 @@
 
 pub mod backups;
 pub mod credentials;
+mod fog;
 mod http;
 mod persist;
 mod state;
@@ -106,6 +107,7 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<RunningServer> {
         .route("/api/info", get(http::info))
         .route("/api/upload", post(http::upload).layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
         .route("/packages/{id}/{*path}", get(http::package_file))
+        .route("/api/collections/{pkg}/{pack}", get(http::collection))
         // Uploaded files get unique names, so they can be cached for good.
         .nest_service(
             "/assets",

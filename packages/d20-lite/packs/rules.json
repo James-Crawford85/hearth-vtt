@@ -1,0 +1,4 @@
+[
+  { "id": "conditions", "name": "Conditions", "folder": "Rules", "content": "# Conditions\n\n- **Blinded:** you can't see; attacks against you have advantage.\n- **Frightened:** disadvantage while you can see the source of your fear.\n- **Prone:** melee attacks against you have advantage; ranged ones disadvantage.\n- **Stunned:** you can't move or act.\n\nSee also [[Resting]]." },
+  { "id": "resting", "name": "Resting", "folder": "Rules", "content": "# Resting\n\nA **short rest** (1 hour) lets you spend hit dice: [[/r 1d8 + 1]] each.\n\nA **long rest** (8 hours) restores all hit points." }
+]

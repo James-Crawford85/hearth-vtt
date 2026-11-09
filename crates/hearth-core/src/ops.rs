@@ -25,6 +25,33 @@ pub enum Op {
     TokenUpdate { scene_id: Id, id: Id, patch: Value },
     TokenDelete { scene_id: Id, id: Id },
 
+    WallCreate { scene_id: Id, wall: Wall },
+    WallUpdate { scene_id: Id, id: Id, patch: Value },
+    WallDelete { scene_id: Id, id: Id },
+
+    LightCreate { scene_id: Id, light: Light },
+    LightUpdate { scene_id: Id, id: Id, patch: Value },
+    LightDelete { scene_id: Id, id: Id },
+
+    SoundCreate { scene_id: Id, sound: AmbientSound },
+    SoundUpdate { scene_id: Id, id: Id, patch: Value },
+    SoundDelete { scene_id: Id, id: Id },
+
+    /// Playlists. Start or stop a track by patching `sounds.<id>.playing`;
+    /// the server stamps `started`.
+    PlaylistCreate { playlist: Playlist },
+    PlaylistUpdate { id: Id, patch: Value },
+    PlaylistDelete { id: Id },
+
+    DrawingCreate { scene_id: Id, drawing: Drawing },
+    DrawingUpdate { scene_id: Id, id: Id, patch: Value },
+    DrawingDelete { scene_id: Id, id: Id },
+
+    /// Forget what everyone has explored on a scene.
+    FogReset { scene_id: Id },
+    /// Server-only: store one player's merged explored map.
+    FogExplore { scene_id: Id, user_id: Id, fog: FogMap },
+
     ActorCreate { actor: Actor },
     ActorUpdate { id: Id, patch: Value },
     ActorDelete { id: Id },
@@ -34,6 +61,32 @@ pub enum Op {
     ItemCreate { actor_id: Id, item: Item },
     ItemUpdate { actor_id: Id, id: Id, patch: Value },
     ItemDelete { actor_id: Id, id: Id },
+
+    /// Adds a journal entry, or replaces it if the id exists (the server also
+    /// uses this to send a player a changed view of an entry).
+    JournalCreate { entry: JournalEntry },
+    JournalUpdate { id: Id, patch: Value },
+    JournalDelete { id: Id },
+
+    /// The Items directory. Create replaces an existing id (as journal_create does).
+    LibraryItemCreate { item: LibraryItem },
+    LibraryItemUpdate { id: Id, patch: Value },
+    LibraryItemDelete { id: Id },
+
+    /// World collections (create replaces an existing id).
+    CollectionCreate { collection: Collection },
+    CollectionUpdate { id: Id, patch: Value },
+    CollectionDelete { id: Id },
+
+    TableCreate { table: RollTable },
+    TableUpdate { id: Id, patch: Value },
+    TableDelete { id: Id },
+
+    MacroCreate { r#macro: Macro },
+    MacroUpdate { id: Id, patch: Value },
+    MacroDelete { id: Id },
+    /// Put a macro in (or, with none, clear) a slot of a user's hotbar.
+    HotbarSet { user_id: Id, slot: u8, macro_id: Option<Id> },
 
     ChatCreate { message: ChatMessage },
     ChatDelete { id: Id },
@@ -74,7 +127,10 @@ pub enum OpError {
 impl Op {
     /// Ops only the server itself may originate.
     pub fn is_server_only(&self) -> bool {
-        matches!(self, Op::ActorDerive { .. } | Op::UserUpsert { .. } | Op::UserDelete { .. } | Op::ChatCreate { .. })
+        matches!(
+            self,
+            Op::ActorDerive { .. } | Op::UserUpsert { .. } | Op::UserDelete { .. } | Op::ChatCreate { .. } | Op::FogExplore { .. }
+        )
     }
 
     /// The actor an op touches, if any (used to re-run `prepare_actor`).
@@ -107,7 +163,7 @@ impl World {
     pub fn apply(&mut self, op: &Op) -> Result<(), OpError> {
         match op {
             Op::WorldUpdate { patch } => {
-                patch_entity(self, patch, &["system", "scenes", "actors", "users", "chat", "active_scene", "combat"])?
+                patch_entity(self, patch, &["system", "scenes", "actors", "users", "chat", "active_scene", "combat", "journal", "fog", "items", "tables", "macros", "hotbars", "playlists", "collections"])?
             }
 
             Op::SceneCreate { scene } => {
@@ -119,7 +175,7 @@ impl World {
                     self.active_scene = Some(scene.id.clone());
                 }
             }
-            Op::SceneUpdate { id, patch } => patch_entity(scene_mut(self, id)?, patch, &["tokens"])?,
+            Op::SceneUpdate { id, patch } => patch_entity(scene_mut(self, id)?, patch, &["tokens", "walls", "drawings", "lights", "sounds"])?,
             Op::SceneDelete { id } => {
                 self.scenes.remove(id).ok_or_else(|| OpError::NotFound("scene", id.clone()))?;
                 if self.active_scene.as_deref() == Some(id) {
@@ -128,6 +184,85 @@ impl World {
                 if self.combat.as_ref().is_some_and(|c| &c.scene_id == id) {
                     self.combat = None;
                 }
+                self.fog.remove(id);
+            }
+
+            Op::WallCreate { scene_id, wall } => {
+                let s = scene_mut(self, scene_id)?;
+                if s.walls.contains_key(&wall.id) {
+                    return Err(OpError::Exists("wall", wall.id.clone()));
+                }
+                s.walls.insert(wall.id.clone(), wall.clone());
+            }
+            Op::WallUpdate { scene_id, id, patch } => {
+                let w = scene_mut(self, scene_id)?.walls.get_mut(id).ok_or_else(|| OpError::NotFound("wall", id.clone()))?;
+                patch_entity(w, patch, &[])?
+            }
+            Op::WallDelete { scene_id, id } => {
+                scene_mut(self, scene_id)?.walls.remove(id).ok_or_else(|| OpError::NotFound("wall", id.clone()))?;
+            }
+            Op::LightCreate { scene_id, light } => {
+                let s = scene_mut(self, scene_id)?;
+                if s.lights.contains_key(&light.id) {
+                    return Err(OpError::Exists("light", light.id.clone()));
+                }
+                s.lights.insert(light.id.clone(), light.clone());
+            }
+            Op::LightUpdate { scene_id, id, patch } => {
+                let l = scene_mut(self, scene_id)?.lights.get_mut(id).ok_or_else(|| OpError::NotFound("light", id.clone()))?;
+                patch_entity(l, patch, &[])?
+            }
+            Op::LightDelete { scene_id, id } => {
+                scene_mut(self, scene_id)?.lights.remove(id).ok_or_else(|| OpError::NotFound("light", id.clone()))?;
+            }
+            Op::SoundCreate { scene_id, sound } => {
+                let s = scene_mut(self, scene_id)?;
+                if s.sounds.contains_key(&sound.id) {
+                    return Err(OpError::Exists("sound", sound.id.clone()));
+                }
+                s.sounds.insert(sound.id.clone(), sound.clone());
+            }
+            Op::SoundUpdate { scene_id, id, patch } => {
+                let x = scene_mut(self, scene_id)?.sounds.get_mut(id).ok_or_else(|| OpError::NotFound("sound", id.clone()))?;
+                patch_entity(x, patch, &[])?
+            }
+            Op::SoundDelete { scene_id, id } => {
+                scene_mut(self, scene_id)?.sounds.remove(id).ok_or_else(|| OpError::NotFound("sound", id.clone()))?;
+            }
+            Op::PlaylistCreate { playlist } => {
+                if self.playlists.contains_key(&playlist.id) {
+                    return Err(OpError::Exists("playlist", playlist.id.clone()));
+                }
+                self.playlists.insert(playlist.id.clone(), playlist.clone());
+            }
+            Op::PlaylistUpdate { id, patch } => {
+                let x = self.playlists.get_mut(id).ok_or_else(|| OpError::NotFound("playlist", id.clone()))?;
+                patch_entity(x, patch, &[])?
+            }
+            Op::PlaylistDelete { id } => {
+                self.playlists.remove(id).ok_or_else(|| OpError::NotFound("playlist", id.clone()))?;
+            }
+            Op::DrawingCreate { scene_id, drawing } => {
+                let s = scene_mut(self, scene_id)?;
+                if s.drawings.contains_key(&drawing.id) {
+                    return Err(OpError::Exists("drawing", drawing.id.clone()));
+                }
+                s.drawings.insert(drawing.id.clone(), drawing.clone());
+            }
+            Op::DrawingUpdate { scene_id, id, patch } => {
+                let d = scene_mut(self, scene_id)?.drawings.get_mut(id).ok_or_else(|| OpError::NotFound("drawing", id.clone()))?;
+                patch_entity(d, patch, &["author"])?
+            }
+            Op::DrawingDelete { scene_id, id } => {
+                scene_mut(self, scene_id)?.drawings.remove(id).ok_or_else(|| OpError::NotFound("drawing", id.clone()))?;
+            }
+            Op::FogReset { scene_id } => {
+                scene_mut(self, scene_id)?;
+                self.fog.remove(scene_id);
+            }
+            Op::FogExplore { scene_id, user_id, fog } => {
+                scene_mut(self, scene_id)?;
+                self.fog.entry(scene_id.clone()).or_default().insert(user_id.clone(), fog.clone());
             }
             Op::SceneActivate { id } => {
                 scene_mut(self, id)?;
@@ -156,6 +291,72 @@ impl World {
                 // A deleted token leaves the fight too.
                 if let Some(c) = self.combat.as_mut().filter(|c| &c.scene_id == scene_id) {
                     c.combatants.retain(|x| x.token_id.as_deref() != Some(id));
+                }
+            }
+
+            Op::JournalCreate { entry } => {
+                self.journal.insert(entry.id.clone(), entry.clone());
+            }
+            Op::JournalUpdate { id, patch } => {
+                let e = self.journal.get_mut(id).ok_or_else(|| OpError::NotFound("journal entry", id.clone()))?;
+                patch_entity(e, patch, &["id"])?
+            }
+            Op::JournalDelete { id } => {
+                self.journal.remove(id).ok_or_else(|| OpError::NotFound("journal entry", id.clone()))?;
+            }
+
+            Op::LibraryItemCreate { item } => {
+                self.items.insert(item.item.id.clone(), item.clone());
+            }
+            Op::LibraryItemUpdate { id, patch } => {
+                let x = self.items.get_mut(id).ok_or_else(|| OpError::NotFound("item", id.clone()))?;
+                patch_entity(x, patch, &["id"])?
+            }
+            Op::LibraryItemDelete { id } => {
+                self.items.remove(id).ok_or_else(|| OpError::NotFound("item", id.clone()))?;
+            }
+            Op::CollectionCreate { collection } => {
+                self.collections.insert(collection.id.clone(), collection.clone());
+            }
+            Op::CollectionUpdate { id, patch } => {
+                let x = self.collections.get_mut(id).ok_or_else(|| OpError::NotFound("collection", id.clone()))?;
+                patch_entity(x, patch, &["id"])?
+            }
+            Op::CollectionDelete { id } => {
+                self.collections.remove(id).ok_or_else(|| OpError::NotFound("collection", id.clone()))?;
+            }
+            Op::TableCreate { table } => {
+                self.tables.insert(table.id.clone(), table.clone());
+            }
+            Op::TableUpdate { id, patch } => {
+                let x = self.tables.get_mut(id).ok_or_else(|| OpError::NotFound("table", id.clone()))?;
+                patch_entity(x, patch, &["id"])?
+            }
+            Op::TableDelete { id } => {
+                self.tables.remove(id).ok_or_else(|| OpError::NotFound("table", id.clone()))?;
+            }
+            Op::MacroCreate { r#macro } => {
+                self.macros.insert(r#macro.id.clone(), r#macro.clone());
+            }
+            Op::MacroUpdate { id, patch } => {
+                let x = self.macros.get_mut(id).ok_or_else(|| OpError::NotFound("macro", id.clone()))?;
+                patch_entity(x, patch, &["id", "author"])?
+            }
+            Op::MacroDelete { id } => {
+                self.macros.remove(id).ok_or_else(|| OpError::NotFound("macro", id.clone()))?;
+                for bar in self.hotbars.values_mut() {
+                    bar.retain(|_, m| m != id);
+                }
+            }
+            Op::HotbarSet { user_id, slot, macro_id } => {
+                let bar = self.hotbars.entry(user_id.clone()).or_default();
+                match macro_id {
+                    Some(m) => {
+                        bar.insert(*slot, m.clone());
+                    }
+                    None => {
+                        bar.remove(slot);
+                    }
                 }
             }
 
@@ -290,6 +491,8 @@ mod tests {
             rotation: 0.0,
             hidden: false,
             show_name: true,
+            sight: 0.0,
+            light: None,
             flags: Value::Null,
         };
         w.apply(&Op::TokenCreate { scene_id: sid.clone(), token }).unwrap();
@@ -424,5 +627,133 @@ mod combat_tests {
         assert!(w.combat.as_ref().unwrap().combatant("a").is_none());
         w.apply(&Op::SceneDelete { id: sid }).unwrap();
         assert!(w.combat.is_none());
+    }
+}
+
+#[cfg(test)]
+mod light_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn lights_darkness_and_token_light() {
+        let mut w = World::new("T", "freeform");
+        let sid = w.active_scene.clone().unwrap();
+        let l: Light = serde_json::from_value(json!({"id": "l1", "x": 70, "y": 70, "bright": 10, "dim": 20})).unwrap();
+        w.apply(&Op::LightCreate { scene_id: sid.clone(), light: l }).unwrap();
+        w.apply(&Op::LightUpdate { scene_id: sid.clone(), id: "l1".into(), patch: json!({"off": true, "color": "#ff8800"}) }).unwrap();
+        assert!(w.scenes[&sid].lights["l1"].off);
+        // Lights can't be replaced through a scene patch; darkness can be set.
+        w.apply(&Op::SceneUpdate { id: sid.clone(), patch: json!({"lights": {}, "darkness": 0.8}) }).unwrap();
+        assert_eq!(w.scenes[&sid].lights.len(), 1);
+        assert_eq!(w.scenes[&sid].darkness, 0.8);
+        w.apply(&Op::LightDelete { scene_id: sid.clone(), id: "l1".into() }).unwrap();
+        assert!(w.scenes[&sid].lights.is_empty());
+        // A partial patch gives a token a light; null takes it away.
+        let t: Token = serde_json::from_value(json!({"id": "t1", "name": "A", "x": 0, "y": 0})).unwrap();
+        w.apply(&Op::TokenCreate { scene_id: sid.clone(), token: t }).unwrap();
+        w.apply(&Op::TokenUpdate { scene_id: sid.clone(), id: "t1".into(), patch: json!({"light": {"dim": 40}, "sight": 60}) }).unwrap();
+        let t = &w.scenes[&sid].tokens["t1"];
+        assert_eq!((t.light.as_ref().unwrap().dim, t.sight), (40.0, 60.0));
+        w.apply(&Op::TokenUpdate { scene_id: sid.clone(), id: "t1".into(), patch: json!({"light": null}) }).unwrap();
+        assert!(w.scenes[&sid].tokens["t1"].light.is_none());
+    }
+}
+
+#[cfg(test)]
+mod drawing_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn drawings_lifecycle_and_author_is_protected() {
+        let mut w = World::new("T", "freeform");
+        let sid = w.active_scene.clone().unwrap();
+        let d: Drawing = serde_json::from_value(json!({"id": "d1", "kind": "freehand", "author": "u1", "x": 10, "y": 20, "points": [[0, 0], [5, 5]]})).unwrap();
+        assert_eq!(d.stroke_width, 4.0, "defaults fill in");
+        w.apply(&Op::DrawingCreate { scene_id: sid.clone(), drawing: d }).unwrap();
+        w.apply(&Op::DrawingUpdate { scene_id: sid.clone(), id: "d1".into(), patch: json!({"x": 99, "author": "thief", "stroke": "#fff"}) }).unwrap();
+        let d = &w.scenes[&sid].drawings["d1"];
+        assert_eq!((d.x, d.author.as_str(), d.stroke.as_str()), (99.0, "u1", "#fff"));
+        // A scene patch can't overwrite drawings wholesale.
+        w.apply(&Op::SceneUpdate { id: sid.clone(), patch: json!({"drawings": {}}) }).unwrap();
+        assert_eq!(w.scenes[&sid].drawings.len(), 1);
+        w.apply(&Op::DrawingDelete { scene_id: sid.clone(), id: "d1".into() }).unwrap();
+        assert!(w.scenes[&sid].drawings.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use crate::model::{RollTable, TableResult};
+
+    #[test]
+    fn weights_decide_which_result_a_roll_picks() {
+        let r = |text: &str, weight| TableResult { text: text.into(), weight };
+        let t = RollTable {
+            id: "t".into(), name: "t".into(), folder: String::new(), description: String::new(),
+            results: vec![r("rat", 3), r("never", 0), r("wolf", 2), r("dragon", 1)],
+            access: Default::default(), players: Default::default(),
+        };
+        assert_eq!(t.total_weight(), 6);
+        let picks: Vec<_> = (1..=6).map(|n| t.pick(n).unwrap().text.as_str()).collect();
+        assert_eq!(picks, ["rat", "rat", "rat", "wolf", "wolf", "dragon"]);
+        assert!(t.pick(7).is_none());
+    }
+}
+
+#[cfg(test)]
+mod sound_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn ambient_sounds_and_playlists() {
+        let mut w = World::new("T", "freeform");
+        let sid = w.active_scene.clone().unwrap();
+        let s: AmbientSound = serde_json::from_value(json!({"id": "s1", "x": 0, "y": 0, "radius": 30, "src": "/assets/rain.ogg"})).unwrap();
+        assert!(s.walls && s.volume == 1.0, "defaults: muffled by walls, full volume");
+        w.apply(&Op::SoundCreate { scene_id: sid.clone(), sound: s }).unwrap();
+        w.apply(&Op::SceneUpdate { id: sid.clone(), patch: json!({"sounds": {}}) }).unwrap();
+        assert_eq!(w.scenes[&sid].sounds.len(), 1, "scene patches can't wipe sounds");
+        w.apply(&Op::SoundUpdate { scene_id: sid.clone(), id: "s1".into(), patch: json!({"off": true}) }).unwrap();
+        assert!(w.scenes[&sid].sounds["s1"].off);
+
+        let p: Playlist = serde_json::from_value(json!({"id": "p1", "name": "Tavern", "sounds": {
+            "a": {"id": "a", "name": "Lute", "src": "/assets/lute.mp3"}
+        }})).unwrap();
+        w.apply(&Op::PlaylistCreate { playlist: p }).unwrap();
+        // Add a track and start the first through merge patches.
+        w.apply(&Op::PlaylistUpdate { id: "p1".into(), patch: json!({"sounds": {
+            "b": {"id": "b", "name": "Crowd", "src": "/assets/crowd.ogg", "sort": 1},
+            "a": {"playing": true, "started": 1234}
+        }}) }).unwrap();
+        let pl = &w.playlists["p1"];
+        assert_eq!(pl.sounds.len(), 2);
+        assert!(pl.sounds["a"].playing && pl.sounds["a"].started == 1234);
+        // Removing a track.
+        w.apply(&Op::PlaylistUpdate { id: "p1".into(), patch: json!({"sounds": {"b": null}}) }).unwrap();
+        assert_eq!(w.playlists["p1"].sounds.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod collection_tests {
+    use crate::model::*;
+    use serde_json::json;
+
+    #[test]
+    fn limited_collections_hide_their_entries() {
+        let c: Collection = serde_json::from_value(json!({
+            "id": "c", "name": "Spells", "kind": "item", "access": "limited",
+            "entries": { "e1": { "name": "Fireball", "kind": "spell" } }
+        })).unwrap();
+        let mut w = World::new("T", "freeform");
+        w.collections.insert("c".into(), c);
+        let p = User { id: "p".into(), name: "P".into(), role: Role::Player, color: "#fff".into() };
+        let v = w.view_for(&p);
+        assert!(v.collections["c"].entries.is_empty());
+        w.collections.get_mut("c").unwrap().access = Access::None;
+        assert!(w.view_for(&p).collections.is_empty());
     }
 }

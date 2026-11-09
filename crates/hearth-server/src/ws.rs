@@ -115,6 +115,8 @@ async fn run<S, R>(
                         (None, state.roll(user, &formula, flavor, actor_id, gm_only).await)
                     }
                     ClientMsg::RollInitiative { ids } => (None, state.roll_initiative(user, ids).await),
+                    ClientMsg::DrawTable { id, gm_only } => (None, state.draw_table(user, &id, gm_only).await),
+                    ClientMsg::Explore { scene_id, fog } => (None, state.explore(user, &scene_id, fog).await),
                     ClientMsg::Emit { channel, payload, to } => {
                         state.emit(user, channel, payload, to);
                         (None, Ok(()))

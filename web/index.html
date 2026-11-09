@@ -75,11 +75,13 @@
 
   <main id="app" hidden>
     <canvas id="board" tabindex="0" aria-label="Game board"></canvas>
-    <nav id="toolbar" class="toolbar" aria-label="Tools"></nav>
     <div id="scene-title" class="scene-title"></div>
     <aside id="sidebar" class="sidebar">
-      <div class="tabs" role="tablist" id="tabs"></div>
-      <div class="tab-panels" id="tab-panels"></div>
+      <section class="panel-area">
+        <header class="panel-head"><h2 id="panel-title"></h2></header>
+        <div class="tab-panels" id="tab-panels"></div>
+      </section>
+      <nav class="rail" role="tablist" id="tabs" aria-label="Panels"></nav>
     </aside>
     <div id="windows"></div>
     <div id="toasts" class="toasts" aria-live="polite"></div>

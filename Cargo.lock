@@ -1791,6 +1791,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "axum",
+ "base64 0.22.1",
  "clap",
  "futures",
  "hearth-core",

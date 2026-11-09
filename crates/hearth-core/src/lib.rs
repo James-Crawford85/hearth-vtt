@@ -6,14 +6,17 @@
 //! their local mirror. Systems and modules never need new op types — they
 //! store their data in the free-form `data` / `flags` JSON of entities.
 
+pub mod geometry;
 pub mod model;
 pub mod ops;
 pub mod patch;
 pub mod protocol;
+pub mod scoped;
 
 pub use model::*;
 pub use ops::{Op, OpError};
 pub use protocol::{ClientMsg, ServerMsg};
+pub use scoped::{Scoped, Shared};
 
 /// Generate a short random id (12 hex chars).
 pub fn new_id() -> String {

@@ -53,11 +53,12 @@ export function applyOp(op) {
   switch (op.op) {
     case 'world_update': patchEntity(w, op.patch, ['system', 'scenes', 'actors', 'users', 'chat', 'active_scene']); break;
     case 'scene_create': w.scenes[op.scene.id] = op.scene; if (!w.active_scene) w.active_scene = op.scene.id; break;
-    case 'scene_update': if (scene(op.id)) patchEntity(scene(op.id), op.patch, ['tokens']); break;
+    case 'scene_update': if (scene(op.id)) patchEntity(scene(op.id), op.patch, ['tokens', 'walls', 'drawings', 'lights', 'sounds']); break;
     case 'scene_delete':
       delete w.scenes[op.id];
       if (w.active_scene === op.id) w.active_scene = Object.keys(w.scenes)[0] ?? null;
       if (w.combat?.scene_id === op.id) w.combat = null;
+      if (w.fog) delete w.fog[op.id];
       break;
     case 'scene_activate': w.active_scene = op.id; break;
     case 'token_create': if (scene(op.scene_id)) scene(op.scene_id).tokens[op.token.id] = op.token; break;
@@ -71,6 +72,26 @@ export function applyOp(op) {
       if (w.combat?.scene_id === op.scene_id) w.combat.combatants = w.combat.combatants.filter((x) => x.token_id !== op.id);
       break;
     case 'actor_create': w.actors[op.actor.id] = op.actor; break;
+    case 'journal_create': (w.journal ??= {})[op.entry.id] = op.entry; break;
+    case 'journal_update': if (w.journal?.[op.id]) patchEntity(w.journal[op.id], op.patch, ['id']); break;
+    case 'journal_delete': if (w.journal) delete w.journal[op.id]; break;
+    case 'library_item_create': (w.items ??= {})[op.item.id] = op.item; break;
+    case 'library_item_update': if (w.items?.[op.id]) patchEntity(w.items[op.id], op.patch, ['id']); break;
+    case 'library_item_delete': if (w.items) delete w.items[op.id]; break;
+    case 'table_create': (w.tables ??= {})[op.table.id] = op.table; break;
+    case 'table_update': if (w.tables?.[op.id]) patchEntity(w.tables[op.id], op.patch, ['id']); break;
+    case 'table_delete': if (w.tables) delete w.tables[op.id]; break;
+    case 'macro_create': (w.macros ??= {})[op.macro.id] = op.macro; break;
+    case 'macro_update': if (w.macros?.[op.id]) patchEntity(w.macros[op.id], op.patch, ['id', 'author']); break;
+    case 'macro_delete':
+      if (w.macros) delete w.macros[op.id];
+      for (const bar of Object.values(w.hotbars ?? {})) for (const [k, v] of Object.entries(bar)) if (v === op.id) delete bar[k];
+      break;
+    case 'hotbar_set': {
+      const bar = ((w.hotbars ??= {})[op.user_id] ??= {});
+      if (op.macro_id) bar[op.slot] = op.macro_id; else delete bar[op.slot];
+      break;
+    }
     case 'actor_update': if (actor(op.id)) patchEntity(actor(op.id), op.patch, ['items', 'derived']); break;
     case 'actor_delete':
       delete w.actors[op.id];
@@ -100,6 +121,34 @@ export function applyOp(op) {
       delete w.users[op.id];
       for (const a of Object.values(w.actors)) a.owners = a.owners.filter((o) => o !== op.id);
       break;
+    case 'wall_create': if (scene(op.scene_id)) (scene(op.scene_id).walls ??= {})[op.wall.id] = op.wall; break;
+    case 'wall_update': {
+      const wall = scene(op.scene_id)?.walls?.[op.id];
+      if (wall) patchEntity(wall, op.patch);
+      break;
+    }
+    case 'wall_delete': if (scene(op.scene_id)?.walls) delete scene(op.scene_id).walls[op.id]; break;
+    case 'sound_create': if (scene(op.scene_id)) (scene(op.scene_id).sounds ??= {})[op.sound.id] = op.sound; break;
+    case 'sound_update': { const x = scene(op.scene_id)?.sounds?.[op.id]; if (x) patchEntity(x, op.patch); break; }
+    case 'sound_delete': if (scene(op.scene_id)?.sounds) delete scene(op.scene_id).sounds[op.id]; break;
+    case 'collection_create': (w.collections ??= {})[op.collection.id] = op.collection; break;
+    case 'collection_update': if (w.collections?.[op.id]) patchEntity(w.collections[op.id], op.patch, ['id']); break;
+    case 'collection_delete': if (w.collections) delete w.collections[op.id]; break;
+    case 'playlist_create': (w.playlists ??= {})[op.playlist.id] = op.playlist; break;
+    case 'playlist_update': if (w.playlists?.[op.id]) patchEntity(w.playlists[op.id], op.patch, ['id']); break;
+    case 'playlist_delete': if (w.playlists) delete w.playlists[op.id]; break;
+    case 'light_create': if (scene(op.scene_id)) (scene(op.scene_id).lights ??= {})[op.light.id] = op.light; break;
+    case 'light_update': { const l = scene(op.scene_id)?.lights?.[op.id]; if (l) patchEntity(l, op.patch); break; }
+    case 'light_delete': if (scene(op.scene_id)?.lights) delete scene(op.scene_id).lights[op.id]; break;
+    case 'drawing_create': if (scene(op.scene_id)) (scene(op.scene_id).drawings ??= {})[op.drawing.id] = op.drawing; break;
+    case 'drawing_update': {
+      const d = scene(op.scene_id)?.drawings?.[op.id];
+      if (d) patchEntity(d, op.patch, ['author']);
+      break;
+    }
+    case 'drawing_delete': if (scene(op.scene_id)?.drawings) delete scene(op.scene_id).drawings[op.id]; break;
+    case 'fog_reset': if (w.fog) delete w.fog[op.scene_id]; break;
+    case 'fog_explore': ((w.fog ??= {})[op.scene_id] ??= {})[op.user_id] = op.fog; break;
     case 'combat_create': w.combat = op.combat; break;
     case 'combat_update': if (w.combat) patchEntity(w.combat, op.patch, ['combatants', 'scene_id']); break;
     case 'combat_end': w.combat = null; break;

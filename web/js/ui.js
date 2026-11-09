@@ -102,18 +102,25 @@ export function formDialog({ title, fields, submit = 'Save' }) {
       let input;
       if (f.type === 'select') {
         input = el('select', { name: f.name }, ...f.options.map(([v, l]) => el('option', { value: v, text: l, selected: v === f.value })));
+      } else if (f.type === 'textarea') {
+        input = el('textarea', { name: f.name, rows: 4, required: f.required ?? false });
+        input.value = f.value ?? '';
+      } else if (f.type === 'checkbox') {
+        input = el('input', { name: f.name, type: 'checkbox' });
+        input.checked = !!f.value;
       } else {
         input = el('input', { name: f.name, type: f.type ?? 'text', value: f.value ?? '', required: f.required ?? false, min: f.min, step: f.step });
       }
-      form.append(el('label', {}, f.label, input));
+      form.append(f.type === 'checkbox' ? el('label.check', {}, input, f.label) : el('label', {}, f.label, input));
     }
     form.append(el('button.primary', { type: 'submit', text: submit }));
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       const out = {};
       for (const f of fields) {
-        const v = form.elements[f.name].value;
-        out[f.name] = f.type === 'number' ? Number(v) : v;
+        const input = form.elements[f.name];
+        const v = input.value;
+        out[f.name] = f.type === 'number' ? Number(v) : f.type === 'checkbox' ? input.checked : v;
       }
       resolved = true;
       w.close();
@@ -122,6 +129,6 @@ export function formDialog({ title, fields, submit = 'Save' }) {
     let resolved = false;
     w.onClose(() => { if (!resolved) resolve(null); });
     w.body.append(form);
-    form.querySelector('input,select')?.focus();
+    form.querySelector('input,select,textarea')?.focus();
   });
 }

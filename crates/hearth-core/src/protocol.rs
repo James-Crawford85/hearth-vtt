@@ -73,6 +73,10 @@ pub enum ClientMsg {
     Logout,
     /// Roll initiative for these combatants (GM: any; players: their own).
     RollInitiative { ids: Vec<Id> },
+    /// Roll on a rollable table; the result goes to chat.
+    DrawTable { id: Id, #[serde(default)] gm_only: bool },
+    /// Areas this player has now seen on a scene (merged into their fog map).
+    Explore { scene_id: Id, fog: crate::model::FogMap },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

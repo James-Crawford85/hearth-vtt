@@ -1,0 +1,14 @@
+[
+  { "id": "goblin", "name": "Goblin", "kind": "npc", "data": { "level": 1, "ac": 13, "speed": 30, "hp": { "value": 7, "max": 7 },
+    "abilities": { "str": 8, "dex": 14, "con": 10, "int": 10, "wis": 8, "cha": 8 }, "notes": "Sneaky, cowardly, fond of ambushes." },
+    "items": [ { "id": "scimitar", "name": "Scimitar", "kind": "weapon", "data": { "ability": "dex", "damage": "1d6", "proficient": true } } ] },
+  { "id": "wolf", "name": "Wolf", "kind": "npc", "data": { "level": 1, "ac": 12, "speed": 40, "hp": { "value": 11, "max": 11 },
+    "abilities": { "str": 12, "dex": 15, "con": 12, "int": 3, "wis": 12, "cha": 6 }, "notes": "Hunts in packs and knocks prey prone." },
+    "items": [ { "id": "bite", "name": "Bite", "kind": "weapon", "data": { "ability": "str", "damage": "2d4", "proficient": true } } ] },
+  { "id": "skeleton", "name": "Skeleton", "kind": "npc", "data": { "level": 1, "ac": 13, "speed": 30, "hp": { "value": 13, "max": 13 },
+    "abilities": { "str": 10, "dex": 14, "con": 15, "int": 6, "wis": 8, "cha": 5 }, "notes": "Rattles. Weak to bludgeoning." },
+    "items": [ { "id": "shortsword", "name": "Shortsword", "kind": "weapon", "data": { "ability": "dex", "damage": "1d6", "proficient": true } } ] },
+  { "id": "ogre", "name": "Ogre", "kind": "npc", "data": { "level": 3, "ac": 11, "speed": 40, "hp": { "value": 59, "max": 59 },
+    "abilities": { "str": 19, "dex": 8, "con": 16, "int": 5, "wis": 7, "cha": 7 }, "notes": "Big, hungry, easily fooled." },
+    "items": [ { "id": "club", "name": "Greatclub", "kind": "weapon", "data": { "ability": "str", "damage": "2d8", "proficient": true } } ] }
+]

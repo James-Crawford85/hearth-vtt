@@ -9,9 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hearth_core::patch::merge_patch;
 use hearth_core::protocol::UserAdmin;
-use hearth_core::{new_id, Actor, ChatMessage, Combatant, Id, Op, Role, ServerMsg, User, World};
+use hearth_core::{
+    new_id, Access, Actor, ChatMessage, Combatant, FogMap, Id, MacroKind, Op, Role, Scoped, ServerMsg, Shared, User, WallKind, World,
+};
 
 use crate::credentials::{self, Credentials};
+use crate::fog;
 use hearth_packages::{Registry, ScriptHost};
 use serde_json::Value;
 use tokio::sync::{broadcast, RwLock};
@@ -70,6 +73,21 @@ pub struct Joined {
 }
 
 const USER_COLORS: &[&str] = &["#e0a040", "#5b8def", "#e05f5f", "#57c785", "#b07ce8", "#e87cc2", "#4cc9d6", "#c9d64c"];
+
+/// What players could see of a per-player document before an op (see `scoped_events`).
+struct ScopedBefore {
+    kind: Scoped,
+    id: Id,
+    full: Option<Value>,
+    views: HashMap<Id, Option<Value>>,
+}
+
+/// Longest macro command or table result list, in bytes / entries.
+const MAX_MACRO_TEXT: usize = 64 * 1024;
+const MAX_TABLE_RESULTS: usize = 1000;
+
+/// Longest journal entry text, in bytes.
+const MAX_JOURNAL_TEXT: usize = 256 * 1024;
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -357,15 +375,49 @@ impl AppState {
         let deny = || Err("you don't have permission to do that".to_string());
         match op {
             Op::TokenUpdate { scene_id, id, patch } => {
-                let token = world.scenes.get(scene_id).and_then(|s| s.tokens.get(id)).ok_or("token not found")?;
+                let scene = world.scenes.get(scene_id).ok_or("scene not found")?;
+                let token = scene.tokens.get(id).ok_or("token not found")?;
                 let owned = token.actor_id.as_deref().is_some_and(|a| world.owns_actor(user, a));
                 let movement_only = patch
                     .as_object()
                     .is_some_and(|p| p.keys().all(|k| matches!(k.as_str(), "x" | "y" | "rotation")));
-                if owned && movement_only && !token.hidden {
+                if !(owned && movement_only && !token.hidden) {
+                    return deny();
+                }
+                // Walls and closed doors stop players' tokens (checked here so
+                // it can't be bypassed by a modified client).
+                let mut moved = token.clone();
+                if let Some(x) = patch.get("x").and_then(|v| v.as_f64()) {
+                    moved.x = x;
+                }
+                if let Some(y) = patch.get("y").and_then(|v| v.as_f64()) {
+                    moved.y = y;
+                }
+                if scene.move_blocked(scene.token_center(token), scene.token_center(&moved)) {
+                    return Err("A wall is in the way".into());
+                }
+                Ok(())
+            }
+            // Anyone can draw; players may only change or delete their own drawings.
+            Op::DrawingCreate { .. } => Ok(()),
+            Op::DrawingUpdate { scene_id, id, .. } | Op::DrawingDelete { scene_id, id } => {
+                let d = world.scenes.get(scene_id).and_then(|s| s.drawings.get(id)).ok_or("drawing not found")?;
+                if d.author == user.id {
                     Ok(())
                 } else {
+                    Err("You can only change your own drawings".into())
+                }
+            }
+            // Players can open and close unlocked doors.
+            Op::WallUpdate { scene_id, id, patch } => {
+                let wall = world.scenes.get(scene_id).and_then(|s| s.walls.get(id)).ok_or("wall not found")?;
+                let open_only = patch.as_object().is_some_and(|p| p.keys().all(|k| k == "open"));
+                if wall.kind != WallKind::Door || !open_only {
                     deny()
+                } else if wall.locked {
+                    Err("The door is locked".into())
+                } else {
+                    Ok(())
                 }
             }
             Op::ActorUpdate { id, patch } => {
@@ -393,6 +445,44 @@ impl AppState {
                     .is_some_and(|a| world.owns_actor(user, a));
                 let initiative_only = patch.as_object().is_some_and(|p| p.keys().all(|k| k == "initiative"));
                 if owned && initiative_only {
+                    Ok(())
+                } else {
+                    deny()
+                }
+            }
+            // Owners of a journal entry may edit its text, but not who can see it.
+            Op::JournalUpdate { id, patch } => {
+                let entry = world.journal.get(id).ok_or("journal entry not found")?;
+                let text_only = patch
+                    .as_object()
+                    .is_some_and(|p| p.keys().all(|k| matches!(k.as_str(), "name" | "folder" | "content" | "img")));
+                if entry.access_for(user) == Access::Owner && text_only {
+                    Ok(())
+                } else {
+                    deny()
+                }
+            }
+            // Players make chat macros of their own and put macros on their hotbar.
+            Op::MacroCreate { .. } => Ok(()),
+            Op::MacroUpdate { id, patch } => {
+                let m = world.macros.get(id).ok_or("macro not found")?;
+                let simple = patch.as_object().is_some_and(|p| p.keys().all(|k| matches!(k.as_str(), "name" | "command" | "img")));
+                if m.author == user.id && m.kind == MacroKind::Chat && simple {
+                    Ok(())
+                } else {
+                    Err("You can only change your own chat macros".into())
+                }
+            }
+            Op::MacroDelete { id } => {
+                let m = world.macros.get(id).ok_or("macro not found")?;
+                if m.author == user.id {
+                    Ok(())
+                } else {
+                    Err("You can only delete your own macros".into())
+                }
+            }
+            Op::HotbarSet { user_id, .. } => {
+                if user_id == &user.id {
                     Ok(())
                 } else {
                     deny()
@@ -492,6 +582,92 @@ impl AppState {
                     token.id = new_id();
                 }
             }
+            Op::SoundCreate { sound, .. } => {
+                if sound.id.is_empty() {
+                    sound.id = new_id();
+                }
+                sound.radius = sound.radius.max(0.0);
+                sound.volume = sound.volume.clamp(0.0, 1.0);
+            }
+            Op::PlaylistCreate { playlist } => {
+                if playlist.id.is_empty() {
+                    playlist.id = new_id();
+                }
+                if playlist.name.trim().is_empty() {
+                    playlist.name = "New playlist".into();
+                }
+                let now = now_ms();
+                for x in playlist.sounds.values_mut() {
+                    if x.playing {
+                        x.started = now;
+                    }
+                }
+            }
+            // Tracks that start now are stamped with the server's clock, so
+            // everyone (and anyone joining later) hears the same moment.
+            Op::PlaylistUpdate { id, patch } => {
+                let existing = world.playlists.get(id).ok_or("playlist not found")?;
+                let now = now_ms();
+                if let Some(sounds) = patch.get_mut("sounds").and_then(|v| v.as_object_mut()) {
+                    for (sid, v) in sounds.iter_mut() {
+                        let Some(o) = v.as_object_mut() else { continue };
+                        if !existing.sounds.contains_key(sid) {
+                            o.insert("id".into(), serde_json::json!(sid));
+                        }
+                        if o.get("playing").and_then(|p| p.as_bool()) == Some(true) {
+                            o.insert("started".into(), serde_json::json!(now));
+                        }
+                    }
+                }
+            }
+            Op::LightCreate { light, .. } => {
+                if light.id.is_empty() {
+                    light.id = new_id();
+                }
+                light.bright = light.bright.max(0.0);
+                light.dim = light.dim.max(light.bright);
+            }
+            Op::DrawingCreate { drawing, .. } => {
+                if drawing.id.is_empty() {
+                    drawing.id = new_id();
+                }
+                drawing.author = user.id.clone();
+                if drawing.points.len() > 5000 {
+                    return Err("That drawing has too many points".into());
+                }
+                if drawing.text.chars().count() > 2000 {
+                    return Err("That text is too long".into());
+                }
+            }
+            Op::DrawingUpdate { patch, .. } => {
+                if patch.get("points").and_then(|p| p.as_array()).is_some_and(|p| p.len() > 5000) {
+                    return Err("That drawing has too many points".into());
+                }
+            }
+            Op::WallCreate { wall, .. } => {
+                if wall.id.is_empty() {
+                    wall.id = new_id();
+                }
+                if wall.a == wall.b {
+                    return Err("A wall needs two different ends".into());
+                }
+            }
+            Op::JournalCreate { entry } => {
+                if entry.id.is_empty() {
+                    entry.id = new_id();
+                }
+                if entry.name.trim().is_empty() {
+                    entry.name = "New entry".into();
+                }
+                if entry.content.len() > MAX_JOURNAL_TEXT {
+                    return Err("That entry is too long".into());
+                }
+            }
+            Op::JournalUpdate { patch, .. } => {
+                if patch.get("content").and_then(|c| c.as_str()).is_some_and(|c| c.len() > MAX_JOURNAL_TEXT) {
+                    return Err("That entry is too long".into());
+                }
+            }
             Op::ActorCreate { actor } => {
                 if actor.id.is_empty() {
                     actor.id = new_id();
@@ -507,6 +683,79 @@ impl AppState {
                 }
                 if user.role != Role::Gm && !actor.owners.contains(&user.id) {
                     actor.owners.push(user.id.clone());
+                }
+            }
+            Op::LibraryItemCreate { item } => {
+                let item = &mut item.item;
+                if item.id.is_empty() {
+                    item.id = new_id();
+                }
+                if item.name.trim().is_empty() {
+                    item.name = "New item".into();
+                }
+                let mut data = self.registry.item_template(&world.system, &item.kind);
+                merge_patch(&mut data, &item.data);
+                item.data = data;
+            }
+            Op::CollectionCreate { collection } => {
+                if collection.id.is_empty() {
+                    collection.id = new_id();
+                }
+                if collection.name.trim().is_empty() {
+                    collection.name = "New collection".into();
+                }
+                if !matches!(collection.kind.as_str(), "actor" | "item" | "journal" | "table" | "macro") {
+                    return Err("Collections hold actors, items, journal entries, tables or macros".into());
+                }
+            }
+            Op::TableCreate { table } => {
+                if table.id.is_empty() {
+                    table.id = new_id();
+                }
+                if table.name.trim().is_empty() {
+                    table.name = "New table".into();
+                }
+                if table.results.len() > MAX_TABLE_RESULTS {
+                    return Err("That table has too many results".into());
+                }
+            }
+            Op::TableUpdate { patch, .. } => {
+                if patch.get("results").and_then(|r| r.as_array()).is_some_and(|r| r.len() > MAX_TABLE_RESULTS) {
+                    return Err("That table has too many results".into());
+                }
+            }
+            Op::MacroCreate { r#macro } => {
+                if r#macro.id.is_empty() {
+                    r#macro.id = new_id();
+                }
+                if r#macro.name.trim().is_empty() {
+                    r#macro.name = "New macro".into();
+                }
+                r#macro.author = user.id.clone();
+                if user.role != Role::Gm {
+                    // Only the GM writes script macros or shares macros.
+                    r#macro.kind = MacroKind::Chat;
+                    r#macro.shared = false;
+                }
+                if r#macro.command.len() > MAX_MACRO_TEXT {
+                    return Err("That macro is too long".into());
+                }
+            }
+            Op::MacroUpdate { patch, .. } => {
+                if patch.get("command").and_then(|c| c.as_str()).is_some_and(|c| c.len() > MAX_MACRO_TEXT) {
+                    return Err("That macro is too long".into());
+                }
+            }
+            Op::HotbarSet { user_id, slot, macro_id } => {
+                if !(1..=10).contains(slot) {
+                    return Err("Hotbar slots are 1 to 10".into());
+                }
+                let owner = world.users.get(user_id).ok_or("user not found")?;
+                if let Some(m) = macro_id {
+                    let m = world.macros.get(m).ok_or("macro not found")?;
+                    if !m.visible_to(owner) {
+                        return Err("That macro isn't available to them".into());
+                    }
                 }
             }
             Op::ItemCreate { item, .. } => {
@@ -542,6 +791,10 @@ impl AppState {
             v
         };
         match &op {
+            Op::HotbarSet { user_id, .. } => {
+                let to = HashSet::from([user_id.clone()]);
+                vec![Event { msg: applied(op), audience: Audience::Users(to) }]
+            }
             Op::TokenCreate { token, .. } if token.hidden => split(op, None),
             Op::TokenDelete { .. } if hidden_before == Some(true) => split(op, None),
             Op::TokenUpdate { scene_id, id, .. } => {
@@ -592,6 +845,50 @@ impl AppState {
         }
     }
 
+    /// What every player could see of a per-player document before an op.
+    fn scoped_before(world: &World, op: &Op) -> Option<ScopedBefore> {
+        let (kind, id) = op.scoped()?;
+        let views = world
+            .users
+            .values()
+            .filter(|u| u.role != Role::Gm)
+            .map(|u| (u.id.clone(), world.scoped_view(kind, id, u)))
+            .collect();
+        Some(ScopedBefore { kind, id: id.to_string(), full: world.scoped_full(kind, id), views })
+    }
+
+    /// Changes to per-player documents (journal, library items, tables,
+    /// macros) go to each player as they may see them: the op itself if they
+    /// saw the whole document before and after, otherwise a fresh copy of
+    /// their view (create ops replace) or a delete.
+    fn scoped_events(world: &World, op: Op, by: &Id, before: ScopedBefore) -> Vec<Event> {
+        let ScopedBefore { kind, id, full, views } = before;
+        let full_now = world.scoped_full(kind, &id);
+        let applied = |op: Op| ServerMsg::Applied { op, by: Some(by.clone()) };
+        let mut events = vec![Event { msg: applied(op.clone()), audience: Audience::GmOnly }];
+        for user in world.users.values().filter(|u| u.role != Role::Gm) {
+            let was = views.get(&user.id).cloned().flatten();
+            let now = world.scoped_view(kind, &id, user);
+            let msg = if op.is_scoped_update() && was.is_some() && was == full && now.is_some() && now == full_now {
+                op.clone()
+            } else if let Some(view) = now {
+                if Some(&view) == was.as_ref() {
+                    continue; // their view didn't change
+                }
+                match kind.create_op(view) {
+                    Some(op) => op,
+                    None => continue,
+                }
+            } else if was.is_some() {
+                kind.delete_op(&id)
+            } else {
+                continue;
+            };
+            events.push(Event { msg: applied(msg), audience: Audience::Exactly(HashSet::from([user.id.clone()])) });
+        }
+        events
+    }
+
     /// Validate, apply and broadcast an op from a user.
     pub async fn submit(&self, user: &User, mut op: Op) -> Result<(), String> {
         let mut world = self.world.write().await;
@@ -635,10 +932,16 @@ impl AppState {
             _ => None,
         };
 
+        let scoped_before = Self::scoped_before(world, &op);
+
         world.apply(&op).map_err(|e| e.to_string())?;
         let affected = op.affected_actor().map(str::to_string);
 
-        for ev in Self::fan_out(world, op, by, hidden_before) {
+        let events = match scoped_before {
+            Some(before) => Self::scoped_events(world, op, by, before),
+            None => Self::fan_out(world, op, by, hidden_before),
+        };
+        for ev in events {
             let _ = self.tx.send(Arc::new(ev));
         }
 
@@ -757,9 +1060,67 @@ impl AppState {
         Ok(())
     }
 
+    /// Merge a player's newly explored areas into what's stored for them.
+    /// Not broadcast: only that player needs it, and their client already has it.
+    pub async fn explore(&self, user: &User, scene_id: &str, fog: FogMap) -> Result<(), String> {
+        let mut world = self.world.write().await;
+        let scene = world.scenes.get(scene_id).ok_or("scene not found")?;
+        if !scene.vision.fog {
+            return Ok(());
+        }
+        let incoming = fog::decode(&fog)?;
+        let merged = match world.fog.get(scene_id).and_then(|m| m.get(&user.id)) {
+            Some(old) if old.cols == fog.cols && old.rows == fog.rows => {
+                let mut bits = fog::decode(old)?;
+                bits.iter_mut().zip(&incoming).for_each(|(a, b)| *a |= b);
+                bits
+            }
+            // First visit, or the scene's size/grid changed: start over.
+            _ => incoming,
+        };
+        let op = Op::FogExplore {
+            scene_id: scene_id.to_string(),
+            user_id: user.id.clone(),
+            fog: FogMap { cols: fog.cols, rows: fog.rows, data: fog::encode(&merged) },
+        };
+        world.apply(&op).map_err(|e| e.to_string())?;
+        self.dirty.store(true, Ordering::Release);
+        Ok(())
+    }
+
     /// Roll initiative for combatants using the system's formula
     /// (`[combat] initiative` in its hearth.toml, default `1d20`). Each roll is
     /// posted to chat (privately to GMs for hidden combatants).
+    /// Roll on a table (players: tables they can read) and post the result to chat.
+    pub async fn draw_table(&self, user: &User, id: &str, gm_only: bool) -> Result<(), String> {
+        let (table, gm_ids) = {
+            let world = self.world.read().await;
+            let t = world.tables.get(id).ok_or("table not found")?;
+            if t.access_for(user) < Access::Observer {
+                return Err("you can't roll on that table".into());
+            }
+            let gms: Vec<Id> = world.users.values().filter(|u| u.role == Role::Gm).map(|u| u.id.clone()).collect();
+            (t.clone(), gms)
+        };
+        let total = table.total_weight();
+        if total == 0 {
+            return Err(format!("{} has no results to roll", table.name));
+        }
+        let result = hearth_dice::roll_with(&format!("1d{total}"), &|_| None, &mut rand_rng()).map_err(|e| e.to_string())?;
+        let n = u32::try_from(result.total).unwrap_or(1).clamp(1, total);
+        let text = table.pick(n).map(|r| r.text.clone()).unwrap_or_default();
+        let mut msg = Self::message(user, None);
+        msg.flavor = Some(table.name.clone());
+        msg.content = text;
+        msg.roll = Some(result);
+        msg.flags = serde_json::json!({ "core": { "table": table.id } });
+        if gm_only {
+            msg.whisper = gm_ids;
+        }
+        self.post_chat(msg).await;
+        Ok(())
+    }
+
     pub async fn roll_initiative(&self, user: &User, ids: Vec<Id>) -> Result<(), String> {
         if ids.is_empty() {
             return Ok(());
@@ -886,5 +1247,172 @@ mod tests {
         assert_eq!(lookup_int(&v, "list.1"), Some(6));
         assert_eq!(lookup_int(&v, "s"), Some(4));
         assert_eq!(lookup_int(&v, "abilities.dex.mod"), None);
+    }
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+    use hearth_core::JournalEntry;
+    use std::collections::BTreeMap;
+    use serde_json::json;
+
+    fn user(id: &str, role: Role) -> User {
+        User { id: id.into(), name: id.into(), role, color: "#fff".into() }
+    }
+
+    /// What each player is sent: (user id, op name, content if any).
+    fn sent(events: &[Event], world: &World) -> Vec<(String, String, Option<String>)> {
+        let mut out = vec![];
+        for u in world.users.values().filter(|u| u.role != Role::Gm) {
+            for ev in events.iter().filter(|e| e.wants(u)) {
+                let ServerMsg::Applied { op, .. } = &ev.msg else { continue };
+                let v = serde_json::to_value(op).unwrap();
+                let content = v.pointer("/entry/content").and_then(|c| c.as_str()).map(str::to_string);
+                out.push((u.id.clone(), v["op"].as_str().unwrap().to_string(), content));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn players_get_only_what_they_may_see() {
+        let mut w = World::new("T", "freeform");
+        for u in [user("gm", Role::Gm), user("ann", Role::Player), user("bob", Role::Player)] {
+            w.users.insert(u.id.clone(), u);
+        }
+        let entry = JournalEntry {
+            id: "j1".into(), name: "Secret".into(), folder: String::new(), content: "the butler".into(),
+            img: None, access: Access::None, players: BTreeMap::new(),
+        };
+        let gm: Id = "gm".into();
+        let step = |w: &mut World, op: Op| {
+            let before = AppState::scoped_before(w, &op).unwrap();
+            w.apply(&op).unwrap();
+            let evs = AppState::scoped_events(w, op, &gm, before);
+            assert!(evs.iter().any(|e| e.wants(&w.users["gm"])), "the GM always hears");
+            sent(&evs, w)
+        };
+
+        // Hidden from players: nobody but the GM hears about it.
+        assert!(step(&mut w, Op::JournalCreate { entry }).is_empty());
+        // Ann may observe: she gets the whole entry; Bob nothing.
+        let s = step(&mut w, Op::JournalUpdate { id: "j1".into(), patch: json!({"players": {"ann": "observer"}}) });
+        assert_eq!(s, vec![("ann".into(), "journal_create".into(), Some("the butler".into()))]);
+        // Everyone limited: Bob gets name only; Ann keeps observer and gets the op.
+        let s = step(&mut w, Op::JournalUpdate { id: "j1".into(), patch: json!({"access": "limited"}) });
+        assert_eq!(s, vec![
+            ("ann".into(), "journal_update".into(), None),
+            ("bob".into(), "journal_create".into(), Some(String::new())),
+        ]);
+        // A text edit: Ann sees it; Bob's limited view hasn't changed, so he hears nothing.
+        let s = step(&mut w, Op::JournalUpdate { id: "j1".into(), patch: json!({"content": "the gardener"}) });
+        assert_eq!(s, vec![("ann".into(), "journal_update".into(), None)]);
+        // Hide it from Ann again: she's told to delete it.
+        let s = step(&mut w, Op::JournalUpdate { id: "j1".into(), patch: json!({"players": {"ann": null}, "access": "none"}) });
+        assert_eq!(s, vec![("ann".into(), "journal_delete".into(), None), ("bob".into(), "journal_delete".into(), None)]);
+        // Deleting a hidden entry tells no player.
+        assert!(step(&mut w, Op::JournalDelete { id: "j1".into() }).is_empty());
+        assert!(w.journal.is_empty());
+    }
+
+    #[test]
+    fn view_for_strips_hidden_and_limited_entries() {
+        let mut w = World::new("T", "freeform");
+        let mk = |id: &str, access| JournalEntry {
+            id: id.into(), name: id.into(), folder: String::new(), content: "text".into(), img: None, access, players: BTreeMap::new(),
+        };
+        for e in [mk("hidden", Access::None), mk("limited", Access::Limited), mk("open", Access::Observer)] {
+            w.journal.insert(e.id.clone(), e);
+        }
+        let v = w.view_for(&user("p", Role::Player));
+        assert!(!v.journal.contains_key("hidden"));
+        assert_eq!(v.journal["limited"].content, "");
+        assert_eq!(v.journal["open"].content, "text");
+        assert_eq!(w.view_for(&user("g", Role::Gm)).journal.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod library_tests {
+    use super::*;
+    use hearth_core::{Macro, MacroKind, RollTable, TableResult};
+    use serde_json::json;
+
+    fn user(id: &str, role: Role) -> User {
+        User { id: id.into(), name: id.into(), role, color: "#fff".into() }
+    }
+
+    fn world() -> World {
+        let mut w = World::new("T", "freeform");
+        for u in [user("gm", Role::Gm), user("ann", Role::Player), user("bob", Role::Player)] {
+            w.users.insert(u.id.clone(), u);
+        }
+        w
+    }
+
+    fn mac(id: &str, author: &str, kind: MacroKind, shared: bool) -> Macro {
+        Macro { id: id.into(), name: id.into(), kind, command: "/r 1d20".into(), img: None, author: author.into(), shared }
+    }
+
+    /// Ops each player receives for `op`.
+    fn receivers(w: &mut World, op: Op) -> Vec<(String, String)> {
+        let before = AppState::scoped_before(w, &op).unwrap();
+        w.apply(&op).unwrap();
+        let evs = AppState::scoped_events(w, op, &"gm".to_string(), before);
+        let mut out = vec![];
+        for u in w.users.values().filter(|u| u.role != Role::Gm) {
+            for ev in evs.iter().filter(|e| e.wants(u)) {
+                let ServerMsg::Applied { op, .. } = &ev.msg else { continue };
+                out.push((u.id.clone(), serde_json::to_value(op).unwrap()["op"].as_str().unwrap().to_string()));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn macros_reach_their_author_and_shared_ones_reach_everyone() {
+        let mut w = world();
+        let r = receivers(&mut w, Op::MacroCreate { r#macro: mac("m1", "ann", MacroKind::Chat, false) });
+        assert_eq!(r, vec![("ann".into(), "macro_create".into())]);
+        let r = receivers(&mut w, Op::MacroUpdate { id: "m1".into(), patch: json!({"command": "/r 2d6"}) });
+        assert_eq!(r, vec![("ann".into(), "macro_update".into())]);
+        let r = receivers(&mut w, Op::MacroCreate { r#macro: mac("m2", "gm", MacroKind::Script, false) });
+        assert!(r.is_empty(), "an unshared GM macro stays with the GM");
+        let r = receivers(&mut w, Op::MacroUpdate { id: "m2".into(), patch: json!({"shared": true}) });
+        assert_eq!(r, vec![("ann".into(), "macro_create".into()), ("bob".into(), "macro_create".into())]);
+        let v = w.view_for(&w.users["bob"].clone());
+        assert_eq!(v.macros.keys().collect::<Vec<_>>(), vec!["m2"]);
+    }
+
+    #[test]
+    fn players_only_touch_their_own_chat_macros_and_hotbar() {
+        let mut w = world();
+        let ann = w.users["ann"].clone();
+        w.apply(&Op::MacroCreate { r#macro: mac("mine", "ann", MacroKind::Chat, false) }).unwrap();
+        w.apply(&Op::MacroCreate { r#macro: mac("gms", "gm", MacroKind::Script, true) }).unwrap();
+        let ok = |op: Op| AppState::permitted(&w, &ann, &op).is_ok();
+        assert!(ok(Op::MacroUpdate { id: "mine".into(), patch: json!({"command": "hi"}) }));
+        assert!(!ok(Op::MacroUpdate { id: "mine".into(), patch: json!({"kind": "script"}) }), "can't make it a script");
+        assert!(!ok(Op::MacroUpdate { id: "mine".into(), patch: json!({"shared": true}) }), "can't share it");
+        assert!(!ok(Op::MacroUpdate { id: "gms".into(), patch: json!({"command": "evil()"}) }), "can't edit the GM's");
+        assert!(!ok(Op::MacroDelete { id: "gms".into() }));
+        assert!(ok(Op::HotbarSet { user_id: "ann".into(), slot: 1, macro_id: Some("gms".into()) }));
+        assert!(!ok(Op::HotbarSet { user_id: "bob".into(), slot: 1, macro_id: None }), "not someone else's hotbar");
+        assert!(!ok(Op::TableCreate { table: RollTable {
+            id: "t".into(), name: "t".into(), folder: String::new(), description: String::new(), results: vec![],
+            access: Access::None, players: Default::default(),
+        } }));
+    }
+
+    #[test]
+    fn deleting_a_macro_clears_hotbar_slots() {
+        let mut w = world();
+        w.apply(&Op::MacroCreate { r#macro: mac("m", "ann", MacroKind::Chat, false) }).unwrap();
+        w.apply(&Op::HotbarSet { user_id: "ann".into(), slot: 3, macro_id: Some("m".into()) }).unwrap();
+        assert_eq!(w.hotbars["ann"][&3], "m");
+        w.apply(&Op::MacroDelete { id: "m".into() }).unwrap();
+        assert!(w.hotbars["ann"].is_empty());
+        let _ = TableResult { text: String::new(), weight: 1 };
     }
 }

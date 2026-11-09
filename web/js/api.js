@@ -9,7 +9,6 @@ import { openSheet, registerSheet, renderTemplate, bindSheet } from './sheets.js
 export function createApi(conn) {
   const rejectHandlers = new Map();
   const socketHandlers = new Map();
-  const toolbar = document.getElementById('toolbar');
 
   const op = (o, onReject) => {
     const req = conn.op(o);
@@ -76,14 +75,17 @@ export function createApi(conn) {
 
     ui: {
       el, escape, toast, window: openWindow, form: formDialog,
-      /** Add a button to the left toolbar. */
+      /**
+       * Add a button to the "Module tools" group of the left controls.
+       * `icon` is a short text/emoji glyph.
+       */
       addTool({ icon, title, onClick, gmOnly = false }) {
-        if (gmOnly && !isGM()) return null;
-        const b = el('button.tool', { title, 'aria-label': title, text: icon, on: { click: onClick } });
-        toolbar.append(b);
-        return b;
+        return api.controls.addModuleTool({ icon, title, onClick, gmOnly });
       },
-      /** Add a sidebar tab. `render(panel, hearth)` runs whenever it's shown. */
+      /**
+       * Add a panel to the right-hand sidebar. `icon` is a built-in icon name
+       * or a short glyph; `render(panel, hearth)` runs whenever it's shown.
+       */
       addTab(tab) { api.sidebar.addTab(tab); },
       /** Element above the chat input, for dice trays etc. */
       get chatControls() { return api.sidebar.chatControls; },
@@ -98,6 +100,12 @@ export function createApi(conn) {
     },
 
     util: { mergePatch, getPath },
+
+    /** Token ids this user has targeted (Target tool). */
+    get targets() { return [...(api.board?.myTargets() ?? [])]; },
+
+    /** Internal: send newly explored areas for fog of war. */
+    sendExplore: (sceneId, fog) => conn.send({ type: 'explore', scene_id: sceneId, fog }),
 
     /** Combat helpers. The encounter itself is `hearth.world.combat`. */
     combat: {

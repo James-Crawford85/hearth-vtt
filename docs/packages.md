@@ -50,6 +50,30 @@ initiative = "1d20 + @initiative"   # @paths resolve against the combatant's act
 
 `@paths` look in the actor's `derived` values (from `prepare_actor`) first, then its `data`. Without a `[combat]` section, initiative is `1d20`. If a combatant's actor lacks a value the formula needs, that roll falls back to `1d20`.
 
+## Collections (content packs)
+
+Systems and modules can ship ready-made content (monsters, equipment, rules, handouts) that GMs browse in the **Collections** tab and import into their world:
+
+```toml
+[[packs]]
+id = "bestiary"
+label = "Bestiary"
+kind = "actor"               # actor, item, journal, table or macro
+path = "packs/bestiary.json"
+public = false               # true: players can browse it too
+```
+
+The file is a JSON array of documents shaped like the world's own (see [client-api.md](client-api.md)), each with at least a `name`:
+
+```json
+[
+  { "id": "goblin", "name": "Goblin", "kind": "npc", "data": { "hp": { "value": 7, "max": 7 } },
+    "items": [ { "id": "scimitar", "name": "Scimitar", "kind": "weapon", "data": { "damage": "1d6" } } ] }
+]
+```
+
+Item entries can be dragged straight onto an actor's sheet. Importing makes a fresh copy (with the system template filled in), so the pack itself never changes. Pack files are only served through `/api/collections/<package>/<pack>`, which checks who's asking: players can't read non-public packs, even by guessing the file's URL. `packages/d20-lite` ships three packs as examples.
+
 ## Server scripts (Rhai)
 
 Define any of these functions. Each runs for the system and every enabled module that defines it.

@@ -34,3 +34,23 @@ template = { ability = "str", damage = "1d6", proficient = true }
 [item_types.feature]
 label = "Feature"
 template = { description = "" }
+
+[[packs]]
+id = "weapons"
+label = "Weapons"
+kind = "item"
+path = "packs/weapons.json"
+public = true
+
+[[packs]]
+id = "bestiary"
+label = "Bestiary"
+kind = "actor"
+path = "packs/bestiary.json"
+
+[[packs]]
+id = "rules"
+label = "Rules reference"
+kind = "journal"
+path = "packs/rules.json"
+public = true

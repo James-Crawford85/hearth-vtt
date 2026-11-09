@@ -4,6 +4,14 @@ import { hooks } from './hooks.js';
 import { createApi, loadPackages } from './api.js';
 import { Board } from './board.js';
 import { Sidebar } from './sidebar.js';
+import { Controls } from './controls.js';
+import { Journal } from './journal.js';
+import { Items } from './items.js';
+import { Tables } from './tables.js';
+import { Macros } from './macros.js';
+import { Audio } from './audio.js';
+import { Playlists } from './playlists.js';
+import { Collections } from './collections.js';
 import { sheetsOnOp } from './sheets.js';
 import { toast } from './ui.js';
 
@@ -178,10 +186,26 @@ async function start() {
   if (!started) {
     started = true;
     api.board = new Board(document.getElementById('board'), api);
+    api.journal = new Journal(api);
+    api.items = new Items(api);
+    api.tables = new Tables(api, conn);
+    api.macros = new Macros(api);
+    api.audio = new Audio(api);
+    api.playlists = new Playlists(api);
+    api.collections = new Collections(api);
     api.sidebar = new Sidebar(api);
+    api.controls = new Controls(api);
     hooks.on('board:view', updateSceneTitle);
     api.socket.on('core.ping', (p, from) => {
       if (p.scene_id === api.board.sceneId) api.board.ping(p.x, p.y, store.world.users[from]?.color);
+    });
+    api.socket.on('core.target', (p, from) => {
+      if (from !== store.user.id && Array.isArray(p?.ids)) api.board.receiveTargets(from, p.ids);
+    });
+    // Targets of people who left disappear.
+    hooks.on('presence', (online) => {
+      for (const uid of [...api.board.targets.keys()]) if (!online.includes(uid)) api.board.targets.delete(uid);
+      api.board.invalidate();
     });
     applyTheme();
     await loadPackages(api);
@@ -190,8 +214,15 @@ async function start() {
   // Keep a GM's current view across reconnects; players follow the active scene.
   const keep = isGM() && store.world.scenes[api.board.sceneId];
   api.board.view(keep ? api.board.sceneId : store.world.active_scene, { fit: !keep });
+  // The world was (re)loaded: refresh fog memory and line of sight.
+  api.board.loadExplored();
+  api.board.visionDirty = true;
   api.sidebar.refreshAll();
+  api.controls.refresh();
+  api.macros.renderBar();
   updateSceneTitle();
+  // After a reconnect, tell everyone our targets again.
+  if (api.board.myTargets().size) api.board.setTargets([...api.board.myTargets()]);
   hooks.emit('ready', api);
 }
 
@@ -204,7 +235,7 @@ function announceCombat(op, before) {
   const c = store.world.combat;
   if (op.op === 'combat_create') {
     toast('Combat! Roll initiative.');
-    api.sidebar.select('combat');
+    api.sidebar.select('combat', { toggle: false });
   } else if (op.op === 'combat_end') {
     toast('The combat is over.');
   } else if (op.op === 'combat_update' && c && c.round > 0) {
@@ -269,7 +300,7 @@ function handle(msg) {
       api.sidebar.onOp(op);
       sheetsOnOp(op);
       if (op.op.startsWith('scene_')) updateSceneTitle();
-      if (op.op === 'user_upsert') api.sidebar.refreshVisibility();
+      if (op.op === 'user_upsert') { api.sidebar.refreshVisibility(); api.controls.refresh(); }
       hooks.emit('op', op, msg.by);
       hooks.emit(`op:${op.op}`, op, msg.by);
       break;

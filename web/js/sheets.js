@@ -189,6 +189,24 @@ export function openSheet(actorId, api) {
   const actor = store.world.actors[actorId];
   if (!actor) return null;
   const win = openWindow({ id: `sheet-${actorId}`, title: actor.name, width: 560 });
+  win.el.addEventListener('dragover', (e) => {
+    if (e.dataTransfer.types.includes('application/x-hearth-item') || e.dataTransfer.types.includes('application/x-hearth-doc')) e.preventDefault();
+  });
+  win.el.addEventListener('drop', (e) => {
+    const fromCollection = e.dataTransfer.getData('application/x-hearth-doc');
+    if (fromCollection) {
+      e.preventDefault();
+      try {
+        const { kind, doc } = JSON.parse(fromCollection);
+        if (kind === 'item') api.collections?.giveItem(actorId, doc);
+      } catch { /* not ours */ }
+      return;
+    }
+    const itemId = e.dataTransfer.getData('application/x-hearth-item');
+    if (!itemId) return;
+    e.preventDefault();
+    api.items?.giveTo(actorId, itemId);
+  });
 
   let seq = 0;
   const render = async () => {

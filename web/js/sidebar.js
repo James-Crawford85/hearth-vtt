@@ -1,50 +1,117 @@
-// Sidebar: Chat, Actors, Combat, Scenes (GM), Settings — plus tabs added by packages.
+// The right-hand sidebar: an icon rail (always visible) and the open panel
+// beside it. Clicking the open panel's icon again, or the arrow at the bottom
+// of the rail, folds the panel away so the scene gets the full width.
+// Packages can add panels with hearth.ui.addTab({ id, label, icon, render }).
 
 import { hooks } from './hooks.js';
 import { store, isGM, ownsActor, systemInfo, combatOrder } from './store.js';
 import { el, formDialog, openWindow, toast } from './ui.js';
+import { icon, hasIcon } from './icons.js';
+
+const PANEL_W = 340;
+const RAIL_W = 52;
 
 export class Sidebar {
   constructor(api) {
     this.api = api;
     this.tabs = new Map();
-    this.tabBar = document.getElementById('tabs');
+    this.root = document.getElementById('sidebar');
+    this.rail = document.getElementById('tabs');
     this.panels = document.getElementById('tab-panels');
+    this.title = document.getElementById('panel-title');
     this.chatControls = el('div.chat-controls');
+    this.collapseBtn = el('button.rail-btn.rail-collapse', { on: { click: () => this.setCollapsed(!this.collapsed) } });
+    let collapsed = false;
+    try { collapsed = localStorage.getItem('hearth.sidebar.collapsed') === '1'; } catch { /* storage blocked */ }
+    this.collapsed = collapsed;
 
-    this.addTab({ id: 'chat', label: 'Chat', render: (p) => this.renderChat(p) });
-    this.addTab({ id: 'actors', label: 'Actors', render: (p) => this.renderActors(p) });
-    this.addTab({ id: 'combat', label: 'Combat', render: (p) => this.renderCombat(p) });
-    this.addTab({ id: 'scenes', label: 'Scenes', gmOnly: true, render: (p) => this.renderScenes(p) });
-    this.addTab({ id: 'settings', label: 'Settings', render: (p) => this.renderSettings(p) });
-    this.select('chat');
+    this.addTab({ id: 'chat', label: 'Chat', icon: 'chat', render: (p) => this.renderChat(p) });
+    this.addTab({ id: 'combat', label: 'Combat Tracker', icon: 'combat', render: (p) => this.renderCombat(p) });
+    this.addTab({ id: 'scenes', label: 'Scenes', icon: 'scenes', gmOnly: true, render: (p) => this.renderScenes(p) });
+    this.addTab({ id: 'actors', label: 'Actors', icon: 'actors', render: (p) => this.renderActors(p) });
+    this.addTab({ id: 'items', label: 'Items', icon: 'items', render: (p) => this.api.items.renderPanel(p) });
+    this.addTab({ id: 'journal', label: 'Journal', icon: 'journal', render: (p) => this.api.journal.renderPanel(p) });
+    this.addTab({ id: 'tables', label: 'Rollable Tables', icon: 'tables', render: (p) => this.api.tables.renderPanel(p) });
+    this.addTab({ id: 'macros', label: 'Macros', icon: 'macros', render: (p) => this.api.macros.renderPanel(p) });
+    this.addTab({ id: 'playlists', label: 'Playlists', icon: 'playlists', render: (p) => this.api.playlists.renderPanel(p) });
+    this.addTab({ id: 'collections', label: 'Collections', icon: 'collections', render: (p) => this.api.collections.renderPanel(p) });
+    this.addTab({ id: 'settings', label: 'Settings', icon: 'settings', render: (p) => this.renderSettings(p) });
+    this.select('chat', { toggle: false, open: !this.collapsed });
+    this.applyLayout();
   }
 
-  addTab({ id, label, render, gmOnly = false }) {
-    const button = el('button.tab', { role: 'tab', text: label, on: { click: () => this.select(id) } });
-    const panel = el('section.panel', { role: 'tabpanel', hidden: true });
-    this.tabs.set(id, { button, panel, render, gmOnly });
-    this.tabBar.append(button);
+  addTab({ id, label, render, icon: glyph, gmOnly = false, soon = false }) {
+    const content = glyph && hasIcon(glyph) ? icon(glyph) : el('span.rail-letter', { text: glyph || label.charAt(0) });
+    const button = el('button.rail-btn', {
+      role: 'tab', title: soon ? `${label} (coming soon)` : label, 'aria-label': label,
+      class: soon ? 'rail-btn soon' : 'rail-btn',
+      on: { click: () => this.select(id) },
+    }, content);
+    const panel = el('section.panel', { role: 'tabpanel', hidden: true, 'aria-label': label });
+    this.tabs.set(id, { button, panel, render, gmOnly, soon, label });
+    // Package panels go just above Settings.
+    const settings = this.tabs.get('settings')?.button;
+    if (settings && id !== 'settings') this.rail.insertBefore(button, settings);
+    else this.rail.append(button);
+    this.rail.append(this.collapseBtn);
     this.panels.append(panel);
     this.refreshVisibility();
   }
 
   refreshVisibility() {
     for (const t of this.tabs.values()) t.button.hidden = t.gmOnly && !isGM();
+    if (this.current && this.tabs.get(this.current)?.button.hidden) this.select('chat', { toggle: false });
   }
 
-  select(id) {
+  /**
+   * Show a panel. Clicking the icon of the panel that's already open folds the
+   * sidebar away (`toggle`); `open: false` just switches without unfolding.
+   */
+  select(id, { toggle = true, open = true } = {}) {
+    const tab = this.tabs.get(id);
+    if (!tab) return;
+    if (tab.soon) { toast(`${tab.label} — coming soon.`); return; }
+    if (toggle && id === this.current && !this.collapsed) {
+      this.setCollapsed(true);
+      return;
+    }
     this.current = id;
     for (const [tid, t] of this.tabs) {
-      t.button.setAttribute('aria-selected', tid === id);
+      t.button.setAttribute('aria-selected', String(tid === id));
+      t.button.classList.toggle('active', tid === id);
       t.panel.hidden = tid !== id;
     }
+    this.title.textContent = tab.label;
+    if (open && this.collapsed) this.setCollapsed(false);
+    else this.applyLayout();
     this.refresh(id);
+  }
+
+  setCollapsed(c) {
+    this.collapsed = c;
+    try { localStorage.setItem('hearth.sidebar.collapsed', c ? '1' : '0'); } catch { /* storage blocked */ }
+    this.applyLayout();
+    if (!c) {
+      this.refresh(this.current);
+      this.tabs.get(this.current)?.button.classList.remove('unread');
+    }
+  }
+
+  /** Width of the right side the board should keep clear of. */
+  get width() { return RAIL_W + (this.collapsed ? 0 : PANEL_W); }
+
+  applyLayout() {
+    this.root.classList.toggle('collapsed', this.collapsed);
+    for (const [tid, t] of this.tabs) t.button.classList.toggle('active', tid === this.current && !this.collapsed);
+    this.collapseBtn.replaceChildren(icon(this.collapsed ? 'chevron-left' : 'chevron-right'));
+    this.collapseBtn.title = this.collapsed ? 'Show panel' : 'Hide panel';
+    document.documentElement.style.setProperty('--sidebar-w', `${this.width}px`);
+    hooks.emit('layout:change');
   }
 
   refresh(id = this.current) {
     const t = this.tabs.get(id);
-    if (t && store.world) t.render(t.panel, this.api);
+    if (t?.render && store.world) t.render(t.panel, this.api);
   }
 
   refreshAll() {
@@ -58,12 +125,13 @@ export class Sidebar {
       if (op.op === 'chat_create' && this.log) {
         this.log.append(this.chatMessage(op.message));
         this.log.scrollTop = this.log.scrollHeight;
-        if (this.current !== 'chat') this.tabs.get('chat').button.classList.add('unread');
+        if (this.current !== 'chat' || this.collapsed) this.tabs.get('chat').button.classList.add('unread');
       } else this.refresh('chat');
     }
     if (kind === 'actor' || kind === 'item' || kind === 'user') this.refresh('actors');
     if (kind === 'combat' || kind === 'combatant' || kind === 'token' || kind === 'actor' || kind === 'scene') this.refresh('combat');
     if (kind === 'scene') this.refresh('scenes');
+    if (kind === 'playlist') this.refresh('playlists');
     if (kind === 'user' || kind === 'world') this.refresh('settings');
   }
 
@@ -103,8 +171,10 @@ export class Sidebar {
         m.whisper.length ? el('span.whisper', { text: ' whisper' }) : null,
         el('time.muted', { text: new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })),
       m.flavor ? el('div.flavor', { text: m.flavor }) : null,
-      m.content ? el('div.msg-body', { text: m.content }) : null,
-      m.roll ? this.rollCard(m.roll) : null);
+      // A table roll shows the dice, then the result it picked.
+      m.flags?.core?.table ? null : m.content ? el('div.msg-body', { text: m.content }) : null,
+      m.roll ? this.rollCard(m.roll) : null,
+      m.flags?.core?.table && m.content ? el('div.msg-body.table-result', { text: m.content }) : null);
     hooks.emit('chat:render', li, m);
     return li;
   }
@@ -286,7 +356,7 @@ export class Sidebar {
       op: 'combat_create',
       combat: { id: '', scene_id: sceneId, combatants: tokens.map((t) => ({ id: '', token_id: t.id })) },
     });
-    this.select('combat');
+    this.select('combat', { toggle: false });
   }
 
   addSelected() {
@@ -364,6 +434,23 @@ export class Sidebar {
         el('option', { value: 'none', text: 'None', selected: g.kind === 'none' }))),
       el('label', {}, 'Background colour', el('input', { name: 'background_color', type: 'color', value: s.background_color })),
       el('label', {}, 'Background image', el('input', { name: 'file', type: 'file', accept: 'image/*' })),
+      el('fieldset.auto', {},
+        el('legend', { text: 'Vision' }),
+        el('label.check', {}, el('input', { name: 'vision_enabled', type: 'checkbox', checked: !!s.vision?.enabled }),
+          'Players see only what their tokens can see'),
+        el('label.check', {}, el('input', { name: 'vision_fog', type: 'checkbox', checked: !!s.vision?.fog }),
+          'Fog of war: remember explored areas'),
+        el('label', {}, `Sight range in ${g.units || 'units'} (0 = unlimited)`,
+          el('input', { name: 'vision_range', type: 'number', min: 0, step: 'any', value: s.vision?.range ?? 0 })),
+        el('label', {}, 'Darkness: 0 = daylight, 1 = night (at 0.5 or more, tokens see only lit areas and their darkvision)',
+          el('input', { name: 'darkness', type: 'range', min: 0, max: 1, step: 0.05, value: s.darkness ?? 0 })),
+        el('div.row', {},
+          el('button', {
+            type: 'button', text: 'Reset fog',
+            title: 'Forget what every player has explored on this scene',
+            on: { click: () => { if (confirm('Reset the fog of war for every player on this scene?')) { this.api.op({ op: 'fog_reset', scene_id: id }); toast('Fog reset.'); } } },
+          }),
+          el('span.muted.small', { text: `${Object.keys(s.walls ?? {}).length} walls/doors` }))),
       el('div.row', {},
         el('button.primary', { type: 'submit', text: 'Save' }),
         el('button.danger', {
@@ -380,6 +467,12 @@ export class Sidebar {
         height: Number(f.rows.value) * size,
         background_color: f.background_color.value,
         grid: { kind: f.kind.value, size, distance: Number(f.distance.value), units: f.units.value },
+        vision: {
+          enabled: f.vision_enabled.checked,
+          fog: f.vision_fog.checked,
+          range: Math.max(0, Number(f.vision_range.value) || 0),
+        },
+        darkness: Number(f.darkness.value) || 0,
       };
       if (f.file.files[0]) {
         try { patch.background = await this.api.upload(f.file.files[0]); }

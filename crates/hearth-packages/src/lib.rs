@@ -93,6 +93,23 @@ pub struct Manifest {
     pub actor_types: BTreeMap<String, TypeDef>,
     #[serde(default)]
     pub item_types: BTreeMap<String, TypeDef>,
+    /// Content collections shipped with the package (monsters, spells, handouts…).
+    #[serde(default)]
+    pub packs: Vec<PackDef>,
+}
+
+/// A collection of ready-made documents in a package: a JSON array in `path`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackDef {
+    pub id: String,
+    pub label: String,
+    /// `actor`, `item`, `journal`, `table` or `macro`.
+    pub kind: String,
+    /// JSON file, relative to the package folder.
+    pub path: String,
+    /// Players can browse it too (otherwise GM only).
+    #[serde(default)]
+    pub public: bool,
 }
 
 fn default_version() -> String {
@@ -186,6 +203,7 @@ impl Package {
             "styles": m.client.styles.iter().map(|s| self.url(s)).collect::<Vec<_>>(),
             "actor_types": types(&m.actor_types),
             "item_types": types(&m.item_types),
+            "packs": m.packs.iter().map(|p| json!({"id": p.id, "label": p.label, "kind": p.kind, "public": p.public})).collect::<Vec<_>>(),
         })
     }
 }
@@ -193,6 +211,20 @@ impl Package {
 #[derive(Debug, Clone, Default)]
 pub struct Registry {
     pub packages: BTreeMap<String, Package>,
+}
+
+impl Package {
+    /// The pack with this id, if the package has one.
+    pub fn pack(&self, id: &str) -> Option<&PackDef> {
+        self.manifest.packs.iter().find(|p| p.id == id)
+    }
+
+    /// Is `path` (relative to the package folder) one of its pack files?
+    pub fn is_pack_file(&self, path: &str) -> bool {
+        let norm = |p: &str| p.trim_start_matches("./").trim_start_matches('/').replace('\\', "/").to_ascii_lowercase();
+        let path = norm(path);
+        self.manifest.packs.iter().any(|p| norm(&p.path) == path)
+    }
 }
 
 impl Registry {
@@ -333,5 +365,48 @@ mod tests {
         assert!(!safe_relative("../a.js"));
         assert!(!safe_relative("/etc/passwd"));
         assert!(!safe_relative("C:\\x"));
+    }
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    #[test]
+    fn packs_parse_and_pack_files_are_recognised() {
+        let m: Manifest = toml::from_str(
+            r#"
+            id = "x"
+            type = "system"
+            name = "X"
+            [[packs]]
+            id = "beasts"
+            label = "Beasts"
+            kind = "actor"
+            path = "packs/beasts.json"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(m.packs.len(), 1);
+        assert!(!m.packs[0].public, "packs are GM-only unless marked public");
+        let pkg = Package { manifest: m, dir: PathBuf::from(".") };
+        assert!(pkg.is_pack_file("packs/beasts.json"));
+        assert!(pkg.is_pack_file("./PACKS/beasts.json"));
+        assert!(pkg.is_pack_file(r"packs\beasts.json"));
+        assert!(!pkg.is_pack_file("packs/other.json"));
+        assert_eq!(pkg.pack("beasts").unwrap().kind, "actor");
+    }
+
+    #[test]
+    fn bundled_d20_lite_packs_are_valid() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/d20-lite");
+        let m: Manifest = toml::from_str(&std::fs::read_to_string(dir.join("hearth.toml")).unwrap()).unwrap();
+        assert!(m.packs.len() >= 3);
+        for p in &m.packs {
+            let text = std::fs::read_to_string(dir.join(&p.path)).unwrap();
+            let docs: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
+            assert!(!docs.is_empty(), "{} is empty", p.path);
+            assert!(docs.iter().all(|d| d["name"].is_string()), "every entry in {} needs a name", p.path);
+        }
     }
 }
