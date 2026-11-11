@@ -1,0 +1,128 @@
+{
+  "version": 0,
+  "rests": [],
+  "tables": {},
+  "conditions": [],
+  "actor_types": [
+    {
+      "id": "fh8k6t0z",
+      "key": "player",
+      "label": "Player",
+      "kind": "type"
+    },
+    {
+      "id": "udl6aajg",
+      "key": "enemy",
+      "label": "Enemy",
+      "kind": "type",
+      "children": [
+        {
+          "id": "vbhzzjid",
+          "key": "new_group",
+          "label": "New group",
+          "kind": "group"
+        }
+      ]
+    }
+  ],
+  "item_types": [
+    {
+      "id": "8o85dnen",
+      "key": "class",
+      "label": "Class",
+      "kind": "type",
+      "children": [
+        {
+          "id": "fr3l9bgr",
+          "key": "levels",
+          "label": "levels",
+          "kind": "number",
+          "default": 1,
+          "min": 1.0
+        },
+        {
+          "id": "djj77z0d",
+          "key": "hitdie",
+          "label": "hitdie",
+          "kind": "choice",
+          "options": [
+            {
+              "value": "d6",
+              "label": "d6"
+            },
+            {
+              "value": "d8",
+              "label": "d8"
+            },
+            {
+              "value": "d10",
+              "label": "d10"
+            },
+            {
+              "value": "d12",
+              "label": "d12"
+            }
+          ]
+        },
+        {
+          "id": "d52308ok",
+          "key": "spellcaster",
+          "label": "spellcaster",
+          "kind": "choice",
+          "options": [
+            {
+              "value": "none",
+              "label": "none"
+            },
+            {
+              "value": "half",
+              "label": "half"
+            },
+            {
+              "value": "full",
+              "label": "full"
+            }
+          ]
+        },
+        {
+          "id": "u1dgeusv",
+          "key": "savingthrow",
+          "label": "savingthrow",
+          "kind": "list",
+          "entries": [
+            {
+              "key": "strengthsave",
+              "label": "Strength",
+              "values": {}
+            },
+            {
+              "key": "dexteritysave",
+              "label": "Dexterity",
+              "values": {}
+            },
+            {
+              "key": "constitutionsave",
+              "label": "Constitution",
+              "values": {}
+            },
+            {
+              "key": "wisdomsave",
+              "label": "Wisdom",
+              "values": {}
+            },
+            {
+              "key": "intellegencesave",
+              "label": "Intellegence",
+              "values": {}
+            },
+            {
+              "key": "charismasave",
+              "label": "Charisma",
+              "values": {}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

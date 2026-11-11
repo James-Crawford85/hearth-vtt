@@ -12,6 +12,7 @@ import { store, isGM, systemInfo } from './store.js';
 import { el, toast, openWindow, formDialog } from './ui.js';
 import { renderMarkdown } from './markdown.js';
 import { accessOf, accessBadge, editAccess, newId, rejectToast } from './directory.js';
+import { blueprintType } from './blueprint-sheet.js';
 
 export const DOC_MIME = 'application/x-hearth-doc';
 
@@ -29,6 +30,8 @@ export class Collections {
     this.cache = new Map();   // 'pkg/pack' → entries array
     this.windows = new Map(); // key → { win, query, selected }
     hooks.on('op', (op) => this.onOp(op));
+    // The system changed (the builder saved, or something was added to a collection): read packs again.
+    hooks.on('packages', () => { this.cache.clear(); if (api.lookup) api.lookup.packDocs = null; for (const [key, o] of this.windows) if (o.source.type === 'pack') this.loadPack(o.source.pack.pkg, o.source.pack.id).then(() => this.render(key)).catch(() => {}); });
   }
 
   get world() { return store.world?.collections ?? {}; }
@@ -192,8 +195,11 @@ export class Collections {
     return t ? el('small.muted', { text: ` ${t}` }) : null;
   }
 
-  /** `openSibling(name)` shows another entry of the same collection, returning false if there's none. */
-  preview(kind, doc, from, openSibling = () => false) {
+  /**
+   * `openSibling(name)` shows another entry of the same collection, returning false if there's none.
+   * `lookup`: shown from the Ctrl+Space lookup, where importing makes no sense (posting to chat does).
+   */
+  preview(kind, doc, from, openSibling = () => false, { lookup = false } = {}) {
     // Journal text usually starts with its own heading; don't repeat the name above it.
     const ownHeading = kind === 'journal' && /^\s*#/.test(doc.content ?? '');
     const parts = ownHeading ? [] : [el('h3', { text: doc.name ?? '' })];
@@ -208,18 +214,128 @@ export class Collections {
       parts.push(el('ol', {}, (doc.results ?? []).map((r) => el('li', { text: `${r.text}${(r.weight ?? 1) !== 1 ? ` (×${r.weight})` : ''}` }))));
     } else if (kind === 'macro') {
       parts.push(el('pre.macro-src', { text: doc.command ?? '' }));
+    } else if (kind === 'item' && blueprintType(doc.kind, true)) {
+      parts.push(...this.itemDetails(doc, blueprintType(doc.kind, true), openSibling));
     } else {
       parts.push(el('dl.coll-data', {}, ...flatten(doc.data ?? {}).flatMap(([k, v]) => [el('dt', { text: k }), el('dd', { text: String(v) })])));
       if (kind === 'actor' && doc.items?.length) parts.push(el('p.small', {}, el('strong', { text: 'Items: ' }), doc.items.map((i) => i.name).join(', ')));
     }
     const actions = el('div.row');
-    if (isGM()) actions.append(el('button.primary', { text: 'Import into world', on: { click: () => this.importMany(kind, [doc], from) } }));
+    if (['journal', 'item', 'table'].includes(kind)) {
+      actions.append(el(lookup ? 'button.primary' : 'button', { text: '💬 Post to chat', title: 'Show this to everyone in chat', on: { click: () => this.postToChat(kind, doc) } }));
+    }
+    if (isGM() && !lookup) actions.append(el('button.primary', { text: 'Import into world', on: { click: () => this.importMany(kind, [doc], from) } }));
     if (kind === 'item') {
       const mine = Object.values(store.world.actors).filter((a) => isGM() || a.owners.includes(store.user.id));
       if (mine.length) actions.append(el('button', { text: 'Give to…', on: { click: () => this.giveTo(doc, mine) } }));
     }
     if (actions.childElementCount) parts.push(actions);
     return parts;
+  }
+
+  /** Post a rule, item or table to chat as a card (markdown; links in it stay clickable). */
+  postToChat(kind, doc) {
+    let body = '';
+    if (kind === 'journal') {
+      body = String(doc.content ?? '').replace(/^\s*#{1,6}\s+.*\n+/, ''); // the card has its own heading
+    } else if (kind === 'item') {
+      const type = blueprintType(doc.kind, true);
+      if (type) {
+        const { rows: all, texts } = this.itemFields(doc, type);
+        // The fields the type shows beside names on sheets, if it picked some; otherwise all of them.
+        const rows = type.summary?.length ? all.filter(([, , k]) => type.summary.includes(k)) : all;
+        body = [rows.map(([l, v]) => `**${l}:** ${v}`).join(' · '), ...texts].filter(Boolean).join('\n\n');
+      }
+      body ||= String(doc.data?.description ?? '');
+    } else if (kind === 'table') {
+      body = [doc.description, ...(doc.results ?? []).map((r, i) => `${i + 1}. ${r.text}`)].filter(Boolean).join('\n');
+    }
+    postCard(this.api, doc.name ?? '', body);
+  }
+
+  /** An item's fields by its builder type: [[label, shown value]] and its long texts. */
+  itemFields(doc, type) {
+    const data = doc.data ?? {};
+    const rows = [];
+    const texts = [];
+    const shown = (f, v) => {
+      if (f.kind === 'checkbox') return v ? 'Yes' : null;
+      if (f.kind === 'choice') return (f.options ?? []).find((o) => o.value === v)?.label ?? v;
+      if (f.kind === 'resource') return v && typeof v === 'object' ? (v.max ? `${v.value ?? 0} / ${v.max}` : null) : v;
+      return v;
+    };
+    const walk = (nodes, obj) => {
+      for (const f of nodes ?? []) {
+        if (f.hidden || ['action', 'effect', 'formula', 'list'].includes(f.kind)) continue;
+        if (f.kind === 'group') { walk(f.children, f.flat ? obj : obj?.[f.key]); continue; }
+        const v = shown(f, obj?.[f.key]);
+        if (v == null || v === '' || (typeof v === 'number' && v === 0 && f.default == null)) continue;
+        if (f.kind === 'longtext') texts.push(String(v));
+        else rows.push([f.label || f.key, String(v), f.key]);
+      }
+    };
+    walk(type.children, data);
+    return { rows, texts };
+  }
+
+  /** An item, laid out by its type in the system builder: named fields, then its text. */
+  itemDetails(doc, type, openSibling) {
+    const fields = this.itemFields(doc, type);
+    const rows = fields.rows.flatMap(([l, v]) => [el('dt', { text: l }), el('dd', { text: v })]);
+    const texts = fields.texts.map((t) => el('div.journal-text', {}, renderMarkdown(t, { onLink: (name) => { if (!openSibling(name)) this.api.journal?.follow(name); }, onRoll: (formula) => this.api.roll(formula, { flavor: doc.name }) })));
+    const actions = (type.children ?? []).filter((c) => c.kind === 'action').map((a) => a.label || a.key);
+    return [
+      el('div.muted.small', { text: type.label || type.key }),
+      rows.length ? el('dl.coll-fields', {}, ...rows) : null,
+      ...texts,
+      actions.length ? el('p.muted.small', { text: `On a character: ${actions.join(', ')}.` }) : null,
+    ].filter(Boolean);
+  }
+
+  // ------------------------------------------------------------------ into the system's collections
+
+  /**
+   * GM: copy a document (an item, actor or journal entry) into one of the world
+   * system's own collections (e.g. a homebrew class into Classes and subclasses),
+   * so it ships with the system for every world. Same name and type: replaces it.
+   */
+  async addToSystemPack(kind, doc) {
+    const system = store.world?.system;
+    const packs = this.packs().filter((p) => p.pkg === system && p.kind === kind);
+    if (!packs.length) { toast(`This system has no ${KINDS[kind]?.label.toLowerCase() ?? kind} collections to add to.`); return; }
+    const v = await formDialog({
+      title: `Add "${doc.name}" to the system's collection`,
+      fields: [{ name: 'pack', label: `Collection in ${systemInfo().name ?? system}`, type: 'select', options: packs.map((p) => [p.id, p.label]) }],
+      submit: 'Add',
+    });
+    if (!v) return;
+    const pack = packs.find((p) => p.id === v.pack);
+    let existing = [];
+    try { existing = await this.loadPack(pack.pkg, pack.id); } catch { /* new file */ }
+    const clash = existing.find((d) => String(d.name ?? '').trim().toLowerCase() === doc.name.trim().toLowerCase() && (!doc.kind || d.kind === doc.kind));
+    if (clash && !confirm(`${pack.label} already has "${clash.name}". Replace it with this version?`)) return;
+    const copy = structuredClone(doc);
+    for (const k of ['folder', 'access', 'players', 'owners', 'derived', 'author', 'shared']) delete copy[k];
+    // Owned items in an actor copy keep their own ids; the document gets the collection's id.
+    delete copy.id;
+    try {
+      const res = await fetch(`/api/collections/${encodeURIComponent(pack.pkg)}/${encodeURIComponent(pack.id)}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-hearth-session': this.api.session ?? '' },
+        body: JSON.stringify({ doc: copy }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      this.cache.delete(`${pack.pkg}/${pack.id}`);
+      toast(clash ? `Replaced ${doc.name} in ${pack.label}.` : `Added ${doc.name} to ${pack.label}. It's part of the system now, in every world that uses it.`);
+    } catch (e) {
+      toast(`Couldn't add it: ${e.message}`, 'error');
+    }
+  }
+
+  /** A GM button that offers addToSystemPack (or nothing for players). */
+  addButton(kind, doc) {
+    if (!isGM()) return null;
+    return el('button', { type: 'button', text: '📚 Add to the system’s collection…', title: 'Copy this into one of the system’s own collections, so every world using the system has it', on: { click: () => this.addToSystemPack(kind, typeof doc === 'function' ? doc() : doc) } });
   }
 
   // ------------------------------------------------------------------ import / copy
@@ -305,6 +421,13 @@ export class Collections {
     else this.render(key);
     this.api.sidebar?.refresh('collections');
   }
+}
+
+/** Post a titled card to chat (markdown body), within the chat's length limit. */
+export function postCard(api, title, body) {
+  let text = `### ${title}\n\n${String(body ?? '').trim()}`.trim();
+  if (text.length > 3900) text = `${text.slice(0, 3890).replace(/\s+\S*$/, '')} …`;
+  api.chat(text);
 }
 
 /** { a: { b: 1 } } → [['a.b', 1]] */

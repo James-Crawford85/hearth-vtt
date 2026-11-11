@@ -43,6 +43,29 @@ export function createApi(conn) {
       token: (sceneId, token) => op({ op: 'token_create', scene_id: sceneId, token: { id: '', x: 0, y: 0, ...token } }),
     },
 
+    /** The system's declared rules: formulas, tables, resources, actions, conditions. */
+    get rules() { return systemInfo().rules ?? {}; },
+
+    /** Actions declared by the system: roll them on the server (costs are spent there). */
+    actions: {
+      /** Actions an item (or, with no item, the actor) has. */
+      list(actor, item = null) {
+        const r = systemInfo().rules ?? {};
+        const t = item ? r.item_types?.[item.kind] : r.actor_types?.[actor.kind];
+        return t?.actions ?? [];
+      },
+      /** options: { mode: 'advantage' | 'disadvantage' | 'normal', crit, level } */
+      use(actorId, itemId, action, options = {}, gmOnly = false) {
+        conn.send({ type: 'use_action', actor_id: actorId, item_id: itemId ?? null, action, options, gm_only: gmOnly });
+      },
+    },
+
+    /** Send a message that isn't an op (used by built-in features). */
+    _send(msg) { conn.send(msg); },
+
+    /** Take a rest (`short`, `long`…): the system's resources reset. */
+    rest(actorId, kind) { conn.send({ type: 'rest', actor_id: actorId, kind }); },
+
     /** Roll on the server. `@paths` resolve against the actor's derived, then data, values. */
     roll(formula, { flavor, actorId, gmOnly = false } = {}) {
       conn.send({ type: 'roll', formula, flavor: flavor ?? null, actor_id: actorId ?? null, gm_only: gmOnly });

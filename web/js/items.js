@@ -7,6 +7,8 @@ import { hooks } from './hooks.js';
 import { store, isGM, ownsActor, systemInfo } from './store.js';
 import { el, toast, openWindow, formDialog } from './ui.js';
 import { accessOf, atLeast, accessBadge, folderList, directoryPanel, editAccess, newId, rejectToast } from './directory.js';
+import { grantTypes, levelsKey, advancementEditor, effectsEditor } from './advancement.js';
+import { blueprintType } from './blueprint-sheet.js';
 
 export const ITEM_MIME = 'application/x-hearth-item';
 
@@ -59,21 +61,72 @@ export class Items {
     accessBadge(x));
   }
 
+  /**
+   * A new item: blank (the type's defaults, plus the starting advancement the
+   * system builder gives the type), or a copy of one in the world or a collection.
+   */
   async create() {
     const types = Object.entries(systemInfo().item_types ?? {});
-    const v = await formDialog({
-      title: 'New item',
-      fields: [
-        { name: 'name', label: 'Name', required: true },
-        { name: 'kind', label: 'Type', type: 'select', options: types.length ? types.map(([k, d]) => [k, d.label]) : [['item', 'Item']] },
-        { name: 'folder', label: 'Folder (optional)' },
-      ],
-      submit: 'Create',
-    });
-    if (!v) return;
-    const id = newId();
-    this.api.op({ op: 'library_item_create', item: { id, name: v.name.trim(), kind: v.kind, img: null, data: {}, flags: {}, folder: v.folder.trim(), access: 'none', players: {} } }, rejectToast);
-    this.open(id);
+    if (!types.length) types.push(['item', { label: 'Item' }]);
+    const win = openWindow({ title: 'New item', width: 420 });
+    win.body.replaceChildren(el('p.muted', { text: 'Loading…' }));
+    // What can be copied: the world's items, and the system's and modules' item collections.
+    const sources = Object.values(this.all).map((x) => ({ doc: x, from: 'Items' }));
+    for (const p of this.api.collections?.packs() ?? []) {
+      if (p.kind !== 'item') continue;
+      try { for (const d of await this.api.collections.loadPack(p.pkg, p.id)) sources.push({ doc: d, from: p.label }); } catch { /* not available */ }
+    }
+    const name = el('input', { required: true, placeholder: 'e.g. Warden' });
+    const kind = el('select', {}, ...types.map(([k, d]) => el('option', { value: k, text: d.label ?? k })));
+    const start = el('select');
+    const folder = el('input', { placeholder: 'optional' });
+    const note = el('p.muted.small');
+    const fill = () => {
+      const t = blueprintType(kind.value, true);
+      const adv = t?.advancement?.length ?? 0;
+      const copies = sources.filter((s) => s.doc.kind === kind.value).sort((a, b) => String(a.doc.name).localeCompare(String(b.doc.name)));
+      start.replaceChildren(
+        el('option', { value: '', text: `Blank${adv ? ` (with the ${adv} starting grant${adv === 1 ? '' : 's'} every ${(t.label || kind.value).toLowerCase()} gets)` : ''}` }),
+        ...copies.map((s, i) => el('option', { value: String(sources.indexOf(s)), text: `Copy of ${s.doc.name} (${s.from})` })));
+      note.textContent = adv ? `The starting grants are set in the system builder (${t.label || kind.value} → Starting advancement).` : '';
+    };
+    kind.addEventListener('change', fill);
+    fill();
+    const form = el('form.form', {
+      on: {
+        submit: (e) => {
+          e.preventDefault();
+          if (!name.value.trim()) { name.focus(); return; }
+          const id = newId();
+          let item;
+          if (start.value !== '') {
+            // A copy: everything it has (fields, effects, advancement), under the new name.
+            item = structuredClone(sources[Number(start.value)].doc);
+            for (const k of ['folder', 'access', 'players']) delete item[k];
+            if (item.flags?.core) { delete item.flags.core.user_added; delete item.flags.core.granted_by; delete item.flags.core.advancement; }
+          } else {
+            item = { kind: kind.value, img: null, data: {}, flags: {}, effects: [] };
+            // Every new item of the type starts with the type's starting advancement (fresh grant ids).
+            const adv = blueprintType(kind.value, true)?.advancement ?? [];
+            if (adv.length) item.advancement = adv.map((g) => ({ ...structuredClone(g), id: newId() }));
+          }
+          Object.assign(item, { id, name: name.value.trim(), folder: folder.value.trim(), access: 'none', players: {} });
+          item.data ??= {};
+          item.flags ??= {};
+          this.api.op({ op: 'library_item_create', item }, rejectToast);
+          win.close();
+          this.open(id);
+        },
+      },
+    },
+    el('label', {}, 'Name', name),
+    el('label', {}, 'Type', kind),
+    el('label', {}, 'Start from', start),
+    note,
+    el('label', {}, 'Folder', folder),
+    el('div.row', {}, el('span.grow'), el('button', { type: 'button', text: 'Cancel', on: { click: () => win.close() } }), el('button.primary', { type: 'submit', text: 'Create' })));
+    win.body.replaceChildren(form);
+    name.focus();
   }
 
   // ------------------------------------------------------------------ item window
@@ -81,7 +134,7 @@ export class Items {
   open(id) {
     let win = this.windows.get(id);
     if (win) { openWindow({ id: `item-${id}` }); return win; }
-    win = openWindow({ id: `item-${id}`, title: this.all[id]?.name ?? 'Item', width: 420 });
+    win = openWindow({ id: `item-${id}`, title: this.all[id]?.name ?? 'Item', width: isGM() ? 580 : 420 });
     this.windows.set(id, win);
     win.onClose(() => this.windows.delete(id));
     this.render(id);
@@ -94,7 +147,7 @@ export class Items {
     const x = this.all[id];
     if (!x) { win.body.replaceChildren(el('p.muted', { text: 'Loading…' })); return; }
     // Don't rebuild under someone typing in this window.
-    if (win.el.contains(document.activeElement) && document.activeElement.matches('input, textarea, select')) return;
+    if (win.el.contains(document.activeElement) && document.activeElement.matches('input, textarea, select, button')) return;
     win.setTitle(x.name);
     const gm = isGM();
     const send = (patch) => this.api.op({ op: 'library_item_update', id, patch }, rejectToast);
@@ -110,12 +163,15 @@ export class Items {
       parts.push(el('div.auto-grid', {}, ...dataFields(x.data, 'data', gm, (path, value) => send(pathPatch(path, value)))));
     }
     if (gm) {
+      parts.push(effectsEditor(x, (effects) => send({ effects })));
+      if (grantTypes().some((g) => g.key === x.kind)) parts.push(advancementEditor(this.api, x, (advancement) => send({ advancement }), !!levelsKey(x.kind)));
       parts.push(
         el('div.row', {},
           el('label.grow', {}, 'Image URL', el('input', { value: x.img ?? '', on: { change: (e) => send({ img: e.target.value.trim() || null }) } })),
           el('label', {}, 'Folder', el('input', { value: x.folder ?? '', on: { change: (e) => send({ folder: e.target.value.trim() }) } }))),
         el('div.row', {},
           el('button', { text: '🔒 Access', on: { click: () => editAccess(`Who can see "${x.name}"`, x, send) } }),
+          this.api.collections?.addButton('item', () => this.all[id]),
           el('span.grow'),
           el('button.danger', { text: 'Delete', on: { click: () => { if (confirm(`Delete the item "${x.name}"?`)) this.api.op({ op: 'library_item_delete', id }, rejectToast); } } })));
     }

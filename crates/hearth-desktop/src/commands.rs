@@ -634,6 +634,21 @@ pub async fn install_package_file(app: AppHandle, state: State<'_, Desktop>) -> 
     .map_err(err)?
 }
 
+/// Make a new, empty game system in the user's packages folder, to design in the system builder.
+#[tauri::command]
+pub fn create_system(state: State<'_, Desktop>, name: String, description: String) -> R<Installed> {
+    let (reg, _) = Registry::load_all(&state.package_dirs());
+    install::create_system(&state.user_packages, &name, &description, &|id| reg.get(id).is_some()).map(installed).map_err(err)
+}
+
+/// Copy a package (e.g. a built-in system) into the user's packages folder under a new name, to edit it.
+#[tauri::command]
+pub fn copy_package(state: State<'_, Desktop>, id: String, name: String) -> R<Installed> {
+    let (reg, _) = Registry::load_all(&state.package_dirs());
+    let src = reg.get(&id).ok_or("That package isn't installed")?;
+    install::copy_package(src, &state.user_packages, &name, &|id| reg.get(id).is_some()).map(installed).map_err(err)
+}
+
 #[tauri::command]
 pub fn uninstall_package(state: State<'_, Desktop>, id: String) -> R<()> {
     if !state.user_packages.join(&id).join("hearth.toml").is_file() {

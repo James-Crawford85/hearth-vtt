@@ -523,6 +523,7 @@ mod tests {
             data: json!({"hp": {"value": 5, "max": 10}}),
             derived: json!({"x": 1}),
             items: vec![],
+            effects: vec![],
             flags: Value::Null,
         };
         w.apply(&Op::ActorCreate { actor }).unwrap();

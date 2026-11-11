@@ -249,7 +249,9 @@ async function refreshWorlds() {
   applyFilter($('tab-worlds'));
 }
 
-$('create-world-btn').addEventListener('click', async () => {
+$('create-world-btn').addEventListener('click', () => createWorldDialog());
+
+async function createWorldDialog(system, { name = '', note = null } = {}) {
   if (!state.packages.some((p) => p.kind === 'system')) {
     toast('Install a game system first (Game Systems tab).', 'error');
     return;
@@ -257,8 +259,9 @@ $('create-world-btn').addEventListener('click', async () => {
   const w = await dialog({
     title: 'Create a world',
     body: [
-      h('label', {}, 'World name', h('input', { name: 'name', required: true, maxlength: 80, placeholder: 'The Sunken Keep' })),
-      h('label', {}, 'Game system', h('select', { name: 'system' }, systemOptions())),
+      note ? h('p', { class: 'small muted', text: note }) : null,
+      h('label', {}, 'World name', h('input', { name: 'name', required: true, maxlength: 80, placeholder: 'The Sunken Keep', value: name })),
+      h('label', {}, 'Game system', h('select', { name: 'system' }, systemOptions(system))),
       h('label', {}, 'Description (optional)', h('textarea', { name: 'description', maxlength: 2000, placeholder: 'What is this campaign about?' })),
     ],
     ok: 'Create',
@@ -268,7 +271,40 @@ $('create-world-btn').addEventListener('click', async () => {
     toast(`Created “${w.name}”.`);
     await refreshWorlds();
   }
+}
+
+$('new-system-btn').addEventListener('click', async () => {
+  const m = await dialog({
+    title: 'New game system',
+    body: [
+      h('label', {}, 'Name', h('input', { name: 'name', required: true, maxlength: 80, placeholder: 'Ember Saga' })),
+      h('label', {}, 'Description (optional)', h('textarea', { name: 'description', maxlength: 2000, placeholder: 'A gritty low-magic game of…' })),
+      h('p', { class: 'small muted', text: 'It starts empty. You design it in a world: open the world, then Settings → System builder.' }),
+    ],
+    ok: 'Create',
+    onOk: (f) => call('create_system', { name: f.elements.name.value, description: f.elements.description.value }),
+  });
+  if (!m) return;
+  await refreshPackages();
+  toast(`Created “${m.name}”.`);
+  await createWorldDialog(m.id, { name: `${m.name} workshop`, note: `Make a world that uses ${m.name} to build it in. You can make more worlds with it later.` });
 });
+
+async function copySystemDialog(p) {
+  const m = await dialog({
+    title: `Copy “${p.name}”`,
+    body: [
+      h('label', {}, 'Name of the copy', h('input', { name: 'name', required: true, maxlength: 80, value: `My ${p.name}` })),
+      h('p', { class: 'small muted', text: 'The copy is yours to change in the system builder. Worlds keep using whichever system they were made with.' }),
+    ],
+    ok: 'Copy',
+    onOk: (f) => call('copy_package', { id: p.id, name: f.elements.name.value }),
+  });
+  if (!m) return;
+  await refreshPackages();
+  toast(`Copied to “${m.name}”.`);
+  await createWorldDialog(m.id, { name: `${m.name} workshop`, note: `Make a world that uses ${m.name} to edit it in the system builder.` });
+}
 
 $('join-game-btn').addEventListener('click', async () => {
   const t = await dialog({
@@ -404,8 +440,13 @@ function packageCard(p) {
         h('div', { class: 'card-meta', text: [`v${p.version}`, p.authors.join(', '), p.license].filter(Boolean).join(' · ') }))),
     p.description ? h('div', { class: 'card-desc', text: p.description }) : null,
     h('div', { class: 'card-meta', text: usedBy }),
+    p.kind === 'system' && p.source !== 'installed'
+      ? h('div', { class: 'card-actions' }, h('span', { class: 'spacer' }), h('button', { text: 'Copy to edit', title: 'Built-in systems can\'t be changed; make your own copy', on: { click: () => copySystemDialog(p) } }))
+      : null,
     p.source === 'installed'
-      ? h('div', { class: 'card-actions' }, h('span', { class: 'spacer' }), h('button', {
+      ? h('div', { class: 'card-actions' }, h('span', { class: 'spacer' }),
+        p.kind === 'system' ? h('button', { text: 'Copy', on: { click: () => copySystemDialog(p) } }) : null,
+        h('button', {
         class: 'danger', text: 'Remove',
         on: {
           click: async () => {

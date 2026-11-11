@@ -1,7 +1,7 @@
 //! Authoritative world state: permission checks, op application, rolls and
 //! fan-out of events to connected clients.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
@@ -51,8 +51,11 @@ impl Event {
 
 pub struct AppState {
     pub world: RwLock<World>,
-    pub registry: Registry,
+    /// Installed packages. Replaced as a whole when the system builder saves.
+    registry: StdRwLock<Arc<Registry>>,
     pub scripts: StdRwLock<ScriptHost>,
+    /// The system's declared rules (formulas, resources, actions…).
+    rules: StdRwLock<Arc<hearth_core::rules::Rules>>,
     pub tx: broadcast::Sender<Arc<Event>>,
     /// connection id -> user id
     pub online: Mutex<HashMap<u64, Id>>,
@@ -73,6 +76,30 @@ pub struct Joined {
 }
 
 const USER_COLORS: &[&str] = &["#e0a040", "#5b8def", "#e05f5f", "#57c785", "#b07ce8", "#e87cc2", "#4cc9d6", "#c9d64c"];
+
+/// An actor's calculated values: the system's declared rules first, then its
+/// `prepare_actor` script on top. Formula problems go in `_errors` so system
+/// authors can see them. `None` when the system calculates nothing.
+fn compute_derived(rules: &hearth_core::rules::Rules, scripts: &ScriptHost, actor: &Actor) -> Option<Value> {
+    let declared = rules.actor_types.contains_key(&actor.kind) || actor.items.iter().any(|i| rules.item_types.contains_key(&i.kind)) || !actor.effects.is_empty();
+    let mut out = None;
+    if declared {
+        let d = hearth_core::rules::derive(actor, rules);
+        let mut v = d.values;
+        if !d.errors.is_empty() {
+            if let Some(o) = v.as_object_mut() {
+                o.insert("_errors".into(), serde_json::json!(d.errors.into_iter().take(20).collect::<Vec<_>>()));
+            }
+        }
+        out = Some(v);
+    }
+    if let Some(script) = scripts.prepare_actor(actor) {
+        let mut v = out.unwrap_or_else(|| Value::Object(Default::default()));
+        merge_patch(&mut v, &script);
+        out = Some(v);
+    }
+    out
+}
 
 /// What players could see of a per-player document before an op (see `scoped_events`).
 struct ScopedBefore {
@@ -121,17 +148,19 @@ impl AppState {
         for e in errors {
             tracing::warn!("script error: {e}");
         }
-        // Scripts may have changed since the world was saved; refresh derived data.
+        // Rules may have changed since the world was saved; refresh derived data.
+        let rules = registry.rules(&world.system);
         for actor in world.actors.values_mut() {
-            if let Some(d) = scripts.prepare_actor(actor) {
+            if let Some(d) = compute_derived(&rules, &scripts, actor) {
                 actor.derived = d;
             }
         }
         let (tx, _) = broadcast::channel(1024);
         AppState {
             world: RwLock::new(world),
-            registry,
+            registry: StdRwLock::new(Arc::new(registry)),
             scripts: StdRwLock::new(scripts),
+            rules: StdRwLock::new(Arc::new(rules)),
             tx,
             online: Mutex::new(HashMap::new()),
             dirty: AtomicBool::new(true),
@@ -141,6 +170,58 @@ impl AppState {
             gm_key,
             next_conn: AtomicU64::new(1),
         }
+    }
+
+    pub fn registry(&self) -> Arc<Registry> {
+        self.registry.read().unwrap().clone()
+    }
+
+    pub fn rules(&self) -> Arc<hearth_core::rules::Rules> {
+        self.rules.read().unwrap().clone()
+    }
+
+    /// Reload the world's system from disk (after the builder saves it): new
+    /// rules and templates, every actor recalculated, and clients told.
+    /// Existing actors and items gain any fields the system added.
+    pub async fn reload_system(&self) -> Result<(), String> {
+        let mut world = self.world.write().await;
+        let reg = self.registry();
+        let old = reg.get(&world.system).ok_or("the world's system isn't installed")?;
+        let pkg = hearth_packages::Package::load(&old.dir).map_err(|e| e.to_string())?;
+        let mut next = (*reg).clone();
+        next.packages.insert(pkg.manifest.id.clone(), pkg);
+        let next = Arc::new(next);
+        *self.registry.write().unwrap() = next.clone();
+        *self.rules.write().unwrap() = Arc::new(next.rules(&world.system));
+        let (host, errors) = ScriptHost::load(&next, &world.system, &world.modules);
+        for e in errors {
+            tracing::warn!("script error: {e}");
+        }
+        *self.scripts.write().unwrap() = host;
+        // Fill in fields the system gained, then recalculate everyone.
+        let system = world.system.clone();
+        let ids: Vec<Id> = world.actors.keys().cloned().collect();
+        for id in &ids {
+            let Some(actor) = world.actors.get(id) else { continue };
+            let mut fills = vec![];
+            if let Some(p) = hearth_packages::builder::missing_from(&next.actor_template(&system, &actor.kind), &actor.data) {
+                fills.push(Op::ActorUpdate { id: id.clone(), patch: serde_json::json!({ "data": p }) });
+            }
+            for item in &actor.items {
+                if let Some(p) = hearth_packages::builder::missing_from(&next.item_template(&system, &item.kind), &item.data) {
+                    fills.push(Op::ItemUpdate { actor_id: id.clone(), id: item.id.clone(), patch: serde_json::json!({ "data": p }) });
+                }
+            }
+            for op in fills {
+                self.commit(&mut world, &"system".to_string(), op, 0)?;
+            }
+            self.derive(&mut world, id);
+        }
+        self.dirty.store(true, Ordering::Release);
+        let packages = self.packages_for(&world);
+        drop(world);
+        self.send(ServerMsg::Packages { packages }, Audience::All);
+        Ok(())
     }
 
     pub fn check_gm_key(&self, key: &str) -> bool {
@@ -167,7 +248,7 @@ impl AppState {
     }
 
     pub fn packages_for(&self, world: &World) -> Value {
-        self.registry.client_index(&world.system, &world.modules, world.theme.as_deref())
+        self.registry().client_index(&world.system, &world.modules, world.theme.as_deref())
     }
 
     fn new_session(&self, user_id: &str) -> String {
@@ -672,7 +753,7 @@ impl AppState {
                 if actor.id.is_empty() {
                     actor.id = new_id();
                 }
-                let mut data = self.registry.actor_template(&world.system, &actor.kind);
+                let mut data = self.registry().actor_template(&world.system, &actor.kind);
                 merge_patch(&mut data, &actor.data);
                 actor.data = data;
                 actor.derived = Value::Null;
@@ -693,7 +774,7 @@ impl AppState {
                 if item.name.trim().is_empty() {
                     item.name = "New item".into();
                 }
-                let mut data = self.registry.item_template(&world.system, &item.kind);
+                let mut data = self.registry().item_template(&world.system, &item.kind);
                 merge_patch(&mut data, &item.data);
                 item.data = data;
             }
@@ -762,7 +843,7 @@ impl AppState {
                 if item.id.is_empty() {
                     item.id = new_id();
                 }
-                let mut data = self.registry.item_template(&world.system, &item.kind);
+                let mut data = self.registry().item_template(&world.system, &item.kind);
                 merge_patch(&mut data, &item.data);
                 item.data = data;
             }
@@ -957,7 +1038,7 @@ impl AppState {
         }
 
         if modules_changed {
-            let (host, errors) = ScriptHost::load(&self.registry, &world.system, &world.modules);
+            let (host, errors) = ScriptHost::load(&self.registry(), &world.system, &world.modules);
             for e in errors {
                 tracing::warn!("script error: {e}");
             }
@@ -975,7 +1056,7 @@ impl AppState {
     /// Re-run `prepare_actor` and broadcast the result if it changed.
     fn derive(&self, world: &mut World, actor_id: &str) {
         let Some(actor) = world.actors.get(actor_id) else { return };
-        let Some(derived) = self.scripts.read().unwrap().prepare_actor(actor) else { return };
+        let Some(derived) = compute_derived(&self.rules(), &self.scripts.read().unwrap(), actor) else { return };
         if derived == actor.derived {
             return;
         }
@@ -1001,6 +1082,322 @@ impl AppState {
             self.dirty.store(true, Ordering::Release);
             self.send(ServerMsg::Applied { op, by: None }, audience);
         }
+    }
+
+    /// Use an actor's action (an item's attack, a feature's use…): spend its
+    /// cost, roll it on the server, and post the result with follow-up buttons.
+    pub async fn use_action(
+        &self,
+        user: &User,
+        actor_id: &str,
+        item_id: Option<Id>,
+        action: &str,
+        options: hearth_core::rules::ActionOptions,
+        gm_only: bool,
+    ) -> Result<(), String> {
+        let (plan, actor, item_name, gm_ids) = {
+            let mut world = self.world.write().await;
+            let actor = world.actors.get(actor_id).ok_or("actor not found")?.clone();
+            if !world.owns_actor(user, actor_id) {
+                return Err("you can only act for actors you own".into());
+            }
+            let plan = hearth_core::rules::plan_action(&actor, &self.rules(), item_id.as_deref(), action, &options)?;
+            if let Some((target, patch)) = &plan.spend {
+                let op = match target {
+                    Some(iid) => Op::ItemUpdate { actor_id: actor_id.to_string(), id: iid.clone(), patch: patch.clone() },
+                    None => Op::ActorUpdate { id: actor_id.to_string(), patch: patch.clone() },
+                };
+                self.commit(&mut world, &user.id, op, 0)?;
+                self.dirty.store(true, Ordering::Release);
+            }
+            let item_name = item_id.as_deref().and_then(|i| actor.items.iter().find(|x| x.id == i)).map(|i| i.name.clone());
+            let gms: Vec<Id> = world.users.values().filter(|u| u.role == Role::Gm).map(|u| u.id.clone()).collect();
+            (plan, actor, item_name, gms)
+        };
+        // An action with no dice (e.g. Action Surge) is just announced.
+        let result = if plan.formula.trim().is_empty() {
+            None
+        } else {
+            Some(hearth_dice::roll_with(&plan.formula, &|_| None, &mut rand_rng()).map_err(|e| format!("{}: {e}", plan.formula))?)
+        };
+        let crit = plan.kind == "attack" && result.as_ref().is_some_and(|r| r.has_natural(20, 20));
+        let fumble = plan.kind == "attack" && result.as_ref().is_some_and(|r| r.has_natural(20, 1));
+        let mut flags = match &result {
+            Some(r) => self.scripts.read().unwrap().on_roll(r, Some(&actor)),
+            None => Value::Object(Default::default()),
+        };
+        let then: Vec<Value> = plan.then.iter().map(|(id, label)| serde_json::json!({ "id": id, "label": label })).collect();
+        merge_patch(&mut flags, &serde_json::json!({ "core": { "action": {
+            "actor_id": actor_id, "item_id": item_id, "kind": plan.kind, "then": then,
+            "crit": crit || options.crit, "level": options.level,
+        } } }));
+        if crit || fumble {
+            merge_patch(&mut flags, &serde_json::json!({ "crit": crit, "fumble": fumble }));
+        }
+        let mut msg = Self::message(user, Some(actor_id.to_string()));
+        let mut flavor = match item_name {
+            Some(n) if n != plan.label => format!("{n}: {}", plan.label),
+            _ => plan.label.clone(),
+        };
+        if let Some(m) = &plan.mode {
+            flavor.push_str(&format!(" ({m})"));
+        }
+        if options.crit && plan.kind == "damage" {
+            flavor.push_str(" (critical)");
+        }
+        if result.is_none() {
+            msg.content = format!("{} uses {flavor}.", actor.name);
+        }
+        msg.flavor = Some(flavor);
+        msg.roll = result;
+        msg.flags = flags;
+        if gm_only {
+            msg.whisper = gm_ids;
+        }
+        self.post_chat(msg).await;
+        Ok(())
+    }
+
+    /// Level up (or add a class, ancestry, background) with the player's picks.
+    pub async fn advance(&self, user: &User, actor_id: &str, req: hearth_core::advance::AdvanceRequest) -> Result<(), String> {
+        let (adv, name) = {
+            let mut world = self.world.write().await;
+            let actor = world.actors.get(actor_id).ok_or("actor not found")?.clone();
+            if !world.owns_actor(user, actor_id) {
+                return Err("you can only level up characters you own".into());
+            }
+            let mut rng = rand_rng();
+            let adv = hearth_core::advance::advance(&actor, &self.rules(), &req, &mut |f: &str| {
+                hearth_dice::roll_with(f, &|_| None, &mut rng).map(|r| r.total).map_err(|e| format!("{f}: {e}"))
+            })?;
+            let before = self.resource_maxes(&world, actor_id);
+            for op in &adv.ops {
+                let mut op = op.clone();
+                self.normalize(&world, user, &mut op)?;
+                self.commit(&mut world, &user.id, op, 0)?;
+            }
+            self.follow_maxes(&mut world, &user.id, actor_id, &before)?;
+            self.dirty.store(true, Ordering::Release);
+            (adv, actor.name)
+        };
+        let mut msg = Self::message(user, Some(actor_id.to_string()));
+        msg.content = if req.item_id.is_some() || adv.level > 1 {
+            format!("{name} reaches level {} in {}.", adv.level, adv.item_name)
+        } else {
+            format!("{name} gains {}.", adv.item_name)
+        };
+        if !adv.gained.is_empty() {
+            msg.content.push_str(&format!(" Gains: {}.", adv.gained.join(", ")));
+        }
+        self.post_chat(msg).await;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------ character creation
+
+    /// A creation step of the world's system, the world's choices for it, and the
+    /// actor's entries to fill (in the system's order: Strength, Dexterity…).
+    fn creation_context(
+        &self,
+        world: &World,
+        actor: &Actor,
+        step_id: &str,
+        method_id: &str,
+    ) -> Result<(hearth_core::creation::CreationStep, hearth_core::creation::ScoreMethod, bool, Vec<String>, BTreeMap<String, String>), String> {
+        use hearth_core::creation::world_choice;
+        let reg = self.registry();
+        let bp = reg.get(&world.system).and_then(|p| p.blueprint.as_ref()).ok_or("This system has no character creation")?;
+        let step = bp.creation.iter().find(|s| s.id == step_id).cloned().ok_or_else(|| format!("No creation step \"{step_id}\""))?;
+        let choice = world_choice(&step, world.settings.pointer(&format!("/core/creation/{step_id}")).unwrap_or(&Value::Null));
+        let method = choice.methods.iter().find(|m| m.id == method_id).cloned().ok_or("The GM doesn't allow that method in this world")?;
+        // The list's entries, ordered as the system builder lists them.
+        let ptr = format!("/{}", step.path.replace('.', "/"));
+        let mut keys: Vec<String> = actor.data.pointer(&ptr).and_then(Value::as_object).map(|o| o.keys().cloned().collect()).unwrap_or_default();
+        fn node_at<'a>(nodes: &'a [hearth_packages::builder::Node], segs: &[&str]) -> Option<&'a hearth_packages::builder::Node> {
+            use hearth_packages::builder::NodeKind;
+            for n in nodes {
+                if n.kind == NodeKind::Group && n.flat {
+                    if let Some(x) = node_at(&n.children, segs) {
+                        return Some(x);
+                    }
+                    continue;
+                }
+                if n.key == segs[0] {
+                    return if segs.len() == 1 { Some(n) } else if n.kind == NodeKind::Group { node_at(&n.children, &segs[1..]) } else { None };
+                }
+            }
+            None
+        }
+        let segs: Vec<&str> = step.path.split('.').collect();
+        let list = bp.actor_types.iter().find(|t| t.key == actor.kind).and_then(|t| node_at(&t.children, &segs));
+        let order: Vec<String> = list.map(|n| n.entries.iter().map(|e| e.key.clone()).collect()).unwrap_or_default();
+        // Their names (Strength, Dexterity…) for chat.
+        let names: BTreeMap<String, String> = list
+            .map(|n| n.entries.iter().map(|e| (e.key.clone(), if e.label.is_empty() { e.key.clone() } else { e.label.clone() })).collect())
+            .unwrap_or_default();
+        keys.sort_by_key(|k| (order.iter().position(|o| o == k).unwrap_or(usize::MAX), k.clone()));
+        Ok((step, method, choice.lock, keys, names))
+    }
+
+    /// Roll for a creation step's roll method (once; the results are kept on the actor and posted to chat).
+    pub async fn creation_roll(&self, user: &User, actor_id: &str, step_id: &str, method_id: &str) -> Result<(), String> {
+        let (name, rolls, method) = {
+            let mut world = self.world.write().await;
+            let actor = world.actors.get(actor_id).ok_or("actor not found")?.clone();
+            if !world.owns_actor(user, actor_id) {
+                return Err("you can only set up characters you own".into());
+            }
+            let (_, method, _, entries, _) = self.creation_context(&world, &actor, step_id, method_id)?;
+            let done = actor.flags.pointer(&format!("/core/creation/{step_id}")).cloned().unwrap_or(Value::Null);
+            if done.get("rolls").is_some() || done.get("done").and_then(Value::as_bool) == Some(true) {
+                return Err("These have been rolled already. The GM can let you start again.".into());
+            }
+            let mut rng = rand_rng();
+            let rolls = hearth_core::creation::roll_scores(&method, entries.len(), &mut |f: &str| {
+                hearth_dice::roll_with(f, &|_| None, &mut rng).map(|r| r.total).map_err(|e| format!("{f}: {e}"))
+            })?;
+            let patch = serde_json::json!({ "flags": { "core": { "creation": { step_id: { "method": method_id, "rolls": rolls } } } } });
+            self.commit(&mut world, &user.id, Op::ActorUpdate { id: actor_id.to_string(), patch }, 0)?;
+            self.dirty.store(true, Ordering::Release);
+            (actor.name, rolls, method)
+        };
+        let mut msg = Self::message(user, Some(actor_id.to_string()));
+        let list: Vec<String> = rolls.iter().map(i64::to_string).collect();
+        msg.content = format!("{name} rolls for ability scores ({}, {}): {}.", method.label, method.formula, list.join(", "));
+        self.post_chat(msg).await;
+        Ok(())
+    }
+
+    /// Set a creation step's scores with the chosen method (checked here), then lock them.
+    pub async fn creation_apply(&self, user: &User, actor_id: &str, step_id: &str, method_id: &str, assign: &hearth_core::creation::Assign) -> Result<(), String> {
+        let (name, scores, label) = {
+            let mut world = self.world.write().await;
+            let actor = world.actors.get(actor_id).ok_or("actor not found")?.clone();
+            if !world.owns_actor(user, actor_id) {
+                return Err("you can only set up characters you own".into());
+            }
+            let (step, method, lock, entries, names) = self.creation_context(&world, &actor, step_id, method_id)?;
+            let done = actor.flags.pointer(&format!("/core/creation/{step_id}")).cloned().unwrap_or(Value::Null);
+            if lock && done.get("done").and_then(Value::as_bool) == Some(true) && user.role != Role::Gm {
+                return Err("These are set. The GM can let you set them again.".into());
+            }
+            // Rolls must be the ones rolled for this method.
+            let rolls: Vec<i64> = if done.get("method").and_then(Value::as_str) == Some(method_id) {
+                done.get("rolls").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default()
+            } else {
+                vec![]
+            };
+            let scores = hearth_core::creation::scores(&method, &entries, assign, &rolls)?;
+            let mut patch = serde_json::json!({ "data": hearth_core::creation::scores_patch(&step, &scores) });
+            patch["flags"] = serde_json::json!({ "core": { "creation": { step_id: { "method": method_id, "done": true } } } });
+            let before = self.resource_maxes(&world, actor_id);
+            self.commit(&mut world, &user.id, Op::ActorUpdate { id: actor_id.to_string(), patch }, 0)?;
+            self.follow_maxes(&mut world, &user.id, actor_id, &before)?;
+            self.dirty.store(true, Ordering::Release);
+            // In the system's order, by name: Strength 15, Dexterity 14…
+            let shown: Vec<String> = entries.iter().filter_map(|k| scores.get(k).map(|v| format!("{} {v}", names.get(k).unwrap_or(k)))).collect();
+            (actor.name, shown, if method.label.is_empty() { method.id.clone() } else { method.label.clone() })
+        };
+        let mut msg = Self::message(user, Some(actor_id.to_string()));
+        let list = scores;
+        msg.content = format!("{name} sets ability scores ({label}): {}.", list.join(", "));
+        self.post_chat(msg).await;
+        Ok(())
+    }
+
+    /// Current and max of each of an actor's calculated-max resources (hit points…).
+    fn resource_maxes(&self, world: &World, actor_id: &str) -> Vec<(String, f64, f64)> {
+        let Some(actor) = world.actors.get(actor_id) else { return vec![] };
+        let rules = self.rules();
+        let Some(tr) = rules.actor_types.get(&actor.kind) else { return vec![] };
+        let at = |v: &Value, path: &str| path.split('.').fold(v, |v, k| &v[k]).as_f64();
+        tr.resources
+            .iter()
+            .filter(|(_, r)| r.max.is_some())
+            .map(|(path, _)| {
+                let value = at(&actor.data, &format!("{path}.value")).unwrap_or(0.0);
+                let max = at(&actor.derived, &format!("{path}.max")).unwrap_or(0.0);
+                (path.clone(), value, max)
+            })
+            .collect()
+    }
+
+    /// After a level up or down, a resource whose max changed moves its current
+    /// value by the same amount (never below 0 or above the new max).
+    fn follow_maxes(&self, world: &mut World, by: &Id, actor_id: &str, before: &[(String, f64, f64)]) -> Result<(), String> {
+        let after = self.resource_maxes(world, actor_id);
+        let mut patch = Value::Object(serde_json::Map::new());
+        for (path, value, max) in &after {
+            let Some((_, _, old_max)) = before.iter().find(|(p, _, _)| p == path) else { continue };
+            if (max - old_max).abs() < f64::EPSILON {
+                continue;
+            }
+            let new = (value + (max - old_max)).clamp(0.0, max.max(0.0));
+            let mut v = serde_json::json!({ "value": new });
+            for k in path.rsplit('.') {
+                v = serde_json::json!({ k: v });
+            }
+            // Merge, so two resources under one parent (slot levels) both land.
+            merge_patch(&mut patch, &v);
+        }
+        if patch.as_object().is_none_or(|o| o.is_empty()) {
+            return Ok(());
+        }
+        self.commit(world, by, Op::ActorUpdate { id: actor_id.to_string(), patch: serde_json::json!({ "data": patch }) }, 0)
+    }
+
+    /// Take back an item's last level, and what it gave.
+    pub async fn regress(&self, user: &User, actor_id: &str, item_id: &str, all: bool) -> Result<(), String> {
+        let mut world = self.world.write().await;
+        if !world.actors.contains_key(actor_id) {
+            return Err("actor not found".into());
+        }
+        if !world.owns_actor(user, actor_id) {
+            return Err("you can only change characters you own".into());
+        }
+        let before = self.resource_maxes(&world, actor_id);
+        // One level, or (all) level after level until the item is gone.
+        for _ in 0..if all { 200 } else { 1 } {
+            let actor = world.actors.get(actor_id).ok_or("actor not found")?.clone();
+            if !actor.items.iter().any(|i| i.id == item_id) {
+                break;
+            }
+            let adv = hearth_core::advance::regress(&actor, &self.rules(), item_id)?;
+            for op in adv.ops {
+                self.commit(&mut world, &user.id, op, 0)?;
+            }
+        }
+        self.follow_maxes(&mut world, &user.id, actor_id, &before)?;
+        self.dirty.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Take a rest: resources with a reset for this kind of rest are restored.
+    pub async fn rest(&self, user: &User, actor_id: &str, kind: &str) -> Result<(), String> {
+        let name = {
+            let mut world = self.world.write().await;
+            let rules = self.rules();
+            if !rules.rests.is_empty() && !rules.rests.iter().any(|r| r == kind) {
+                return Err(format!("This system has no {kind} rest"));
+            }
+            let actor = world.actors.get(actor_id).ok_or("actor not found")?.clone();
+            if !world.owns_actor(user, actor_id) {
+                return Err("you can only rest actors you own".into());
+            }
+            let (patch, items) = hearth_core::rules::rest(&actor, &self.rules(), kind);
+            if !patch.is_null() {
+                self.commit(&mut world, &user.id, Op::ActorUpdate { id: actor_id.to_string(), patch }, 0)?;
+            }
+            for (iid, patch) in items {
+                self.commit(&mut world, &user.id, Op::ItemUpdate { actor_id: actor_id.to_string(), id: iid, patch }, 0)?;
+            }
+            self.dirty.store(true, Ordering::Release);
+            actor.name
+        };
+        let mut msg = Self::message(user, Some(actor_id.to_string()));
+        msg.content = format!("{name} takes a {kind} rest.");
+        self.post_chat(msg).await;
+        Ok(())
     }
 
     fn message(user: &User, speaker_actor: Option<Id>) -> ChatMessage {
@@ -1128,7 +1525,7 @@ impl AppState {
         let (formula, todo, gm_ids) = {
             let world = self.world.read().await;
             let c = world.combat.as_ref().ok_or("There is no combat")?;
-            let formula = self.registry.initiative_formula(&world.system);
+            let formula = self.registry().initiative_formula(&world.system);
             let mut todo = vec![];
             for id in &ids {
                 let x = c.combatant(id).ok_or("Combatant not found")?.clone();

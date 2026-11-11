@@ -163,6 +163,7 @@ mod tests {
             data: json!({"str": 7}),
             derived: Value::Null,
             items: vec![],
+            effects: vec![],
             flags: Value::Null,
         };
         assert_eq!(host.prepare_actor(&actor), Some(json!({"str_mod": -2, "name_len": 4})));

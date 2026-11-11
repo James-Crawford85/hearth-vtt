@@ -7,7 +7,7 @@
   <div class="d20-stats">
     <label>HP <span class="d20-hp"><input type="number" name="data.hp.value"> / <input type="number" name="data.hp.max"></span></label>
     <label>AC <input type="number" name="data.ac"></label>
-    <label>Speed <input type="number" name="data.speed"></label>
+    <label>Speed <input type="number" name="data.speed">{{#if derived.speed}}<small class="muted"> now {{derived.speed}}</small>{{/if}}</label>
     <div class="d20-box">
       <span class="muted">Proficiency</span>
       <strong>{{derived.proficiency|signed}}</strong>
@@ -34,6 +34,16 @@
   </div>
   <p class="hint muted">Click an ability to roll. Shift-click to roll privately to the GM.</p>
 
+  <div class="d20-row">
+    <span class="muted">Conditions:</span>
+    <button class="chip" data-toggle-condition="poisoned">Poisoned</button>
+    <button class="chip" data-toggle-condition="inspired">Inspired</button>
+    <button class="chip" data-toggle-condition="slowed">Slowed</button>
+    <span class="grow"></span>
+    <button data-rest="short">Short rest</button>
+    <button data-rest="long">Long rest</button>
+  </div>
+
   <h3>Weapons</h3>
   <table class="d20-table">
     <thead><tr><th>Name</th><th>Ability</th><th>Damage</th><th>Prof.</th><th></th><th></th></tr></thead>
@@ -48,8 +58,8 @@
         <td><input name="items.{{this.id}}.data.damage" size="6"></td>
         <td><input type="checkbox" name="items.{{this.id}}.data.proficient"></td>
         <td class="d20-actions">
-          <button data-roll="1d20 + @attacks.{{this.id}}.bonus" data-flavor="{{this.name}} — attack">Attack</button>
-          <button data-roll="{{this.data.damage}} + @attacks.{{this.id}}.damage_mod" data-flavor="{{this.name}} — damage">Damage</button>
+          <button data-use="attack" data-item-id="{{this.id}}" title="Alt-click: advantage. Ctrl-click: disadvantage.">Attack</button>
+          <button data-use="damage" data-item-id="{{this.id}}">Damage</button>
         </td>
         <td><button class="icon" data-action="delete-item" data-item-id="{{this.id}}" title="Delete">🗑</button></td>
       </tr>

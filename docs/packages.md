@@ -39,6 +39,10 @@ All paths are relative to the package folder and can't leave it. Files are serve
 
 A world uses exactly one system, chosen when the world is created (`--system`). The smallest possible system is a manifest with one actor type (see `packages/freeform`). Hearth generates a sheet from the template.
 
+## Rules
+
+The easiest way to make a system is the in-app [system builder](builder.md), which writes `builder.json` alongside `hearth.toml`. By hand, systems declare calculated values, lookup tables, tracked resources, actions (attack, then damage) and conditions in `hearth.toml`, and the server works them out. No scripting is needed for most games. See [rules.md](rules.md).
+
 ## Combat
 
 A system sets how initiative is rolled:
@@ -62,6 +66,8 @@ kind = "actor"               # actor, item, journal, table or macro
 path = "packs/bestiary.json"
 public = false               # true: players can browse it too
 ```
+
+**A rules reference** is a `journal` pack: one entry per rule (`{ "id", "name", "folder", "content" }`, content in markdown). Entries link to each other and to conditions with `[[Name]]`. Everything in the system's packs, its conditions (with their descriptions) and the world's journal, items, actors and collections can be found with **Ctrl+Space** (or the 🔍 Look up button), so one entry per rule ("Dodge", "Cover") makes each findable by name.
 
 The file is a JSON array of documents shaped like the world's own (see [client-api.md](client-api.md)), each with at least a `name`:
 

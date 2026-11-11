@@ -20,7 +20,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<Value> {
     let mut users: Vec<&hearth_core::User> = w.users.values().collect();
     users.sort_by(|a, b| (a.role != hearth_core::Role::Gm, a.name.to_lowercase()).cmp(&(b.role != hearth_core::Role::Gm, b.name.to_lowercase())));
     let players: Vec<_> = users.iter().filter(|u| u.role != hearth_core::Role::Gm).collect();
-    let system_name = state.registry.get(&w.system).map(|p| p.manifest.name.clone()).unwrap_or_else(|| w.system.clone());
+    let system_name = state.registry().get(&w.system).map(|p| p.manifest.name.clone()).unwrap_or_else(|| w.system.clone());
     Json(json!({
         "name": "hearth",
         "version": env!("CARGO_PKG_VERSION"),
@@ -44,7 +44,8 @@ pub async fn package_file(
     Path((id, path)): Path<(String, String)>,
     mut req: Request,
 ) -> Response {
-    let Some(pkg) = state.registry.get(&id) else {
+    let reg = state.registry();
+    let Some(pkg) = reg.get(&id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     // Pack files go through /api/collections, which checks who may read them.
@@ -132,6 +133,171 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The GM behind a request's `x-hearth-session` header, or an error.
+async fn gm_of(state: &AppState, headers: &HeaderMap) -> Result<hearth_core::User, (StatusCode, String)> {
+    let token = headers.get("x-hearth-session").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let user = state.session_user(token).await.ok_or((StatusCode::UNAUTHORIZED, "Join the game first".into()))?;
+    if user.role != hearth_core::Role::Gm {
+        return Err((StatusCode::FORBIDDEN, "Only the GM can edit the system".into()));
+    }
+    Ok(user)
+}
+
+/// `GET /api/builder` (GM): the world's system as the builder sees it.
+pub async fn builder_get(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Value>, (StatusCode, String)> {
+    gm_of(&state, &headers).await?;
+    let system = state.world.read().await.system.clone();
+    let reg = state.registry();
+    let pkg = reg.get(&system).ok_or((StatusCode::NOT_FOUND, "The world's system isn't installed".into()))?;
+    let m = &pkg.manifest;
+    // Types written by hand in hearth.toml (not from the builder), so the editor can mention them.
+    let built: std::collections::HashSet<String> = pkg
+        .blueprint
+        .iter()
+        .flat_map(|b| b.actor_types.iter().chain(&b.item_types).map(|n| n.key.clone()))
+        .collect();
+    let hand: Vec<String> = m.actor_types.keys().chain(m.item_types.keys()).filter(|k| !built.contains(*k)).cloned().collect();
+    Ok(Json(json!({
+        "package": m.id, "name": m.name, "version": m.version,
+        "blueprint": pkg.blueprint.clone().unwrap_or_default(),
+        "errors": pkg.blueprint_errors,
+        "hand_written_types": hand,
+        "has_script": m.server.script.is_some(),
+    })))
+}
+
+/// `PUT /api/builder` (GM): save the builder's tree and reload the system live.
+pub async fn builder_put(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(bp): Json<hearth_packages::builder::Blueprint>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    gm_of(&state, &headers).await?;
+    let errors = hearth_packages::builder::compile(&bp).errors;
+    let system = state.world.read().await.system.clone();
+    let dir = state.registry().get(&system).map(|p| p.dir.clone()).ok_or((StatusCode::NOT_FOUND, "The world's system isn't installed".into()))?;
+    let text = serde_json::to_string_pretty(&bp).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    if text.len() > 4 * 1024 * 1024 {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "That system is too big".into()));
+    }
+    let file = dir.join(hearth_packages::builder::FILE);
+    tokio::fs::write(&file, text).await.map_err(|e| {
+        (StatusCode::FORBIDDEN, format!("Couldn't save to {}: {e}. Systems that came with Hearth can't be changed: in the launcher, open Game Systems and use Copy to edit, then make a world with the copy.", file.display()))
+    })?;
+    tracing::info!(system = %system, "system builder saved");
+    state.reload_system().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({ "saved": true, "errors": errors })))
+}
+
+/// `PUT /api/builder/sheet` (GM): save a hand-made HTML sheet for a type as
+/// `sheets/<type>.html` in the world's system folder. Returns its path.
+pub async fn builder_sheet_put(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    gm_of(&state, &headers).await?;
+    let kind = body.get("type").and_then(Value::as_str).unwrap_or_default();
+    let html = body.get("html").and_then(Value::as_str).unwrap_or_default();
+    if !hearth_packages::builder::valid_key(kind) {
+        return Err((StatusCode::BAD_REQUEST, "That isn't a type key".into()));
+    }
+    if html.len() > 512 * 1024 {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "That sheet is too big".into()));
+    }
+    let system = state.world.read().await.system.clone();
+    let dir = state.registry().get(&system).map(|p| p.dir.clone()).ok_or((StatusCode::NOT_FOUND, "The world's system isn't installed".into()))?;
+    // Item types get their own names, so an item type and an actor type can share a key.
+    let item = body.get("item").and_then(Value::as_bool).unwrap_or(false);
+    let name = if item { format!("item-{kind}.html") } else { format!("{kind}.html") };
+    let rel = format!("sheets/{name}");
+    let file = dir.join("sheets").join(&name);
+    tokio::fs::create_dir_all(dir.join("sheets")).await.map_err(|e| (StatusCode::FORBIDDEN, e.to_string()))?;
+    tokio::fs::write(&file, html).await.map_err(|e| (StatusCode::FORBIDDEN, format!("Couldn't save {}: {e}", file.display())))?;
+    Ok(Json(json!({ "path": rel })))
+}
+
+/// `PUT /api/collections/{package}/{pack}` with `{ "doc": {…} }` (GM): add a document
+/// to one of the world system's own collections, or replace the one with the same
+/// name and type. Added documents are marked `flags.core.user_added`, so tools that
+/// regenerate a system can keep them. Everyone's clients reload the system after.
+pub async fn collection_put(
+    State(state): State<Arc<AppState>>,
+    Path((pkg_id, pack_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    gm_of(&state, &headers).await?;
+    let system = state.world.read().await.system.clone();
+    if pkg_id != system {
+        return Err((StatusCode::FORBIDDEN, "Only the world's own system's collections can be changed here".into()));
+    }
+    let mut doc = body.get("doc").cloned().filter(Value::is_object).ok_or((StatusCode::BAD_REQUEST, "Send { \"doc\": {…} }".into()))?;
+    let name = doc.get("name").and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "The document needs a name".into()));
+    }
+    let (file, pack_kind) = {
+        let reg = state.registry();
+        let pkg = reg.get(&pkg_id).ok_or((StatusCode::NOT_FOUND, "The world's system isn't installed".into()))?;
+        let pack = pkg.pack(&pack_id).ok_or((StatusCode::NOT_FOUND, "No such collection".into()))?;
+        if !hearth_packages::safe_relative_path(&pack.path) {
+            return Err((StatusCode::FORBIDDEN, "Collection file outside its package".into()));
+        }
+        (pkg.dir.join(&pack.path), pack.kind.clone())
+    };
+    let kind = doc.get("kind").and_then(Value::as_str).unwrap_or_default().to_string();
+    let text = match tokio::fs::read_to_string(&file).await {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "[]".into(),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+    let mut docs: Vec<Value> = serde_json::from_str(&text).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("The collection file isn't a JSON list: {e}")))?;
+    // Same name (and, for items and actors, same type): replace it, keeping its id.
+    let same = |d: &Value| {
+        d.get("name").and_then(Value::as_str).is_some_and(|n| n.trim().eq_ignore_ascii_case(&name))
+            && (kind.is_empty() || d.get("kind").and_then(Value::as_str).unwrap_or_default() == kind)
+    };
+    let replaced = docs.iter().position(same);
+    let id = match replaced {
+        Some(i) => docs[i].get("id").and_then(Value::as_str).map(String::from),
+        None => None,
+    }
+    .unwrap_or_else(|| {
+        let base: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        let taken = |id: &str| docs.iter().any(|d| d.get("id").and_then(Value::as_str) == Some(id));
+        let mut id = format!("{}_user", base.trim_matches('_'));
+        let mut n = 2;
+        while taken(&id) {
+            id = format!("{}_user{n}", base.trim_matches('_'));
+            n += 1;
+        }
+        id
+    });
+    let o = doc.as_object_mut().unwrap();
+    o.insert("id".into(), json!(id));
+    for k in ["folder", "access", "players", "owners", "derived"] {
+        o.remove(k);
+    }
+    let flags = o.entry("flags").or_insert_with(|| json!({}));
+    if !flags.is_object() {
+        *flags = json!({});
+    }
+    hearth_core::patch::merge_patch(flags, &json!({ "core": { "user_added": true } }));
+    match replaced {
+        Some(i) => docs[i] = doc,
+        None => docs.push(doc),
+    }
+    let out = serde_json::to_string_pretty(&docs).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if out.len() as u64 > MAX_PACK_BYTES {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "That collection would be too large".into()));
+    }
+    tokio::fs::write(&file, out + "\n").await.map_err(|e| (StatusCode::FORBIDDEN, format!("Couldn't save {}: {e}", file.display())))?;
+    state.reload_system().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    tracing::info!(pack = %pack_id, %name, replaced = replaced.is_some(), kind = %pack_kind, "added to a system collection");
+    Ok(Json(json!({ "id": id, "replaced": replaced.is_some() })))
+}
+
 /// Largest pack file we'll send, in bytes.
 const MAX_PACK_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -147,9 +313,10 @@ pub async fn collection(
     let user = state.session_user(token).await.ok_or((StatusCode::UNAUTHORIZED, "Join the game first".into()))?;
     let active = {
         let world = state.world.read().await;
-        state.registry.active(&world.system, &world.modules, world.theme.as_deref()).iter().any(|p| p.manifest.id == pkg_id)
+        state.registry().active(&world.system, &world.modules, world.theme.as_deref()).iter().any(|p| p.manifest.id == pkg_id)
     };
-    let pkg = state.registry.get(&pkg_id).filter(|_| active).ok_or((StatusCode::NOT_FOUND, "No such package in this world".into()))?;
+    let reg = state.registry();
+    let pkg = reg.get(&pkg_id).filter(|_| active).ok_or((StatusCode::NOT_FOUND, "No such package in this world".into()))?;
     let pack = pkg.pack(&pack_id).ok_or((StatusCode::NOT_FOUND, "No such collection".into()))?;
     if !pack.public && user.role != hearth_core::Role::Gm {
         return Err((StatusCode::FORBIDDEN, "Only the GM can open that collection".into()));

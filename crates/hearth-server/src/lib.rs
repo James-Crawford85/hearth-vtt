@@ -107,7 +107,9 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<RunningServer> {
         .route("/api/info", get(http::info))
         .route("/api/upload", post(http::upload).layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
         .route("/packages/{id}/{*path}", get(http::package_file))
-        .route("/api/collections/{pkg}/{pack}", get(http::collection))
+        .route("/api/collections/{pkg}/{pack}", get(http::collection).put(http::collection_put))
+        .route("/api/builder", get(http::builder_get).put(http::builder_put))
+        .route("/api/builder/sheet", axum::routing::put(http::builder_sheet_put))
         // Uploaded files get unique names, so they can be cached for good.
         .nest_service(
             "/assets",

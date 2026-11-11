@@ -1,7 +1,7 @@
 //! Installing packages from `.zip` archives.
 //!
-//! An archive may hold the package at its root (`hearth.toml`, …) or inside
-//! one top-level folder (`my-system-1.2/hearth.toml`, …) as GitHub's
+//! An archive may hold the package at its root (`hearth.toml`, â€¦) or inside
+//! one top-level folder (`my-system-1.2/hearth.toml`, â€¦) as GitHub's
 //! "Download ZIP" and release archives do. Extraction is guarded against
 //! path traversal ("zip slip") and zip bombs, and the manifest is validated
 //! before anything replaces an installed package.
@@ -31,6 +31,8 @@ pub enum InstallError {
     Package(#[from] PackageError),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Invalid(String),
 }
 
 /// Install a package archive into `dest_root` (the user's packages folder).
@@ -116,6 +118,143 @@ pub fn uninstall(dest_root: &Path, id: &str) -> Result<(), InstallError> {
         std::fs::remove_dir_all(dir)?;
     }
     Ok(())
+}
+
+/// A package id from a name ("My Game!" â†’ "my-game"), not already `taken`.
+pub fn id_for(name: &str, taken: &dyn Fn(&str) -> bool) -> String {
+    let mut base: String = name
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    while base.contains("--") {
+        base = base.replace("--", "-");
+    }
+    let base = base.trim_matches('-').chars().take(40).collect::<String>();
+    let base = if base.is_empty() { "my-system".to_string() } else { base };
+    let mut id = base.clone();
+    let mut n = 2;
+    while taken(&id) {
+        id = format!("{base}-{n}");
+        n += 1;
+    }
+    id
+}
+
+fn toml_string(s: &str) -> String {
+    toml::Value::String(s.to_string()).to_string()
+}
+
+/// Make a new, empty game system in `dest_root` (the user's packages folder),
+/// ready to design in the system builder. `taken` says which ids are in use.
+pub fn create_system(dest_root: &Path, name: &str, description: &str, taken: &dyn Fn(&str) -> bool) -> Result<Manifest, InstallError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(InstallError::Invalid("Give the system a name".into()));
+    }
+    let id = id_for(name, &|id| taken(id) || dest_root.join(id).exists());
+    let dir = dest_root.join(&id);
+    std::fs::create_dir_all(&dir)?;
+    let manifest = format!(
+        "id = \"{id}\"\ntype = \"system\"\nname = {}\nversion = \"0.1.0\"\ndescription = {}\n\n# Designed in Hearth's system builder (builder.json). Anything written\n# here by hand is merged over what the builder makes; see docs/rules.md.\n",
+        toml_string(name),
+        toml_string(description.trim()),
+    );
+    std::fs::write(dir.join("hearth.toml"), manifest)?;
+    std::fs::write(dir.join(crate::builder::FILE), "{\n  \"version\": 1\n}\n")?;
+    Ok(Package::load(&dir)?.manifest)
+}
+
+/// Copy a package to `dest_root` under a new name (and id), e.g. to edit a
+/// built-in system. Returns the copy's manifest.
+pub fn copy_package(src: &Package, dest_root: &Path, name: &str, taken: &dyn Fn(&str) -> bool) -> Result<Manifest, InstallError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(InstallError::Invalid("Give the copy a name".into()));
+    }
+    let id = id_for(name, &|id| taken(id) || dest_root.join(id).exists());
+    let dir = dest_root.join(&id);
+    let mut total = 0u64;
+    let mut files = 0usize;
+    copy_dir(&src.dir, &dir, &mut total, &mut files)?;
+    // Point the manifest at the new id and name.
+    let file = dir.join("hearth.toml");
+    let text = std::fs::read_to_string(&file)?;
+    let mut table: toml::Table = text.parse().map_err(|e: toml::de::Error| InstallError::Invalid(e.to_string()))?;
+    table.insert("id".into(), toml::Value::String(id.clone()));
+    table.insert("name".into(), toml::Value::String(name.to_string()));
+    let out = toml::to_string_pretty(&table).map_err(|e| InstallError::Invalid(e.to_string()))?;
+    std::fs::write(&file, format!("# Copied from {} ({}).\n{out}", src.manifest.name, src.manifest.id))?;
+    match Package::load(&dir) {
+        Ok(p) => Ok(p.manifest),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            Err(e.into())
+        }
+    }
+}
+
+fn copy_dir(from: &Path, to: &Path, total: &mut u64, files: &mut usize) -> Result<(), InstallError> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let dest = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_dir(&entry.path(), &dest, total, files)?;
+        } else if kind.is_file() {
+            *files += 1;
+            *total += entry.metadata()?.len();
+            if *files > MAX_FILES || *total > MAX_UNPACKED {
+                return Err(InstallError::TooLarge);
+            }
+            std::fs::copy(entry.path(), dest)?;
+        }
+        // Symlinks are skipped.
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod new_system_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hearth-newsys-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn ids_from_names() {
+        let none = |_: &str| false;
+        assert_eq!(id_for("My Game!", &none), "my-game");
+        assert_eq!(id_for("  ", &none), "my-system");
+        assert_eq!(id_for("D&D 5e SRD", &none), "d-d-5e-srd");
+        assert_eq!(id_for("x", &|id| id == "x" || id == "x-2"), "x-3");
+    }
+
+    #[test]
+    fn creates_a_blank_system_and_copies_one() {
+        let root = tmp("create");
+        let m = create_system(&root, "Ember \"Saga\"", "Mine.", &|_| false).unwrap();
+        assert_eq!((m.id.as_str(), m.name.as_str()), ("ember-saga", "Ember \"Saga\""));
+        let pkg = Package::load(&root.join("ember-saga")).unwrap();
+        assert!(pkg.blueprint.is_some(), "starts with an empty builder file");
+        // A second one with the same name gets its own folder.
+        assert_eq!(create_system(&root, "Ember Saga", "", &|_| false).unwrap().id, "ember-saga-2");
+        // Copy d20 Lite under a new name.
+        let d20 = Package::load(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/d20-lite")).unwrap();
+        let c = copy_package(&d20, &root, "My d20", &|id| id == "d20-lite").unwrap();
+        assert_eq!((c.id.as_str(), c.name.as_str()), ("my-d20", "My d20"));
+        let copy = Package::load(&root.join("my-d20")).unwrap();
+        assert_eq!(copy.manifest.packs.len(), d20.manifest.packs.len(), "packs come along");
+        assert!(copy.dir.join("sheets/character.html").is_file());
+        assert_eq!(copy.rules().conditions.len(), d20.rules().conditions.len(), "rules survive the rewrite");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]

@@ -12,7 +12,9 @@ import { Macros } from './macros.js';
 import { Audio } from './audio.js';
 import { Playlists } from './playlists.js';
 import { Collections } from './collections.js';
-import { sheetsOnOp } from './sheets.js';
+import { Builder } from './builder.js';
+import { Lookup } from './lookup.js';
+import { sheetsOnOp, refreshSheets } from './sheets.js';
 import { toast } from './ui.js';
 
 const joinScreen = document.getElementById('join');
@@ -193,6 +195,9 @@ async function start() {
     api.audio = new Audio(api);
     api.playlists = new Playlists(api);
     api.collections = new Collections(api);
+    api.builder = new Builder(api);
+    api.lookup = new Lookup(api);
+    document.getElementById('lookup-btn')?.addEventListener('click', () => api.lookup.open());
     api.sidebar = new Sidebar(api);
     api.controls = new Controls(api);
     hooks.on('board:view', updateSceneTitle);
@@ -282,6 +287,13 @@ function handle(msg) {
       break;
     case 'notice':
       toast(msg.message);
+      break;
+    case 'packages':
+      // The system changed (the builder saved): new rules, templates and sheets.
+      store.packages = msg.packages;
+      hooks.emit('packages', msg.packages);
+      refreshSheets();
+      api.sidebar?.refreshAll();
       break;
     case 'applied': {
       const op = msg.op;

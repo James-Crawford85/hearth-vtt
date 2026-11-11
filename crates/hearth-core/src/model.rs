@@ -542,6 +542,9 @@ pub struct Actor {
     pub derived: Value,
     #[serde(default)]
     pub items: Vec<Item>,
+    /// Effects on this actor: conditions, spells, temporary bonuses.
+    #[serde(default)]
+    pub effects: Vec<Effect>,
     #[serde(default)]
     pub flags: Value,
 }
@@ -562,8 +565,69 @@ pub struct Item {
     pub img: Option<String>,
     #[serde(default)]
     pub data: Value,
+    /// Effects this item gives whoever carries it (while `requires` holds).
+    #[serde(default)]
+    pub effects: Vec<Effect>,
+    /// What the item gives as it levels (classes) or when added (ancestries,
+    /// backgrounds). See `crate::advance`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advancement: Vec<crate::advance::Grant>,
     #[serde(default)]
     pub flags: Value,
+}
+
+/// A change to an actor's values: from a condition, an item, a spell…
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Effect {
+    #[serde(default)]
+    pub id: Id,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub disabled: bool,
+    /// For item effects: only while this formula is true (e.g. `@item.equipped`).
+    #[serde(default)]
+    pub requires: Option<String>,
+    /// A condition id from the system (its changes are added to these).
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub changes: Vec<Change>,
+    /// Rounds left, if it runs out.
+    #[serde(default)]
+    pub rounds: Option<u32>,
+    /// What it does, in words (markdown). Conditions show this on hover and in the lookup.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Change {
+    /// The value it changes, e.g. `abilities.str.value` or `ac`.
+    pub path: String,
+    #[serde(default)]
+    pub mode: ChangeMode,
+    /// A formula.
+    pub value: String,
+}
+
+/// How a change applies. Changes run in this order: first the base is
+/// picked (`set`, then `upgrade` / `downgrade`, e.g. armour: "at least 13 + Dex"),
+/// then it is adjusted (`multiply`, then `add`, e.g. a shield's +2).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeMode {
+    /// Replace the value.
+    Set = 0,
+    /// At least this much.
+    Upgrade = 1,
+    /// At most this much.
+    Downgrade = 2,
+    Multiply = 3,
+    #[default]
+    Add = 4,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

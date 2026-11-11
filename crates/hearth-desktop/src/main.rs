@@ -187,6 +187,8 @@ fn main() {
             commands::install_package_url,
             commands::install_package_file,
             commands::uninstall_package,
+            commands::create_system,
+            commands::copy_package,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start Hearth");

@@ -164,6 +164,7 @@ export class Journal {
       actions.append(
         el('button', { text: '👁 Show to players', on: { click: () => this.show(id) } }),
         el('button', { text: '🔒 Access', on: { click: () => this.editAccess(id) } }),
+        this.api.collections?.addButton('journal', () => this.entry(id)) ?? '',
         el('span.grow'),
         el('button.danger', { text: 'Delete', on: { click: () => this.remove(id) } }),
       );

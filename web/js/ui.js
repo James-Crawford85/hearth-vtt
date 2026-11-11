@@ -53,7 +53,8 @@ export function openWindow({ id, title, width = 420, height }) {
   node.style.width = `${width}px`;
   if (height) node.style.height = `${height}px`;
   const n = windows.size;
-  node.style.left = `${Math.min(80 + n * 24, innerWidth - width - 360)}px`;
+  // Cascade new windows, but keep wide ones fully on screen.
+  node.style.left = `${Math.max(8, Math.min(80 + n * 24, innerWidth - width - 360, innerWidth - width - 8))}px`;
   node.style.top = `${60 + n * 24}px`;
   node.style.zIndex = ++zTop;
   node.addEventListener('pointerdown', () => { node.style.zIndex = ++zTop; });
@@ -73,6 +74,37 @@ export function openWindow({ id, title, width = 420, height }) {
     header.addEventListener('pointerup', up);
   });
 
+  // Resize by dragging the right edge, the bottom edge or the corner.
+  for (const edge of ['e', 's', 'se']) {
+    const grip = el(`div.window-grip.grip-${edge}`, { 'aria-hidden': 'true' });
+    grip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      node.style.zIndex = ++zTop;
+      const r = node.getBoundingClientRect();
+      const sx = e.clientX, sy = e.clientY;
+      grip.setPointerCapture(e.pointerId);
+      document.body.classList.add('resizing');
+      const move = (ev) => {
+        if (edge.includes('e')) node.style.width = `${Math.max(240, Math.min(innerWidth - r.left - 4, r.width + ev.clientX - sx))}px`;
+        if (edge.includes('s')) {
+          node.style.height = `${Math.max(120, Math.min(innerHeight - r.top - 4, r.height + ev.clientY - sy))}px`;
+          node.style.maxHeight = 'none';
+        }
+      };
+      const up = () => {
+        grip.removeEventListener('pointermove', move);
+        grip.removeEventListener('pointerup', up);
+        document.body.classList.remove('resizing');
+        if (id) rememberSize(id, node);
+      };
+      grip.addEventListener('pointermove', move);
+      grip.addEventListener('pointerup', up);
+    });
+    node.append(grip);
+  }
+  if (id) restoreSize(id, node);
+
   const api = {
     el: node,
     body,
@@ -87,6 +119,27 @@ export function openWindow({ id, title, width = 420, height }) {
   document.getElementById('windows').append(node);
   if (id) windows.set(id, api);
   return api;
+}
+
+// Windows keep the size you give them, per kind of window ("sheet-…" for all
+// actor sheets, "builder", "journal-…"), in this browser.
+const SIZE_KEY = 'hearth.windowSizes';
+const sizeKind = (id) => String(id).replace(/[-:/][^-:/]*$/, '') || String(id);
+function readSizes() {
+  try { return JSON.parse(localStorage.getItem(SIZE_KEY) || '{}'); } catch { return {}; }
+}
+function rememberSize(id, node) {
+  const sizes = readSizes();
+  sizes[sizeKind(id)] = { w: Math.round(node.offsetWidth), h: node.style.height ? Math.round(node.offsetHeight) : null };
+  try { localStorage.setItem(SIZE_KEY, JSON.stringify(sizes)); } catch { /* storage off: sizes just aren't kept */ }
+}
+function restoreSize(id, node) {
+  const s = readSizes()[sizeKind(id)];
+  if (!s) return;
+  node.style.width = `${Math.min(s.w, innerWidth - 24)}px`;
+  if (s.h) { node.style.height = `${Math.min(s.h, innerHeight - 40)}px`; node.style.maxHeight = 'none'; }
+  const left = parseFloat(node.style.left) || 0;
+  if (left + Math.min(s.w, innerWidth - 24) > innerWidth - 8) node.style.left = `${Math.max(8, innerWidth - Math.min(s.w, innerWidth - 24) - 8)}px`;
 }
 
 export function closeWindow(id) {

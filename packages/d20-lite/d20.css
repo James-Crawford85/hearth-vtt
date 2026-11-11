@@ -28,3 +28,6 @@
 /* Crits flagged by rules.rhai on_roll */
 .msg.d20-crit .roll-total { color: var(--ok); }
 .msg.d20-fumble .roll-total { color: var(--danger); }
+
+.d20 .d20-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+.d20 .d20-row .grow { flex: 1; }

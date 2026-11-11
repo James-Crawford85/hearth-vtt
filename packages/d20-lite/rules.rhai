@@ -1,42 +1,12 @@
-// d20 Lite server rules. Runs sandboxed on the server.
+// d20 Lite server script. Runs sandboxed on the server.
 //
-// prepare_actor: computes values the sheet and roll formulas use.
-//   @abilities.str.mod, @proficiency, @initiative
-// on_roll: tags natural 20s / 1s so clients can highlight them.
-
-fn ability_mod(score) {
-    floor_div(score - 10, 2)
-}
-
-fn prepare_actor(actor) {
-    let a = actor.data.abilities;
-    let abilities = #{};
-    for key in ["str", "dex", "con", "int", "wis", "cha"] {
-        let score = if a != () && a.contains(key) { a[key] } else { 10 };
-        abilities[key] = #{ mod: ability_mod(score) };
-    }
-    let level = if actor.data.contains("level") { actor.data.level } else { 1 };
-    let proficiency = 2 + floor_div(level - 1, 4);
-
-    // Precompute each weapon's attack bonus so the sheet can show it.
-    let attacks = #{};
-    for item in actor.items {
-        if item.kind == "weapon" {
-            let ab = abilities[item.data.ability];
-            let m = if ab == () { 0 } else { ab.mod };
-            let bonus = m;
-            if item.data.proficient == true { bonus += proficiency; }
-            attacks[item.id] = #{ bonus: bonus, damage_mod: m };
-        }
-    }
-
-    #{
-        abilities: abilities,
-        proficiency: proficiency,
-        initiative: abilities.dex.mod,
-        attacks: attacks,
-    }
-}
+// Most of d20 Lite's rules are declared in hearth.toml (formulas, actions,
+// conditions), which the server works out without any scripting. This script
+// only shows the other hook: tagging natural 20s and 1s so the client can
+// highlight them (see d20.js).
+//
+// A system can also define prepare_actor(actor) here to calculate values in
+// code; its result is merged over the declared formulas.
 
 fn on_roll(roll, actor) {
     let crit = false;

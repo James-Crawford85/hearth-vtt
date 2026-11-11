@@ -75,6 +75,43 @@ pub enum ClientMsg {
     RollInitiative { ids: Vec<Id> },
     /// Roll on a rollable table; the result goes to chat.
     DrawTable { id: Id, #[serde(default)] gm_only: bool },
+    /// Use an action an actor (or one of its items) has: spend its cost and roll it.
+    UseAction {
+        actor_id: Id,
+        #[serde(default)]
+        item_id: Option<Id>,
+        action: String,
+        #[serde(default)]
+        options: crate::rules::ActionOptions,
+        #[serde(default)]
+        gm_only: bool,
+    },
+    /// Level up a class, or add a class, ancestry or background, with the player's picks.
+    Advance {
+        actor_id: Id,
+        #[serde(flatten)]
+        request: crate::advance::AdvanceRequest,
+    },
+    /// Character creation: roll for a step's roll method (the server rolls; results are kept).
+    CreationRoll { actor_id: Id, step: String, method: String },
+    /// Character creation: set a step's scores with a method (checked by the server).
+    CreationApply {
+        actor_id: Id,
+        step: String,
+        method: String,
+        #[serde(default)]
+        assign: crate::creation::Assign,
+    },
+    /// Take back an item's last level (or remove an item without levels) and what it gave.
+    Regress {
+        actor_id: Id,
+        item_id: Id,
+        /// Take back every level (removing the item and all it gave), not just the last.
+        #[serde(default)]
+        all: bool,
+    },
+    /// Take a rest (e.g. `short` or `long`): resources reset as the system says.
+    Rest { actor_id: Id, kind: String },
     /// Areas this player has now seen on a scene (merged into their fog map).
     Explore { scene_id: Id, fog: crate::model::FogMap },
 }
@@ -98,6 +135,8 @@ pub enum ServerMsg {
     Emit { from: Id, channel: String, payload: Value },
     /// Something worth telling the user (e.g. "Password reset for Robin").
     Notice { message: String },
+    /// The installed packages changed (e.g. the system builder saved): replaces Welcome's `packages`.
+    Packages { packages: Value },
     PasswordChanged,
     Error { message: String },
 }

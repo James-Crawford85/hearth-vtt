@@ -7,6 +7,8 @@ import { hooks } from './hooks.js';
 import { store, isGM, ownsActor, systemInfo, combatOrder } from './store.js';
 import { el, formDialog, openWindow, toast } from './ui.js';
 import { icon, hasIcon } from './icons.js';
+import { renderMarkdown } from './markdown.js';
+import { creationSteps, openCreationSettings } from './creation.js';
 
 const PANEL_W = 340;
 const RAIL_W = 52;
@@ -172,11 +174,27 @@ export class Sidebar {
         el('time.muted', { text: new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })),
       m.flavor ? el('div.flavor', { text: m.flavor }) : null,
       // A table roll shows the dice, then the result it picked.
-      m.flags?.core?.table ? null : m.content ? el('div.msg-body', { text: m.content }) : null,
+      // Text is markdown: **bold**, lists, [[links]] to rules and journal entries, [[/r 1d20]] roll buttons.
+      m.flags?.core?.table ? null : m.content ? el('div.msg-body.md', {}, renderMarkdown(m.content, {
+        onLink: (name) => { if (!this.api.lookup?.follow(name)) this.api.journal?.follow(name); },
+        onRoll: (formula) => this.api.roll(formula),
+      })) : null,
       m.roll ? this.rollCard(m.roll) : null,
+      this.followUps(m),
       m.flags?.core?.table && m.content ? el('div.msg-body.table-result', { text: m.content }) : null);
     hooks.emit('chat:render', li, m);
     return li;
+  }
+
+  /** Buttons for an action's follow-ups (damage after an attack), for whoever controls the actor. */
+  followUps(m) {
+    const a = m.flags?.core?.action;
+    if (!a?.then?.length || !(isGM() || ownsActor(a.actor_id))) return null;
+    return el('div.row.follow-ups', {}, ...a.then.map((t) => el('button.small', {
+      text: a.crit ? `${t.label} (critical)` : t.label,
+      class: a.crit ? 'small primary' : 'small',
+      on: { click: (e) => this.api.actions.use(a.actor_id, a.item_id, t.id, { crit: !!a.crit, level: a.level ?? undefined }, e.shiftKey) },
+    })));
   }
 
   rollCard(r) {
@@ -512,6 +530,11 @@ export class Sidebar {
     const parts = [
       el('h3', { text: w.name }),
       el('p.muted', { text: `System: ${systemInfo().name ?? w.system}` }),
+      // The system's license and the credit it requires (e.g. the SRD's CC-BY notice).
+      systemInfo().license || systemInfo().attribution ? el('details.system-license', {}, el('summary.muted.small', { text: `License: ${systemInfo().license ?? 'see notice'}` }),
+        systemInfo().attribution ? el('p.small', { text: systemInfo().attribution }) : null) : null,
+      gm ? el('div.row', {}, el('button', { text: '🛠 System builder', title: 'Design this world\'s system: stats, resources, items, rolls', on: { click: () => this.api.builder.open() } }),
+        creationSteps().length ? el('button', { text: '🎲 Character creation…', title: 'How players set up new characters in this world (ability scores…)', on: { click: () => openCreationSettings(this.api) } }) : null) : null,
       w.next_session ? el('p.muted', { text: `Next session: ${new Date(w.next_session).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}` }) : null,
       el('h4', { text: 'Players' }),
       el('ul.users', {}, ...users.map(userRow)),

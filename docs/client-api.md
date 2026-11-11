@@ -34,6 +34,18 @@ hearth.op({ op: 'token_delete', scene_id, id })   // any op from ops.rs
 
 Every `update.*` takes an optional `onReject(reason)` callback.
 
+## System rules: actions, rests, conditions
+
+Systems declare formulas, resources, actions and conditions (see [rules.md](rules.md)); `hearth.rules` holds them. Calculated values are in `actor.derived` (item values in `actor.derived.items[itemId]`).
+
+```js
+hearth.actions.list(actor, item)                       // the actions an item (or the actor) has
+hearth.actions.use(actorId, itemId, 'attack', { mode: 'advantage' })   // rolled and paid for on the server
+hearth.actions.use(actorId, itemId, 'cast', { level: 3 })              // upcast: @cast_level
+hearth.rest(actorId, 'long')
+hearth.update.actor(actorId, { effects: [...actor.effects, { status: 'poisoned', changes: [] }] })
+```
+
 ## Rolling and chat
 
 ```js

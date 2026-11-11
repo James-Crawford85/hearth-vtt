@@ -54,6 +54,29 @@ const P = {
   playlists: '<path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
   collections: '<path d="M4 8l8-4 8 4-8 4z"/><path d="M4 12l8 4 8-4M4 16l8 4 8-4"/>',
   settings: '<circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
+  // character sheets (tab icons; see SHEET_ICONS)
+  tower: '<path d="M6 21V9h12v12M4 21h16M6 9V4h2.5v2h2V4h3v2h2V4H18v5"/><path d="M10.5 21v-4a1.5 1.5 0 0 1 3 0v4"/>',
+  scroll: '<path d="M8 4h10.5a2 2 0 0 1 0 4H17v10a2 2 0 0 1-2 2H5.5a2 2 0 0 1 0-4H7V5a1 1 0 0 1 1-1z"/><path d="M10 9h4.5M10 12h4.5"/>',
+  strength: '<path d="M6.5 8v8M17.5 8v8M3.5 10v4M20.5 10v4M6.5 12h11"/>',
+  wand: '<path d="M4 20L14.5 9.5"/><path d="M17 3v3M15.5 4.5h3M20.5 8.5v2M19.5 9.5h2M11 3.5v2M10 4.5h2"/>',
+  sparkle: '<path d="M11 3l1.8 5.2L18 10l-5.2 1.8L11 17l-1.8-5.2L4 10l5.2-1.8z"/><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/>',
+  wrench: '<path d="M14.5 3.5a5 5 0 0 0-4.6 6.9L3.5 16.8V20.5h3.7l6.4-6.4a5 5 0 0 0 6.9-4.6l-3 1-2.5-2.5z"/>',
+  star: '<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
+  shield: '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/>',
+  sword: '<path d="M20 4l-10.5 10.5M20 4h-3.5L7 13.5M20 4v3.5L10.5 17"/><path d="M6 12l6 6M8.5 15.5L4 20"/>',
+  bow: '<path d="M5 3c6 2 10 6 12 12M5 3v1c4.5 2 9 6.5 11 11h1"/><path d="M5 3l12 12M14 15l3 0 0-3M20 21l-3-3"/>',
+  backpack: '<path d="M6 10a6 6 0 0 1 12 0v10.5H6z"/><path d="M9.5 4.5V3h5v1.5M9 14h6v6.5H9z"/>',
+  book: '<path d="M12 6c-2-1.5-5-2-8-1.5v14c3-.5 6 0 8 1.5 2-1.5 5-2 8-1.5v-14c-3-.5-6 0-8 1.5z"/><path d="M12 6v14"/>',
+  d20: '<path d="M12 2.5l8.5 5v9L12 21.5l-8.5-5v-9z"/><path d="M12 2.5L7 14h10zM7 14l5 7.5 5-7.5M3.5 7.5L7 14M20.5 7.5L17 14"/>',
+  heart: '<path d="M12 20s-7.5-4.6-7.5-10.2A4.2 4.2 0 0 1 12 7.2a4.2 4.2 0 0 1 7.5 2.6C19.5 15.4 12 20 12 20z"/>',
+  flame: '<path d="M12 21c-4 0-6.5-2.7-6.5-6.3 0-3.7 3-5.6 3.5-9.2 2 1 3 3 3 4.5 1-1 1.5-2.2 1.5-3.5 3 2 5.5 5 5.5 8.2C19 18.3 16 21 12 21z"/>',
+  eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
+  coin: '<circle cx="12" cy="12" r="8.5"/><path d="M14.5 9.2c-.5-.8-1.5-1.2-2.5-1.2-1.4 0-2.5.7-2.5 1.9 0 2.7 5.2 1.4 5.2 4.2 0 1.2-1.2 1.9-2.7 1.9-1.1 0-2.1-.5-2.6-1.3M12 6.5V8M12 16v1.5"/>',
+  skull: '<path d="M12 3a7 7 0 0 0-7 7c0 2.3 1 4 2.5 5v3h9v-3c1.5-1 2.5-2.7 2.5-5a7 7 0 0 0-7-7z"/><circle cx="9.5" cy="10.5" r="1.5"/><circle cx="14.5" cy="10.5" r="1.5"/><path d="M10 18v3M14 18v3"/>',
+  bolt: '<path d="M13 2.5L5 13.5h6l-1 8 8-11h-6z"/>',
+  potion: '<path d="M10 3h4M10.5 3v5L6 15.5A4 4 0 0 0 9.5 21h5a4 4 0 0 0 3.5-5.5L13.5 8V3"/><path d="M7.5 14h9"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/>',
+  paw: '<circle cx="7" cy="10" r="1.8"/><circle cx="10.5" cy="6.5" r="1.8"/><circle cx="14.5" cy="6.5" r="1.8"/><circle cx="18" cy="10" r="1.8"/><path d="M12.5 11.5c2.5 0 5 4 5 6.3 0 1.7-1.6 2.2-3 1.7-1-.4-2-.6-3-.2-1.4.6-3.5.4-3.5-1.5 0-2.4 2-6.3 4.5-6.3z"/>',
   // chrome
   'chevron-left': '<path d="M15 5l-7 7 7 7"/>',
   'chevron-right': '<path d="M9 5l7 7-7 7"/>',
@@ -70,3 +93,24 @@ export function icon(name, title) {
 }
 
 export const hasIcon = (name) => name in P;
+
+/** Icons offered for character sheet tabs in the system builder. */
+export const SHEET_ICONS = ['tower', 'scroll', 'strength', 'wand', 'sparkle', 'wrench', 'star', 'shield', 'sword', 'bow', 'combat',
+  'backpack', 'items', 'coin', 'book', 'journal', 'd20', 'heart', 'flame', 'bolt', 'potion', 'eye', 'skull', 'paw', 'clock', 'token', 'settings'];
+
+/** A tab icon as HTML text (for exported sheets). */
+export function sheetIconHtml(name) {
+  if (!name) return '';
+  if (hasIcon(name)) return `<svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">${P[name]}</svg>`;
+  return `<span class="bp-emoji">${String(name).replace(/[<>&"]/g, '')}</span>`;
+}
+
+/** A tab icon: a built-in icon by name, otherwise the text itself (an emoji). */
+export function sheetIcon(name) {
+  if (!name) return null;
+  if (hasIcon(name)) return icon(name);
+  const s = document.createElement('span');
+  s.className = 'bp-emoji';
+  s.textContent = name;
+  return s;
+}

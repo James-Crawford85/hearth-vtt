@@ -8,6 +8,7 @@
 //!
 //! See `docs/packages.md` for the full manifest reference.
 
+pub mod builder;
 pub mod install;
 mod scripting;
 
@@ -63,6 +64,24 @@ pub struct TypeDef {
     /// HTML sheet template, relative to the package folder.
     #[serde(default)]
     pub sheet: Option<String>,
+    /// Calculated values: data path (may contain `*`) → formula. See `hearth_core::rules`.
+    #[serde(default)]
+    pub formulas: BTreeMap<String, String>,
+    /// Tracked resources (hit points, uses, slots): data path → definition.
+    #[serde(default)]
+    pub resources: BTreeMap<String, hearth_core::rules::ResourceDef>,
+    /// Rolls this kind of actor or item can make.
+    #[serde(default)]
+    pub actions: Vec<hearth_core::rules::ActionDef>,
+    /// Item types: effects every item of this type gives its owner.
+    #[serde(default)]
+    pub effects: Vec<hearth_core::Effect>,
+    /// Item types: the data key counting the item's level (classes level up).
+    #[serde(default)]
+    pub levels: Option<String>,
+    /// Item types: items of this type give features (advancement).
+    #[serde(default)]
+    pub grants: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +98,9 @@ pub struct Manifest {
     pub authors: Vec<String>,
     #[serde(default)]
     pub license: Option<String>,
+    /// Credit the license requires (e.g. the CC-BY notice for SRD material), shown in the app.
+    #[serde(default)]
+    pub attribution: Option<String>,
     /// For modules: system ids this module works with. Empty = any system.
     #[serde(default)]
     pub systems: Vec<String>,
@@ -96,6 +118,15 @@ pub struct Manifest {
     /// Content collections shipped with the package (monsters, spells, handouts…).
     #[serde(default)]
     pub packs: Vec<PackDef>,
+    /// Systems: lookup tables for formulas (`table("name", key)`).
+    #[serde(default)]
+    pub tables: BTreeMap<String, Value>,
+    /// Systems: conditions that can be put on actors.
+    #[serde(default)]
+    pub conditions: Vec<hearth_core::Effect>,
+    /// Systems: kinds of rest (e.g. `["short", "long"]`).
+    #[serde(default)]
+    pub rests: Vec<String>,
 }
 
 /// A collection of ready-made documents in a package: a JSON array in `path`.
@@ -120,6 +151,10 @@ fn default_version() -> String {
 pub struct Package {
     pub manifest: Manifest,
     pub dir: PathBuf,
+    /// The system builder's tree (`builder.json`), if the package has one.
+    pub blueprint: Option<builder::Blueprint>,
+    /// Problems compiling it.
+    pub blueprint_errors: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -134,7 +169,12 @@ pub enum PackageError {
     BadPath(PathBuf, String),
 }
 
-fn safe_relative(p: &str) -> bool {
+/// A path inside a package: relative, with no '..', drive letters or backslashes.
+pub fn safe_relative_path(p: &str) -> bool {
+    safe_relative(p)
+}
+
+pub(crate) fn safe_relative(p: &str) -> bool {
     // Manifests are shared between OSes, so use '/' only and reject anything
     // Windows would treat as a drive or separator, regardless of the host OS.
     let path = Path::new(p);
@@ -166,7 +206,41 @@ impl Package {
                 return Err(PackageError::BadPath(file, p.clone()));
             }
         }
-        Ok(Package { manifest, dir: dir.to_path_buf() })
+        let mut manifest = manifest;
+        let (blueprint, blueprint_errors) = Self::load_blueprint(dir, &mut manifest);
+        Ok(Package { manifest, dir: dir.to_path_buf(), blueprint, blueprint_errors })
+    }
+
+    /// Read `builder.json` (if there is one) and fold what it compiles to into
+    /// the manifest. Hand-written parts of `hearth.toml` win.
+    fn load_blueprint(dir: &Path, manifest: &mut Manifest) -> (Option<builder::Blueprint>, Vec<String>) {
+        let file = dir.join(builder::FILE);
+        let Ok(text) = std::fs::read_to_string(&file) else { return (None, vec![]) };
+        let bp: builder::Blueprint = match serde_json::from_str(&text) {
+            Ok(bp) => bp,
+            Err(e) => return (None, vec![format!("{}: {e}", builder::FILE)]),
+        };
+        let compiled = builder::compile(&bp);
+        for (types, built) in [(&mut manifest.actor_types, compiled.actor_types), (&mut manifest.item_types, compiled.item_types)] {
+            for (k, def) in built {
+                let merged = builder::merge_type(def, types.get(&k));
+                types.insert(k, merged);
+            }
+        }
+        for (k, v) in &bp.tables {
+            manifest.tables.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for c in &bp.conditions {
+            if !manifest.conditions.iter().any(|x| x.id == c.id) {
+                manifest.conditions.push(c.clone());
+            }
+        }
+        for r in &bp.rests {
+            if !manifest.rests.contains(r) {
+                manifest.rests.push(r.clone());
+            }
+        }
+        (Some(bp), compiled.errors)
     }
 
     fn url(&self, rel: &str) -> String {
@@ -198,11 +272,16 @@ impl Package {
             "version": m.version,
             "description": m.description,
             "authors": m.authors,
+            "license": m.license,
+            "attribution": m.attribution,
             "systems": m.systems,
             "scripts": m.client.scripts.iter().map(|s| self.url(s)).collect::<Vec<_>>(),
             "styles": m.client.styles.iter().map(|s| self.url(s)).collect::<Vec<_>>(),
             "actor_types": types(&m.actor_types),
             "item_types": types(&m.item_types),
+            "rules": self.rules(),
+            "blueprint": self.blueprint,
+            "blueprint_errors": self.blueprint_errors,
             "packs": m.packs.iter().map(|p| json!({"id": p.id, "label": p.label, "kind": p.kind, "public": p.public})).collect::<Vec<_>>(),
         })
     }
@@ -214,6 +293,25 @@ pub struct Registry {
 }
 
 impl Package {
+    /// The rules engine's view of this package (formulas, tables, resources, actions, conditions).
+    pub fn rules(&self) -> hearth_core::rules::Rules {
+        let m = &self.manifest;
+        let types = |t: &BTreeMap<String, TypeDef>| {
+            t.iter()
+                .map(|(k, d)| {
+                    (k.clone(), hearth_core::rules::TypeRules { formulas: d.formulas.clone(), resources: d.resources.clone(), actions: d.actions.clone(), effects: d.effects.clone(), levels: d.levels.clone() })
+                })
+                .collect()
+        };
+        hearth_core::rules::Rules {
+            tables: m.tables.clone(),
+            actor_types: types(&m.actor_types),
+            item_types: types(&m.item_types),
+            conditions: m.conditions.clone(),
+            rests: m.rests.clone(),
+        }
+    }
+
     /// The pack with this id, if the package has one.
     pub fn pack(&self, id: &str) -> Option<&PackDef> {
         self.manifest.packs.iter().find(|p| p.id == id)
@@ -311,6 +409,11 @@ impl Registry {
         json!({ "active": active, "available": available })
     }
 
+    /// The active system's rules (empty if it declares none).
+    pub fn rules(&self, system: &str) -> hearth_core::rules::Rules {
+        self.get(system).map(Package::rules).unwrap_or_default()
+    }
+
     /// Default data for a new actor of `kind` under `system`.
     pub fn actor_template(&self, system: &str, kind: &str) -> Value {
         self.get(system)
@@ -389,7 +492,7 @@ mod pack_tests {
         .unwrap();
         assert_eq!(m.packs.len(), 1);
         assert!(!m.packs[0].public, "packs are GM-only unless marked public");
-        let pkg = Package { manifest: m, dir: PathBuf::from(".") };
+        let pkg = Package { manifest: m, dir: PathBuf::from("."), blueprint: None, blueprint_errors: vec![] };
         assert!(pkg.is_pack_file("packs/beasts.json"));
         assert!(pkg.is_pack_file("./PACKS/beasts.json"));
         assert!(pkg.is_pack_file(r"packs\beasts.json"));
@@ -408,5 +511,48 @@ mod pack_tests {
             assert!(!docs.is_empty(), "{} is empty", p.path);
             assert!(docs.iter().all(|d| d["name"].is_string()), "every entry in {} needs a name", p.path);
         }
+    }
+}
+
+#[cfg(test)]
+mod d20_rules_tests {
+    use super::*;
+    use hearth_core::rules::{derive, plan_action, rest, ActionOptions};
+    use serde_json::json;
+
+    fn d20() -> Package {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/d20-lite");
+        let manifest: Manifest = toml::from_str(&std::fs::read_to_string(dir.join("hearth.toml")).unwrap()).unwrap();
+        Package { manifest, dir, blueprint: None, blueprint_errors: vec![] }
+    }
+
+    #[test]
+    fn d20_lite_declared_rules_work() {
+        let rules = d20().rules();
+        let mut a: hearth_core::Actor = serde_json::from_value(json!({
+            "id": "a", "name": "Ann", "kind": "character",
+            "data": { "level": 5, "speed": 30, "hp": { "value": 3, "max": 20 },
+                      "abilities": { "str": 16, "dex": 13, "con": 10, "int": 10, "wis": 10, "cha": 8 } },
+            "items": [ { "id": "w", "name": "Longsword", "kind": "weapon", "data": { "ability": "str", "damage": "1d8", "proficient": true } } ]
+        }))
+        .unwrap();
+        let d = derive(&a, &rules);
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        assert_eq!(d.values["abilities"]["str"]["mod"], 3);
+        assert_eq!(d.values["abilities"]["cha"]["mod"], -1);
+        assert_eq!(d.values["proficiency"], 3);
+        assert_eq!(d.values["initiative"], 1);
+        assert_eq!(d.values["items"]["w"]["attack"], 6);
+        let attack = plan_action(&a, &rules, Some("w"), "attack", &ActionOptions::default()).unwrap();
+        assert_eq!(attack.formula, "1d20 + 6");
+        let dmg = plan_action(&a, &rules, Some("w"), "damage", &ActionOptions { crit: true, ..Default::default() }).unwrap();
+        assert_eq!(dmg.formula, "(2d8) + 3");
+        // Conditions from the manifest.
+        a.effects.push(hearth_core::Effect { status: Some("poisoned".into()), ..Default::default() });
+        a.effects.push(hearth_core::Effect { status: Some("slowed".into()), ..Default::default() });
+        assert_eq!(plan_action(&a, &rules, Some("w"), "attack", &ActionOptions::default()).unwrap().formula, "2d20kl1 + 6");
+        assert_eq!(derive(&a, &rules).values["speed"], 15);
+        // A long rest restores hit points.
+        assert_eq!(rest(&a, &rules, "long").0, json!({ "data": { "hp": { "value": 20 } } }));
     }
 }

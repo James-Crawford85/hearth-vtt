@@ -116,6 +116,14 @@ async fn run<S, R>(
                     }
                     ClientMsg::RollInitiative { ids } => (None, state.roll_initiative(user, ids).await),
                     ClientMsg::DrawTable { id, gm_only } => (None, state.draw_table(user, &id, gm_only).await),
+                    ClientMsg::UseAction { actor_id, item_id, action, options, gm_only } => {
+                        (None, state.use_action(user, &actor_id, item_id, &action, options, gm_only).await)
+                    }
+                    ClientMsg::Rest { actor_id, kind } => (None, state.rest(user, &actor_id, &kind).await),
+                    ClientMsg::Advance { actor_id, request } => (None, state.advance(user, &actor_id, request).await),
+                    ClientMsg::CreationRoll { actor_id, step, method } => (None, state.creation_roll(user, &actor_id, &step, &method).await),
+                    ClientMsg::CreationApply { actor_id, step, method, assign } => (None, state.creation_apply(user, &actor_id, &step, &method, &assign).await),
+                    ClientMsg::Regress { actor_id, item_id, all } => (None, state.regress(user, &actor_id, &item_id, all).await),
                     ClientMsg::Explore { scene_id, fog } => (None, state.explore(user, &scene_id, fog).await),
                     ClientMsg::Emit { channel, payload, to } => {
                         state.emit(user, channel, payload, to);

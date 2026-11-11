@@ -30,7 +30,8 @@ The desktop app hosts your world (or joins someone else's); players join from th
 - **Combat tracker:** start an encounter from the scene's tokens, roll initiative with the system's formula (GM for NPCs, players for their own characters), step through turns and rounds, mark combatants defeated or hidden. The active token glows on the board and players are told when it's their turn.
 - **Player accounts:** the GM adds players (Settings → Players) with a temporary password. Players pick their name on the join page; on first login they choose their own password. Passwords are stored as Argon2 hashes, separately from the world data. The join page also shows the world description, the next session and who's online.
 - **Packages:**
-  - **Systems** define the rules: actor/item types, sheets, server-side rules in sandboxed [Rhai](https://rhai.rs) scripts.
+  - **System builder:** design a system inside Hearth as a tree of stats, resources, lists, rolls and item types, with formulas connecting them. It saves as you go and sheets update live. Start from a blank system or a copy of another (launcher → Game Systems). Classes, ancestries and backgrounds give features through grants (items, choices, ability points, hit-point rolls), with a level-up dialog that can also undo a level ([docs/builder.md](docs/builder.md)).
+  - **Systems** define the rules: actor/item types, sheets, and declared rules worked out on the server: formulas, lookup tables, resources that reset on rests, actions (attack, then damage, with advantage and crits), item effects and conditions ([docs/rules.md](docs/rules.md)). Anything beyond that goes in sandboxed [Rhai](https://rhai.rs) scripts.
   - **Modules** add features through a hook-based client API and/or server scripts.
   - **Themes** are just CSS that override design tokens.
 - **Plain-file worlds:** `worlds/<name>/world.json` plus an `assets/` folder. Easy to back up, diff or move.
