@@ -10,8 +10,9 @@ import { el, toast, openWindow } from './ui.js';
 import { ITEM_MIME } from './items.js';
 import { DOC_MIME } from './collections.js';
 import { nodeAt } from './layout-sheet.js';
-import { label } from './blueprint-sheet.js';
+import { label, blueprintType } from './blueprint-sheet.js';
 import { renderMarkdown } from './markdown.js';
+import { finder } from './finder.js';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 const KINDS = [['items', 'Gives items'], ['choice', 'Choose from items'], ['pick', 'Pick any of a type (e.g. a feat)'], ['points', 'Spend points'], ['roll', 'Roll (e.g. hit points)']];
@@ -156,7 +157,8 @@ export async function openAdvance(api, actorId, { itemId = null, add = null } = 
                 rerender();
               },
             },
-          }), el('span', {}, el('strong', { text: it.name }), it.data?.description ? el('span.muted', { text: ` ${String(it.data.description).slice(0, 120)}` }) : null)));
+          }), el('span.grow', {}, el('strong', { text: it.name }), it.data?.description ? el('span.muted', { text: ` ${String(it.data.description).slice(0, 120)}` }) : null),
+          el('button.icon.small', { type: 'button', text: 'ⓘ', title: `What ${it.name} is`, 'aria-label': `Details of ${it.name}`, on: { click: (e) => { e.preventDefault(); e.stopPropagation(); openDetails(api, it, g.label || ''); } } })));
         });
         // A picked item with grants of its own (a subclass) shows them too.
         for (const i of picks.choices[g.id] ?? []) {
@@ -278,30 +280,144 @@ export function pickAllows(g, doc) {
   });
 }
 
+/** One row of a picker list: the name, where it's from, a line about it, and badges. A click shows it; a double click chooses it. */
+function pickRow(c, { snippet = '', about = '', badge = null, muted = false, select, choose }) {
+  const book = offBookOf(c.doc);
+  const note = c.doc.data?.requires_note;
+  const line = snippet || about;
+  return el(`li.entity${muted ? '.muted' : ''}`, { tabindex: 0, on: { click: select, dblclick: choose, keydown: (e) => { if (e.key === 'Enter') choose(); else if (e.key === ' ') { e.preventDefault(); select(); } } } },
+    el('span.grow', {},
+      el('span', { text: c.doc.name }),
+      el('small.muted', { text: ` ${c.from}`, title: c.also?.length ? `Also in ${c.also.join(', ')}` : null }),
+      line ? el(`div.small.muted${snippet ? '.finder-snippet' : ''}`, { text: line }) : null),
+    badge ? el('span.badge', { text: badge }) : null,
+    c.met === 'no' ? el('span.badge.muted', { text: '✗ requirements', title: `${c.who ?? 'This character'} doesn't meet its requirements` }) : null,
+    c.met === 'check' ? el('span.badge.muted', { text: '? check', title: note ? `Check by hand: ${note}` : "The rules can't tell: check its requirements by hand" }) : null,
+    book ? el('span.badge.muted', { text: 'book off', title: `${book} is switched off in this world: players aren't offered it` }) : null);
+}
+
+/** A short line about a document for a list: its prerequisites, else the start of its description. */
+const aboutOf = (doc) => String(doc.data?.prerequisites ?? doc.data?.prerequisite ?? '') || String(doc.data?.description ?? '').replace(/[*_#>]/g, '').slice(0, 110);
+
+/** "Level 3, then every 3 levels to 18" for a grant. */
+function grantWhen(g) {
+  const lvl = g.level ?? 1;
+  if (!g.every) return `Level ${lvl}`;
+  return `Level ${lvl}, then every ${g.every === 1 ? 'level' : `${g.every} levels`}${g.until ? ` to ${g.until}` : ''}`;
+}
+
+/** A granted item, opened to read: its name, and its text when clicked. */
+function grantedItem(it) {
+  const text = String(it.data?.description ?? it.data?.benefit ?? '');
+  if (!text) return el('div.gives-item', { text: it.name });
+  return el('details.gives-item', {}, el('summary', { text: it.name }), el('div.journal-text.small', {}, renderMarkdown(text)));
+}
+
+/** What an item with advancement gives, level by level: its features (each opens to its text), choices and picks. */
+export function givesView(doc) {
+  const grants = (doc.advancement ?? []).filter((g) => g && g.kind);
+  if (!grants.length) return null;
+  const byWhen = new Map();
+  for (const g of [...grants].sort((a, b) => (a.level ?? 1) - (b.level ?? 1) || (a.every ? 1 : 0) - (b.every ? 1 : 0))) {
+    const when = grantWhen(g);
+    if (!byWhen.has(when)) byWhen.set(when, []);
+    const typeLabel = systemInfo().item_types?.[g.from]?.label ?? g.from ?? 'item';
+    const parts = byWhen.get(when);
+    switch (g.kind) {
+      case 'items':
+        parts.push(...(g.items ?? []).map(grantedItem));
+        break;
+      case 'choice':
+        parts.push(el('div.gives-choice', {},
+          el('div', { text: `${g.label || 'Choose'}: ${g.count > 1 ? `${g.count} of` : 'one of'}` }),
+          el('div.gives-options', {}, ...(g.items ?? []).map(grantedItem))));
+        break;
+      case 'pick':
+        parts.push(el('div.gives-item', { text: `${g.label || `Pick ${/^[aeiou]/i.test(typeLabel) ? 'an' : 'a'} ${typeLabel.toLowerCase()}`}${g.optional ? ' (optional)' : ''}` }));
+        break;
+      default:
+        parts.push(el('div.gives-item.muted', { text: g.label || g.kind }));
+    }
+  }
+  return el('div.gives', {}, el('h4', { text: 'What it gives' }),
+    ...[...byWhen].filter(([, parts]) => parts.length).map(([when, parts]) => el('div.gives-level', {}, el('div.gives-when', { text: when }), el('div.gives-what', {}, ...parts))));
+}
+
+/**
+ * Whether the actor meets each entry's requirements (its `requires` formula and
+ * `requires_note`), from the server: sets `met` ("yes", "no", "check") and `who` on them.
+ */
+export async function checkRequirements(api, actorId, entries) {
+  const actor = store.world.actors[actorId];
+  const keyOf = (d) => `${d.data?.requires ?? ''}␟${d.data?.requires_note ?? ''}`;
+  const asks = entries.filter((e) => String(e.doc.data?.requires ?? '').trim() || String(e.doc.data?.requires_note ?? '').trim());
+  if (!asks.length || !actor) return false;
+  const unique = [...new Set(asks.map((e) => keyOf(e.doc)))];
+  try {
+    const res = await fetch('/api/requires', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-hearth-session': api.session ?? '' },
+      body: JSON.stringify({ actor_id: actorId, checks: unique.map((k) => { const [requires, note] = k.split('␟'); return { requires, note }; }) }),
+    });
+    if (!res.ok) return false;
+    const { results } = await res.json();
+    const byKey = new Map(unique.map((k, i) => [k, results[i]]));
+    for (const e of asks) { e.met = byKey.get(keyOf(e.doc)); e.who = actor.name; }
+    return true;
+  } catch { return false; }
+}
+
+/** A line saying whether the character meets an entry's requirements. */
+function metLine(c) {
+  if (!c.met) return null;
+  const note = c.doc.data?.requires_note;
+  if (c.met === 'yes') return el('p.met.yes', { text: `✓ ${c.who} meets the requirements.` });
+  if (c.met === 'no') return el('p.met.no', { text: `✗ ${c.who} doesn't meet the requirements.${note ? ` (Also check by hand: ${note}.)` : ''}` });
+  return el('p.met.check', { text: note ? `? Check by hand: ${note}. The rest is met.` : "? The rules can't tell: check the requirements by hand." });
+}
+
+/** Everything about a document, for the pane beside a picker: its fields and text, then what it gives. */
+export function docDetails(api, c) {
+  const doc = c.doc;
+  const type = blueprintType(doc.kind, true);
+  const head = [el('h3', { text: doc.name ?? '' }), c.from ? el('div.muted.small', { text: `From ${c.from}${c.also?.length ? ` (also in ${c.also.join(', ')})` : ''}` }) : null].filter(Boolean);
+  let body;
+  if (type && api.collections?.itemDetails) body = api.collections.itemDetails(doc, type, () => false);
+  else body = doc.data?.description ? [el('div.journal-text', {}, renderMarkdown(String(doc.data.description)))] : [];
+  const book = offBookOf(doc);
+  return [...head, metLine(c), ...(book ? [el('p.small.muted', { text: `${book} is switched off in this world: players aren't offered it.` })] : []), ...body, givesView(doc)].filter(Boolean);
+}
+
+/** A window showing one document in full (the ⓘ beside a choice). */
+export function openDetails(api, doc, from = '') {
+  const win = openWindow({ title: doc.name ?? 'Details', width: 460 });
+  win.body.replaceChildren(el('div.finder-pane-body', {}, ...docDetails(api, { doc, from })));
+}
+
 /** A searchable list for a "pick any of a type" grant (any feat…); picked documents go into `chosen`. */
 async function choosePick(api, actor, g, chosen, done) {
   const typeLabel = systemInfo().item_types?.[g.from]?.label ?? g.from;
-  const win = openWindow({ title: `Choose ${typeLabel.toLowerCase()}`, width: 440 });
+  const win = openWindow({ title: `Choose ${typeLabel.toLowerCase()}`, width: 880 });
   win.body.replaceChildren(el('p.muted', { text: 'Loading…' }));
-  const all = (await availableItems(api, [g.from], (d) => pickAllows(g, d))).sort((a, b) => String(a.doc.name).localeCompare(String(b.doc.name)));
-  const search = el('input', { type: 'search', placeholder: `Find ${typeLabel.toLowerCase()}…`, 'aria-label': 'Search' });
-  const list = el('ul.entity-list.picker-list');
-  const draw = () => {
-    const q = search.value.trim().toLowerCase();
-    const shown = all.filter((c) => !q || String(c.doc.name).toLowerCase().includes(q) || String(c.doc.data?.description ?? '').toLowerCase().includes(q)).slice(0, 300);
-    list.replaceChildren(...shown.map((c) => {
-      const has = actor.items.some((i) => i.name === c.doc.name && pickAllows(g, i)) || chosen.some((x) => x.name === c.doc.name);
-      const about = String(c.doc.data?.prerequisites ?? c.doc.data?.prerequisite ?? '') || String(c.doc.data?.description ?? '').slice(0, 110);
-      return el(`li.entity${has ? '.muted' : ''}`, { on: { click: () => { if (has) return; chosen.push(cleanDoc(c.doc)); win.close(); done(); } } },
-        el('span.grow', {}, el('span', { text: c.doc.name }), el('small.muted', { text: ` ${c.from}` }), about ? el('div.small.muted', { text: about }) : null),
-        has ? el('span.badge', { text: 'has it' }) : null, offBookOf(c.doc) ? el('span.badge.muted', { text: 'book off', title: `${offBookOf(c.doc)} is switched off in this world: players aren\x27t offered it` }) : null);
-    }));
-    if (!shown.length) list.append(el('li.muted', { text: all.length ? 'Nothing matches.' : `There are no ${typeLabel.toLowerCase()} items to pick from yet.` }));
+  const all = await availableItems(api, [g.from], (d) => pickAllows(g, d));
+  const has = (c) => actor.items.some((i) => i.name === c.doc.name && pickAllows(g, i)) || chosen.some((x) => x.name === c.doc.name);
+  const take = (c) => {
+    if (has(c)) return;
+    chosen.push(cleanDoc(c.doc));
+    win.close();
+    done();
   };
-  search.addEventListener('input', draw);
-  draw();
-  win.body.replaceChildren(search, list);
-  search.focus();
+  const f = finder({
+    entries: all,
+    qualify: actor.name,
+    placeholder: `Search ${typeLabel.toLowerCase()} names and text…`,
+    empty: `There are no ${typeLabel.toLowerCase()} items to pick from yet.`,
+    detail: (c) => docDetails(api, c),
+    choose: { label: (c) => `Choose ${c.doc.name}${c.met === 'no' ? ' anyway' : ''}`, why: (c) => (has(c) ? `${actor.name} already has it.` : null), run: take },
+    render: (c, { snippet, select }) => pickRow(c, { snippet, about: aboutOf(c.doc), badge: has(c) ? 'has it' : null, muted: has(c), select, choose: () => take(c) }),
+  });
+  win.body.replaceChildren(f.el);
+  f.focus();
+  if (await checkRequirements(api, actor.id, all)) f.redraw();
 }
 
 /**
@@ -356,22 +472,32 @@ function pickGrantDoc(api, actorId, t, source) {
 export async function openAdd(api, actorId) {
   const types = grantTypes();
   if (!types.length) { toast('This system has no item types that give features. Mark one in the system builder.'); return; }
-  const win = openWindow({ title: 'Add an ancestry, background or class', width: 460 });
+  const win = openWindow({ title: `Add ${types.map((t) => t.label.toLowerCase()).join(', ').replace(/, ([^,]*)$/, ' or $1')}`, width: 880 });
   win.body.replaceChildren(el('p.muted', { text: 'Loading…' }));
   const choices = await availableItems(api, types.map((t) => t.key));
   const actor = store.world.actors[actorId];
-  const parts = [];
-  for (const t of types) {
-    const mine = choices.filter((c) => c.doc.kind === t.key);
-    parts.push(el('h3', { text: t.label }));
-    if (!mine.length) { parts.push(el('p.muted.small', { text: isGM() ? `None yet. Make one in the Items directory (type ${t.label}) and give it advancement.` : 'None shared with you.' })); continue; }
-    parts.push(el('ul.entity-list', {}, mine.map((c) => {
-      const has = actor.items.some((i) => i.kind === c.doc.kind && i.name === c.doc.name);
-      return el('li.entity', { on: { click: () => { if (pickGrantDoc(api, actorId, t, c.doc)) win.close(); } } },
-        el('span.grow', {}, el('span', { text: c.doc.name }), el('small.muted', { text: ` ${c.from}`, title: c.also?.length ? `Also in ${c.also.join(', ')}` : null })), has ? el('span.badge', { text: t.levels ? 'level up' : 'has it' }) : null, offBookOf(c.doc) ? el('span.badge.muted', { text: 'book off', title: `${offBookOf(c.doc)} is switched off in this world: players aren\x27t offered it` }) : null);
-    })));
+  if (!choices.length) {
+    win.body.replaceChildren(el('p.muted', { text: isGM() ? `None yet. Make one in the Items directory (type ${types[0].label}) and give it advancement.` : 'None shared with you.' }));
+    return;
   }
-  win.body.replaceChildren(...parts);
+  const typeOf = (c) => types.find((t) => t.key === c.doc.kind);
+  const has = (c) => actor.items.some((i) => i.kind === c.doc.kind && i.name === c.doc.name);
+  const take = (c) => { if (pickGrantDoc(api, actorId, typeOf(c), c.doc)) win.close(); };
+  const f = finder({
+    entries: choices,
+    qualify: actor.name,
+    placeholder: 'Search names and text…',
+    detail: (c) => docDetails(api, c),
+    choose: {
+      label: (c) => `${has(c) && typeOf(c).levels ? `Level up ${c.doc.name}` : `Add ${c.doc.name}`}${c.met === 'no' ? ' anyway' : ''}`,
+      why: (c) => (has(c) && !typeOf(c).levels ? `${actor.name} already has it.` : null),
+      run: take,
+    },
+    render: (c, { snippet, select }) => pickRow(c, { snippet, about: aboutOf(c.doc), badge: has(c) ? (typeOf(c).levels ? 'level up' : 'has it') : null, select, choose: () => take(c) }),
+  });
+  win.body.replaceChildren(f.el);
+  f.focus();
+  if (await checkRequirements(api, actorId, choices)) f.redraw();
 }
 
 /**
@@ -385,39 +511,35 @@ export async function openItemPicker(api, actorId, kind) {
   if (!actor) return;
   const typeLabel = systemInfo().item_types?.[kind]?.label ?? kind;
   const grant = grantTypes().find((t) => t.key === kind);
-  const win = openWindow({ title: `Add ${/^[aeiou]/i.test(typeLabel) ? 'an' : 'a'} ${typeLabel.toLowerCase()} to ${actor.name}`, width: 440 });
+  const win = openWindow({ title: `Add ${/^[aeiou]/i.test(typeLabel) ? 'an' : 'a'} ${typeLabel.toLowerCase()} to ${actor.name}`, width: 880 });
   win.body.replaceChildren(el('p.muted', { text: 'Loading…' }));
-  const all = (await availableItems(api, [kind])).sort((a, b) => String(a.doc.name).localeCompare(String(b.doc.name)) || a.from.localeCompare(b.from));
-  const search = el('input', { type: 'search', placeholder: `Find ${typeLabel.toLowerCase()}…`, 'aria-label': 'Search' });
-  const list = el('ul.entity-list.picker-list');
+  const all = await availableItems(api, [kind]);
+  const has = (c) => grant && actor.items.some((i) => i.kind === c.doc.kind && i.name === c.doc.name);
   const pick = (c) => {
     if (grant) { if (pickGrantDoc(api, actorId, grant, c.doc)) win.close(); return; }
     api.collections?.giveItem(actorId, c.doc);
     win.close();
   };
-  const draw = () => {
-    const q = search.value.trim().toLowerCase();
-    const shown = all.filter((c) => !q || String(c.doc.name).toLowerCase().includes(q));
-    list.replaceChildren(...shown.map((c) => {
-      const has = grant && actor.items.some((i) => i.kind === c.doc.kind && i.name === c.doc.name);
-      const about = c.doc.data?.description ? String(c.doc.data.description).slice(0, 110) : '';
-      return el('li.entity', { on: { click: () => pick(c) } },
-        el('span.grow', {}, el('span', { text: c.doc.name }), el('small.muted', { text: ` ${c.from}`, title: c.also?.length ? `Also in ${c.also.join(', ')}` : null }), about ? el('div.small.muted', { text: about }) : null),
-        has ? el('span.badge', { text: grant.levels ? 'level up' : 'has it' }) : null, offBookOf(c.doc) ? el('span.badge.muted', { text: 'book off', title: `${offBookOf(c.doc)} is switched off in this world: players aren\x27t offered it` }) : null);
-    }));
-    if (!shown.length) {
-      list.append(el('li.muted', { text: all.length ? 'Nothing matches.' : isGM()
-        ? `There are no ${typeLabel.toLowerCase()} items yet. Make one in the Items directory, or add some to a collection.`
-        : `The GM hasn't shared any ${typeLabel.toLowerCase()} items yet.` }));
-    }
-  };
-  search.addEventListener('input', draw);
-  draw();
+  const f = finder({
+    entries: all,
+    qualify: actor.name,
+    placeholder: `Search ${typeLabel.toLowerCase()} names and text…`,
+    empty: isGM() ? `There are no ${typeLabel.toLowerCase()} items yet. Make one in the Items directory, or add some to a collection.`
+      : `The GM hasn't shared any ${typeLabel.toLowerCase()} items yet.`,
+    detail: (c) => docDetails(api, c),
+    choose: {
+      label: (c) => `${has(c) && grant.levels ? `Level up ${c.doc.name}` : `Add ${c.doc.name}`}${c.met === 'no' ? ' anyway' : ''}`,
+      why: (c) => (has(c) && !grant.levels ? `${actor.name} already has it.` : null),
+      run: pick,
+    },
+    render: (c, { snippet, select }) => pickRow(c, { snippet, about: aboutOf(c.doc), badge: has(c) ? (grant.levels ? 'level up' : 'has it') : null, select, choose: () => pick(c) }),
+  });
   const blank = isGM() && !grant
     ? el('button.small', { type: 'button', text: `+ A blank ${typeLabel.toLowerCase()}`, title: 'Make a new, empty one on this character', on: { click: () => { api.create.item(actorId, kind, `New ${typeLabel}`); win.close(); } } })
     : null;
-  win.body.replaceChildren(search, list, el('div.row', {}, el('span.grow'), blank));
-  search.focus();
+  win.body.replaceChildren(f.el, blank ? el('div.row', {}, el('span.grow'), blank) : null);
+  f.focus();
+  if (await checkRequirements(api, actorId, all)) f.redraw();
 }
 
 /** Take back an item's last level (or remove it and what it gave). */

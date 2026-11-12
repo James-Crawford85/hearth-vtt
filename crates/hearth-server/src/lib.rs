@@ -112,6 +112,7 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<RunningServer> {
         .route("/api/builder/sheet", axum::routing::put(http::builder_sheet_put))
         .route("/api/advance/plan", post(http::advance_plan))
         .route("/api/books", get(http::books))
+        .route("/api/requires", post(http::requires))
         .route("/api/forge/preview", post(http::forge_preview))
         .route("/api/forge/make", post(http::forge_make))
         // Uploaded files get unique names, so they can be cached for good.

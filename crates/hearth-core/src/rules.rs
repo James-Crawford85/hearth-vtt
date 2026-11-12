@@ -620,9 +620,17 @@ impl Scope for Engine<'_> {
                 Val::Num(idx.into_iter().filter(|&i| self.item_value(i, &path).key() == want).count() as f64)
             }
             "count_items" => Val::Num(self.items_of(&key(0)).len() as f64),
+            // sum_items('class', 'levels'), or only those whose field has a value:
+            // sum_items('class', 'levels', 'name', 'Fighter') (compared ignoring case).
             "sum_items" | "max_items" | "items" => {
                 let path: Vec<String> = key(1).split('.').filter(|s| !s.is_empty()).map(String::from).collect();
-                let vals: Vec<Val> = self.items_of(&key(0)).into_iter().map(|i| if path.is_empty() { Val::Null } else { self.item_value(i, &path) }).collect();
+                let mut idx = self.items_of(&key(0));
+                if args.len() >= 4 {
+                    let field: Vec<String> = key(2).split('.').filter(|s| !s.is_empty()).map(String::from).collect();
+                    let want = key(3).to_lowercase();
+                    idx.retain(|&i| self.item_value(i, &field).key().to_lowercase() == want);
+                }
+                let vals: Vec<Val> = idx.into_iter().map(|i| if path.is_empty() { Val::Null } else { self.item_value(i, &path) }).collect();
                 match name {
                     "sum_items" => Val::Num(vals.iter().map(Val::num).sum()),
                     "max_items" => Val::Num(vals.iter().map(Val::num).fold(0.0, f64::max)),
@@ -630,10 +638,16 @@ impl Scope for Engine<'_> {
                 }
             }
             // has_item('spell', 'Fireball'): whether the actor has an item of that kind and name
-            // (any kind with ''), e.g. a crafter knowing the spell they put in a wand.
+            // (any kind with ''), e.g. a crafter knowing the spell they put in a wand. A name
+            // also matches the same name with something in brackets after it: 'Weapon Focus'
+            // is met by "Weapon Focus (longsword)".
             "has_item" => {
-                let (kind, name) = (key(0), key(1));
-                Val::Bool(self.actor.items.iter().any(|i| (kind.is_empty() || i.kind == kind) && i.name.eq_ignore_ascii_case(&name)))
+                let (kind, name) = (key(0), key(1).trim().to_lowercase());
+                let named = |n: &str| {
+                    let n = n.trim().to_lowercase();
+                    n == name || n.strip_prefix(name.as_str()).is_some_and(|rest| rest.starts_with(" ("))
+                };
+                Val::Bool(!name.is_empty() && self.actor.items.iter().any(|i| (kind.is_empty() || i.kind == kind) && named(&i.name)))
             }
             // replace(text, from, to): every `from` in the text becomes `to` (e.g. a scroll's
             // spell roll at the scroll's own caster level).

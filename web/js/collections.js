@@ -13,6 +13,7 @@ import { el, toast, openWindow, formDialog } from './ui.js';
 import { renderMarkdown } from './markdown.js';
 import { accessOf, accessBadge, editAccess, newId, rejectToast } from './directory.js';
 import { blueprintType } from './blueprint-sheet.js';
+import { finder } from './finder.js';
 
 export const DOC_MIME = 'application/x-hearth-doc';
 
@@ -139,13 +140,9 @@ export class Collections {
     o.win.setTitle(c.name);
     const kind = KINDS[c.kind] ?? { one: c.kind, label: c.kind };
     const head = el('div.row.journal-actions');
-    const q = o.query.trim().toLowerCase();
-    const shown = c.entries.filter(({ doc }) => !q || String(doc.name ?? '').toLowerCase().includes(q)).sort((a, b) => String(a.doc.name).localeCompare(String(b.doc.name)));
-    head.append(el('input', {
-      type: 'search', placeholder: `Search ${kind.label.toLowerCase()}`, value: o.query, 'aria-label': 'Search this collection',
-      on: { input: (e) => { o.query = e.target.value; this.render(key); const s = o.win.body.querySelector('input[type=search]'); s.focus(); s.setSelectionRange(s.value.length, s.value.length); } },
-    }));
-    if (isGM() && shown.length) head.append(el('button', { text: `Import all (${shown.length})`, on: { click: () => this.importMany(c.kind, shown.map((x) => x.doc), c.name) } }));
+    // Importing takes what the search and filters leave.
+    const importBtn = isGM() ? el('button', { on: { click: () => { const docs = found?.matches().map((x) => x.doc) ?? []; if (docs.length) this.importMany(c.kind, docs, c.name); } } }) : null;
+    if (importBtn) head.append(importBtn);
     if (c.editable) {
       head.append(
         el('button', { text: '+ Add from world', on: { click: () => this.addFromWorld(c.collection) } }),
@@ -156,35 +153,57 @@ export class Collections {
       o.win.body.replaceChildren(el('p.muted', { text: 'You can see this collection\'s name only.' }));
       return;
     }
-    const list = el('ul.entity-list.coll-list');
-    for (const { id, doc } of shown) {
-      const sel = o.selected === id;
-      list.append(el('li.entity', {
-        class: sel ? 'entity selected' : 'entity',
-        draggable: c.kind === 'item',
-        on: {
-          click: () => { o.selected = id; this.render(key); },
-          dragstart: (e) => {
-            e.dataTransfer.setData(DOC_MIME, JSON.stringify({ kind: c.kind, doc }));
-            e.dataTransfer.setData('text/plain', doc.name ?? '');
-          },
+    let preview = null;
+    const showPreview = () => {
+      const picked = c.entries.find((x) => x.id === o.selected);
+      const next = el('div.coll-preview', {}, picked ? this.preview(c.kind, picked.doc, c.name, (name) => {
+        const hit = c.entries.find((x) => String(x.doc.name ?? '').trim().toLowerCase() === name.trim().toLowerCase());
+        if (!hit) return false;
+        o.selected = hit.id;
+        this.render(key);
+        return true;
+      }) : el('p.muted', { text: `Pick ${/^[aeiou]/.test(kind.one) ? 'an' : 'a'} ${kind.one} to see it.${c.kind === 'item' ? ' Drag items onto an actor\'s sheet to give them a copy.' : ''}` }));
+      preview?.replaceWith(next);
+      preview = next;
+    };
+    o.find ??= { q: o.query ?? '' };
+    const found = finder({
+      entries: c.entries.map((x) => ({ ...x, actor: c.kind === 'actor' })),
+      state: o.find,
+      listClass: 'coll-list',
+      placeholder: `Search ${kind.label.toLowerCase()} names and text…`,
+      empty: c.editable ? 'Empty. Use "Add from world" to copy things in.' : 'Empty.',
+      onChange: (hits) => { if (importBtn) { importBtn.textContent = `Import all (${hits.length})`; importBtn.disabled = !hits.length; } },
+      render: ({ id, doc }, { snippet }) => this.entryRow(c, key, id, doc, snippet, (li) => {
+        o.selected = id;
+        li.parentElement?.querySelectorAll('.entity.selected').forEach((x) => x.classList.remove('selected'));
+        li.classList.add('selected');
+        showPreview();
+      }),
+    });
+    showPreview();
+    const foot = c.from ? el('p.muted.small', { text: `From ${c.from}. Read-only: import a copy to change it.` }) : null;
+    o.win.body.replaceChildren(head, el('div.coll-split', {}, found.el, preview), foot);
+  }
+
+  /** One entry in a collection window's list. */
+  entryRow(c, key, id, doc, snippet, select) {
+    const sel = this.windows.get(key)?.selected === id;
+    const li = el('li.entity', {
+      class: sel ? 'entity selected' : 'entity',
+      draggable: c.kind === 'item',
+      on: {
+        click: () => select(li),
+        dragstart: (e) => {
+          e.dataTransfer.setData(DOC_MIME, JSON.stringify({ kind: c.kind, doc }));
+          e.dataTransfer.setData('text/plain', doc.name ?? '');
         },
       },
-      doc.img ? el('img.avatar', { src: doc.img, alt: '' }) : el('span.avatar', { text: String(doc.name ?? '?').charAt(0).toUpperCase() }),
-      el('span.grow', {}, el('span', { text: doc.name ?? '(unnamed)' }), this.subtitle(c.kind, doc)),
-      c.editable ? el('button.icon', { title: 'Remove from collection', text: '✕', on: { click: (e) => { e.stopPropagation(); this.api.op({ op: 'collection_update', id: c.collection.id, patch: { entries: { [id]: null } } }, rejectToast); } } }) : null));
-    }
-    if (!shown.length) list.append(el('li.muted', { text: c.entries.length ? 'Nothing matches.' : c.editable ? 'Empty. Use "Add from world" to copy things in.' : 'Empty.' }));
-    const picked = c.entries.find((x) => x.id === o.selected);
-    const preview = el('div.coll-preview', {}, picked ? this.preview(c.kind, picked.doc, c.name, (name) => {
-      const hit = c.entries.find((x) => String(x.doc.name ?? '').trim().toLowerCase() === name.trim().toLowerCase());
-      if (!hit) return false;
-      o.selected = hit.id;
-      this.render(key);
-      return true;
-    }) : el('p.muted', { text: `Pick ${/^[aeiou]/.test(kind.one) ? 'an' : 'a'} ${kind.one} to see it.${c.kind === 'item' ? ' Drag items onto an actor\'s sheet to give them a copy.' : ''}` }));
-    const foot = c.from ? el('p.muted.small', { text: `From ${c.from}. Read-only: import a copy to change it.` }) : null;
-    o.win.body.replaceChildren(head, el('div.coll-split', {}, list, preview), foot);
+    },
+    doc.img ? el('img.avatar', { src: doc.img, alt: '' }) : el('span.avatar', { text: String(doc.name ?? '?').charAt(0).toUpperCase() }),
+    el('span.grow', {}, el('span', { text: doc.name ?? '(unnamed)' }), this.subtitle(c.kind, doc), snippet ? el('div.small.muted.finder-snippet', { text: snippet }) : null),
+    c.editable ? el('button.icon', { title: 'Remove from collection', text: '✕', on: { click: (e) => { e.stopPropagation(); this.api.op({ op: 'collection_update', id: c.collection.id, patch: { entries: { [id]: null } } }, rejectToast); } } }) : null);
+    return li;
   }
 
   subtitle(kind, doc) {

@@ -153,6 +153,25 @@ pub async fn advance_plan(State(state): State<Arc<AppState>>, headers: HeaderMap
     hearth_core::advance::plan(actor, &state.rules(), item_id, add.as_ref()).map(Json).map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
 
+/// `POST /api/requires` `{ actor_id, checks: [{ requires, note }] }`: whether the actor meets
+/// each requirement ("yes", "no" or "check"), for "only what I qualify for" in the pickers.
+pub async fn requires(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+    let user = session_of(&state, &headers).await?;
+    let actor_id = body.get("actor_id").and_then(Value::as_str).unwrap_or_default();
+    let checks: Vec<hearth_core::requires::Requirement> =
+        serde_json::from_value(body.get("checks").cloned().unwrap_or(Value::Array(vec![]))).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    if checks.len() > 20_000 {
+        return Err((StatusCode::BAD_REQUEST, "Too many to check at once".into()));
+    }
+    let world = state.world.read().await;
+    let actor = world.actors.get(actor_id).ok_or((StatusCode::NOT_FOUND, "No such actor".into()))?;
+    if !world.owns_actor(&user, actor_id) {
+        return Err((StatusCode::FORBIDDEN, "You can only check characters you own".into()));
+    }
+    let results = hearth_core::requires::check(actor, &state.rules(), &checks);
+    Ok(Json(serde_json::json!({ "results": results })))
+}
+
 /// `POST /api/forge/preview` `{ actor_id?, item, candidates? }`: the item's price, the
 /// rules it breaks, which candidate parts fit, and crafting numbers for the actor.
 pub async fn forge_preview(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {

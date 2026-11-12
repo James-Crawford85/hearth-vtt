@@ -710,3 +710,35 @@ body.resizing, body.resizing * { user-select: none !important; }
 .item-parts summary { cursor: pointer; display: flex; gap: 6px; align-items: baseline; }
 .item-parts summary .icon { margin-left: auto; }
 .bp-toggle.on { background: var(--sheet-accent, var(--accent, #c8902e)); color: #111; font-weight: 600; }
+
+/* Finder: search and filters over a list of things to choose from (finder.js). */
+.finder { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.finder > input[type=search] { width: 100%; }
+.finder-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.finder-filters select { max-width: 100%; font-size: 12px; padding: 2px 4px; }
+.finder-filters select.on { border-color: var(--accent); color: var(--accent); }
+.finder-filters button.link { background: none; border: 0; padding: 2px 4px; color: var(--accent); cursor: pointer; font-size: 12px; }
+.finder-chips { display: flex; flex-wrap: wrap; gap: 4px; width: 100%; }
+.finder-count:empty { display: none; }
+.finder .picker-list, .finder .coll-list { margin: 0; }
+.finder-snippet { font-style: italic; }
+
+/* The finder's details pane: what the selected entry is, beside the list. */
+.finder-split { display: grid; grid-template-columns: minmax(260px, 1fr) 1.15fr; gap: 14px; min-height: 360px; }
+.finder-pane { border-left: 1px solid var(--border); padding-left: 14px; display: flex; flex-direction: column; max-height: 66vh; min-width: 0; }
+.finder-pane-body { overflow: auto; flex: 1; }
+.finder-pane-body h3 { margin-top: 0; font-family: var(--font-display); }
+.finder-pane-foot { display: flex; gap: 8px; align-items: center; padding-top: 8px; border-top: 1px solid var(--border); margin-top: 8px; }
+.finder .picker-list .entity.selected { background: var(--panel-3); outline: 1px solid var(--accent); }
+.gives h4 { margin: 12px 0 6px; }
+.gives-level { display: grid; grid-template-columns: 7.5em 1fr; gap: 8px; padding: 4px 0; border-top: 1px solid var(--border); }
+.gives-when { color: var(--muted); font-size: 12px; }
+.gives-item summary { cursor: pointer; }
+.gives-item .journal-text { margin: 4px 0 6px 14px; }
+.gives-options { margin-left: 12px; }
+@media (max-width: 760px) { .finder-split { grid-template-columns: 1fr; } .finder-pane { border-left: 0; padding-left: 0; } }
+.finder-qualify { font-size: 12px; width: 100%; }
+.met { margin: 4px 0 8px; font-size: 13px; }
+.met.yes { color: var(--good, #6bbf6b); }
+.met.no { color: var(--bad, #e06b5b); }
+.met.check { color: var(--accent); }

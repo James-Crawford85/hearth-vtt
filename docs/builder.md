@@ -67,7 +67,29 @@ For classes, a grant can **repeat**: *Then again every N levels*, optionally *un
 
 Pick items for a grant from the Items directory, or drag them in from the Items directory or a collection. A granted item that has grants of its own (✦, like a subclass) brings them at the same class levels: the Champion's level-3 features arrive with Fighter 3.
 
-On a character's sheet, **⬆ Advance** adds an ancestry, background or class, or levels up a class; a new character gets a prompt to start. The dialog shows what the step gives, asks for the choices, points and rolls, and the server applies it. **+ Add** on a sheet's list (Classes, Spells, Weapons…) opens a searchable list of that type from the system's collections, world collections and the Items directory; picking a class, species, background or subclass runs the Add steps above, and picking anything else gives the character a copy. Only the GM gets a *blank* option, and not for types that give features, so players choose from what the GM has provided. Each class row shows its level with **Level up** and **Level down** (take the last level back: its features, points and hit points go with it), and every item has **🗑** (also at the bottom of its own window): for a class, ancestry, background or subclass it removes the item *and everything it gave*, across all its levels; for anything else, just the item.
+On a character's sheet, **⬆ Advance** adds an ancestry, background or class, or levels up a class; a new character gets a prompt to start. The dialog shows what the step gives, asks for the choices, points and rolls, and the server applies it. **+ Add** on a sheet's list (Classes, Spells, Weapons…) opens a searchable list of that type from the system's collections, world collections and the Items directory; picking a class, species, background or subclass runs the Add steps above, and picking anything else gives the character a copy. Only the GM gets a *blank* option, and not for types that give features, so players choose from what the GM has provided.
+
+**Finding things in those lists.** The Add dialog, **+ Add**, a level up's "pick any" step (any feat…) and a collection's window all use the same list. Its search looks through names *and* everything written in the entries (descriptions, prerequisites, benefits…): every word has to appear somewhere, names that match come first, and an entry found only by its text shows the bit that matched. Filters above the list come from the entries themselves, so they suit whatever is listed:
+
+- **Type**, when the list mixes types (classes, races, class options…), as buttons. A type's own filters appear once one is chosen.
+- **Book**, from each entry's `source` (see [packages.md](packages.md#collections-content-packs)).
+- The type's **choice** and **checkbox** fields ("Feat type", "School", "Slot"), with the system's labels.
+- **Short fields that share a handful of values**, such as a class option's class or a spell's level. A field holding a map (a spell's `{ "wizard": 2, "cleric": 3 }`) filters by its keys, and a comma-separated list ("combat, critical") by each value.
+- **Folder** (journal entries) and **From** (which collection), when there's more than one.
+
+Clicking an entry shows it in a pane beside the list without choosing it: its fields and text, and, for anything with advancement (a class, race or archetype), **what it gives** level by level, each feature opening to its own text. The pane's button (**Add Rogue**, **Level up Fighter**, **Choose Dodge**) takes it; a double click does the same. In the search box, ↑ and ↓ move through the list and Enter takes the one shown. In a level up's "choose one of" step, **ⓘ** beside an option opens the same view.
+
+**Requirements.** An item can say what it needs in two data fields: `requires`, a [formula](rules.md) worked out against the character (`@abilities.str.value >= 13 && @bab >= 1 && has_item('feat', 'Power Attack')`), and `requires_note`, whatever the formula can't check, in words ("a deity", "able to cast arcane spells"). The server answers for each one (`POST /api/requires`):
+
+- **✓ met:** the formula holds and there's no note.
+- **✗ not met:** the formula doesn't hold.
+- **? check:** the formula holds, or there isn't one, but the note asks for something only a person can judge, or the formula couldn't be worked out.
+
+When a list has entries with requirements, it shows **Only what Tara qualifies for**. It's on to start with and leaves out the ✗ ones; "? check" entries stay, since the rules can't rule them out. With it off, rows carry ✗ and ? badges, and the pane says which applies. It's a guide, not a lock: the button still takes an unmet one (**Add Cleave anyway**), so a GM's house rules win. `has_item` also matches a name followed by something in brackets, and `sum_items` can count one class's levels (`sum_items('class', 'levels', 'name', 'Fighter') >= 4`), which covers most "Weapon Focus" and "fighter level 4th" prerequisites.
+
+Each filter offers only the values that are there, with how many entries each leaves. The most useful four show at once and **More filters** has the rest. In a collection's window, **Import all** imports what the search and filters leave.
+
+Each class row shows its level with **Level up** and **Level down** (take the last level back: its features, points and hit points go with it), and every item has **🗑** (also at the bottom of its own window): for a class, ancestry, background or subclass it removes the item *and everything it gave*, across all its levels; for anything else, just the item.
 
 Formulas can total it all up: `level = sum_items('class', 'levels')`, a class's `hp_total = sum(@item.hp_rolls)`, hit points `max = sum_items('class', 'hp_total') + @abilities.con.mod * @level`. When a level up or down changes a resource's max, the current value moves by the same amount.
 

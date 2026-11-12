@@ -16,6 +16,7 @@ pub mod creation;
 pub mod forge;
 pub mod patch;
 pub mod protocol;
+pub mod requires;
 pub mod rules;
 pub mod scoped;
 
