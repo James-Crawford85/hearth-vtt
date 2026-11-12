@@ -5,6 +5,7 @@
 // shows what a level gives, collects the player's picks, and sends them.
 
 import { store, isGM, systemInfo, getPath } from './store.js';
+import { offBookOf } from './books.js';
 import { el, toast, openWindow } from './ui.js';
 import { ITEM_MIME } from './items.js';
 import { DOC_MIME } from './collections.js';
@@ -119,14 +120,27 @@ export async function openAdvance(api, actorId, { itemId = null, add = null } = 
     body.replaceChildren(...parts);
   };
 
+  // Features replaced (by an archetype or alternate trait the item already gave, or one picked in this dialog) aren't gained.
+  const replacedNow = () => new Set([...(plan?.replaced ?? []), ...Object.values(picks.picks).flat().flatMap((d) => d.data?.replaces ?? [])].map(featureKey));
+  const grantReplaced = (g) => !!g.feature && replacedNow().has(featureKey(g.feature));
+
   const grantBlock = (g, src, rerender, walk) => {
     const name = g.label || src.item.name;
     const box = el('fieldset.bfield', {}, el('legend', { text: name }));
+    if (grantReplaced(g)) {
+      box.append(el('p.muted.small', { text: `Replaced: ${g.feature}` }));
+      return box;
+    }
     switch (g.kind) {
-      case 'items':
-        box.append(el('p', { text: `You gain: ${(g.items ?? []).map((i) => i.name).join(', ') || 'nothing'}` }));
-        for (const it of g.items ?? []) if (it.advancement?.length) walk({ item: it, leveled: true, fresh: true });
+      case 'items': {
+        const replaced = replacedNow();
+        const gained = (g.items ?? []).filter((i) => !replaced.has(featureKey(i.name)));
+        const gone = (g.items ?? []).filter((i) => replaced.has(featureKey(i.name)));
+        box.append(el('p', { text: `You gain: ${gained.map((i) => i.name).join(', ') || 'nothing'}` }));
+        if (gone.length) box.append(el('p.muted.small', { text: `Replaced: ${gone.map((i) => i.name).join(', ')}` }));
+        for (const it of gained) if (it.advancement?.length) walk({ item: it, leveled: true, fresh: true });
         break;
+      }
       case 'choice': {
         const want = Math.max(1, g.count || 1);
         const chosen = picks.choices[g.id] ??= [];
@@ -155,10 +169,14 @@ export async function openAdvance(api, actorId, { itemId = null, add = null } = 
         const want = Math.max(1, g.count || 1);
         const chosen = picks.picks[g.id] ??= [];
         const typeLabel = systemInfo().item_types?.[g.from]?.label ?? g.from ?? 'item';
-        box.append(el('p.muted.small', { text: `Pick ${want === 1 ? `one ${typeLabel.toLowerCase()}` : `${want} (${typeLabel.toLowerCase()})`}.` }),
+        box.append(el('p.muted.small', { text: g.optional
+          ? `Optional: you may pick ${want === 1 ? `one ${typeLabel.toLowerCase()}` : `up to ${want} (${typeLabel.toLowerCase()})`}, or none.`
+          : `Pick ${want === 1 ? `one ${typeLabel.toLowerCase()}` : `${want} (${typeLabel.toLowerCase()})`}.` }),
           el('div.grant-items', {}, ...chosen.map((d, i) => el('span.chip', {}, d.name,
             el('button.icon', { type: 'button', text: '✕', title: 'Remove', on: { click: () => { chosen.splice(i, 1); rerender(); } } })))));
         if (chosen.length < want) box.append(el('button.small', { type: 'button', text: `Choose ${typeLabel.toLowerCase()}…`, on: { click: () => choosePick(api, actor, g, chosen, rerender) } }));
+        // A picked item with grants of its own (a domain, an archetype) shows them too.
+        for (const d of chosen) if (d.advancement?.length) walk({ item: d, leveled: true, fresh: true });
         break;
       }
       case 'points': {
@@ -229,8 +247,9 @@ export async function openAdvance(api, actorId, { itemId = null, add = null } = 
         // Check picks before sending (the server checks again).
         for (const src of sources) {
           for (const g of grantsOf(src)) {
+            if (grantReplaced(g)) continue;
             if (g.kind === 'choice' && (picks.choices[g.id]?.length ?? 0) < Math.min(Math.max(1, g.count || 1), g.items?.length ?? 0)) { errorEl.textContent = `${g.label || 'A choice'}: make your pick.`; return; }
-            if (g.kind === 'pick' && (picks.picks[g.id]?.length ?? 0) < Math.max(1, g.count || 1)) { errorEl.textContent = `${g.label || 'A pick'}: make your pick.`; return; }
+            if (g.kind === 'pick' && !g.optional && (picks.picks[g.id]?.length ?? 0) < Math.max(1, g.count || 1)) { errorEl.textContent = `${g.label || 'A pick'}: make your pick.`; return; }
             if (g.kind === 'points') {
               const need = pointsWanted(lim(g), getPath(actor.data, g.path) ?? {});
               const s = Object.values(picks.points[g.id] ?? {}).reduce((a, b) => a + b, 0);
@@ -247,6 +266,9 @@ export async function openAdvance(api, actorId, { itemId = null, add = null } = 
   win.body.replaceChildren(body, errorEl, el('div.row', {}, el('span.grow'), el('button', { type: 'button', text: 'Cancel', on: { click: () => win.close() } }), confirm));
 }
 
+/** A feature name compared loosely (mirrors the server): "Fast Movement (Ex)" is "fast movement". */
+const featureKey = (n) => String(n ?? '').trim().toLowerCase().replace(/ \((ex|su|sp)\)$/, '').trim();
+
 /** Whether a pick grant takes this item: its type, and the grant's `where` fields (mirrors the server). */
 export function pickAllows(g, doc) {
   if (g.from && doc.kind !== g.from) return false;
@@ -261,18 +283,18 @@ async function choosePick(api, actor, g, chosen, done) {
   const typeLabel = systemInfo().item_types?.[g.from]?.label ?? g.from;
   const win = openWindow({ title: `Choose ${typeLabel.toLowerCase()}`, width: 440 });
   win.body.replaceChildren(el('p.muted', { text: 'Loading…' }));
-  const all = (await availableItems(api, [g.from])).filter((c) => pickAllows(g, c.doc)).sort((a, b) => String(a.doc.name).localeCompare(String(b.doc.name)));
+  const all = (await availableItems(api, [g.from], (d) => pickAllows(g, d))).sort((a, b) => String(a.doc.name).localeCompare(String(b.doc.name)));
   const search = el('input', { type: 'search', placeholder: `Find ${typeLabel.toLowerCase()}…`, 'aria-label': 'Search' });
   const list = el('ul.entity-list.picker-list');
   const draw = () => {
     const q = search.value.trim().toLowerCase();
     const shown = all.filter((c) => !q || String(c.doc.name).toLowerCase().includes(q) || String(c.doc.data?.description ?? '').toLowerCase().includes(q)).slice(0, 300);
     list.replaceChildren(...shown.map((c) => {
-      const has = actor.items.some((i) => i.kind === c.doc.kind && i.name === c.doc.name) || chosen.some((d) => d.name === c.doc.name);
+      const has = actor.items.some((i) => i.name === c.doc.name && pickAllows(g, i)) || chosen.some((x) => x.name === c.doc.name);
       const about = String(c.doc.data?.prerequisites ?? c.doc.data?.prerequisite ?? '') || String(c.doc.data?.description ?? '').slice(0, 110);
       return el(`li.entity${has ? '.muted' : ''}`, { on: { click: () => { if (has) return; chosen.push(cleanDoc(c.doc)); win.close(); done(); } } },
         el('span.grow', {}, el('span', { text: c.doc.name }), el('small.muted', { text: ` ${c.from}` }), about ? el('div.small.muted', { text: about }) : null),
-        has ? el('span.badge', { text: 'has it' }) : null);
+        has ? el('span.badge', { text: 'has it' }) : null, offBookOf(c.doc) ? el('span.badge.muted', { text: 'book off', title: `${offBookOf(c.doc)} is switched off in this world: players aren\x27t offered it` }) : null);
     }));
     if (!shown.length) list.append(el('li.muted', { text: all.length ? 'Nothing matches.' : `There are no ${typeLabel.toLowerCase()} items to pick from yet.` }));
   };
@@ -286,19 +308,21 @@ async function choosePick(api, actor, g, chosen, done) {
  * Every item of these kinds this user can take: the world's Items directory (what
  * they can see), the system's and modules' collections, and the world's collections.
  */
-export async function availableItems(api, kinds) {
-  const ok = (k) => kinds.includes(k);
+export async function availableItems(api, kinds, keep = null) {
+  // `keep` filters before same-named copies are merged, so a domain called "Air" can't hide the
+  // element called "Air" that a pick asks for.
+  const ok = (k, d) => kinds.includes(k) && (!keep || keep(d));
   const out = [];
-  for (const x of Object.values(store.world.items ?? {})) if (ok(x.kind) && x.data !== null) out.push({ doc: x, from: 'Items' });
+  for (const x of Object.values(store.world.items ?? {})) if (ok(x.kind, x) && x.data !== null) out.push({ doc: x, from: 'Items' });
   for (const p of api.collections?.packs() ?? []) {
     if (p.kind !== 'item') continue;
     try {
-      for (const d of await api.collections.loadPack(p.pkg, p.id)) if (ok(d.kind)) out.push({ doc: d, from: p.label, pack: true });
+      for (const d of await api.collections.loadPack(p.pkg, p.id)) if (ok(d.kind, d)) out.push({ doc: d, from: p.label, pack: true });
     } catch { /* not available to this user */ }
   }
   for (const c of Object.values(store.world.collections ?? {})) {
     if (c.kind !== 'item') continue;
-    for (const d of Object.values(c.entries ?? {})) if (ok(d.kind)) out.push({ doc: d, from: c.name });
+    for (const d of Object.values(c.entries ?? {})) if (ok(d.kind, d)) out.push({ doc: d, from: c.name });
   }
   // The same thing in several places (an imported Fighter and the collection's): list it once.
   // The Items directory's copy wins (the GM may have changed it), then world collections, then packages.
@@ -344,7 +368,7 @@ export async function openAdd(api, actorId) {
     parts.push(el('ul.entity-list', {}, mine.map((c) => {
       const has = actor.items.some((i) => i.kind === c.doc.kind && i.name === c.doc.name);
       return el('li.entity', { on: { click: () => { if (pickGrantDoc(api, actorId, t, c.doc)) win.close(); } } },
-        el('span.grow', {}, el('span', { text: c.doc.name }), el('small.muted', { text: ` ${c.from}`, title: c.also?.length ? `Also in ${c.also.join(', ')}` : null })), has ? el('span.badge', { text: t.levels ? 'level up' : 'has it' }) : null);
+        el('span.grow', {}, el('span', { text: c.doc.name }), el('small.muted', { text: ` ${c.from}`, title: c.also?.length ? `Also in ${c.also.join(', ')}` : null })), has ? el('span.badge', { text: t.levels ? 'level up' : 'has it' }) : null, offBookOf(c.doc) ? el('span.badge.muted', { text: 'book off', title: `${offBookOf(c.doc)} is switched off in this world: players aren\x27t offered it` }) : null);
     })));
   }
   win.body.replaceChildren(...parts);
@@ -379,7 +403,7 @@ export async function openItemPicker(api, actorId, kind) {
       const about = c.doc.data?.description ? String(c.doc.data.description).slice(0, 110) : '';
       return el('li.entity', { on: { click: () => pick(c) } },
         el('span.grow', {}, el('span', { text: c.doc.name }), el('small.muted', { text: ` ${c.from}`, title: c.also?.length ? `Also in ${c.also.join(', ')}` : null }), about ? el('div.small.muted', { text: about }) : null),
-        has ? el('span.badge', { text: grant.levels ? 'level up' : 'has it' }) : null);
+        has ? el('span.badge', { text: grant.levels ? 'level up' : 'has it' }) : null, offBookOf(c.doc) ? el('span.badge.muted', { text: 'book off', title: `${offBookOf(c.doc)} is switched off in this world: players aren\x27t offered it` }) : null);
     }));
     if (!shown.length) {
       list.append(el('li.muted', { text: all.length ? 'Nothing matches.' : isGM()
@@ -490,6 +514,10 @@ export function advancementEditor(api, item, save, leveled) {
         value: g.when ?? '', placeholder: 'e.g. @favored_class == @item.name',
         on: { input: (e) => { const v = e.target.value.trim(); if (v) g.when = v; else delete g.when; changed(); } },
       })));
+      row.append(el('label', { title: 'An archetype or alternate trait whose "replaces" lists this name leaves the grant out' }, 'Feature name (optional; lets it be replaced)', el('input', {
+        value: g.feature ?? '', placeholder: 'e.g. Bonus Feat',
+        on: { input: (e) => { const v = e.target.value.trim(); if (v) g.feature = v; else delete g.feature; changed(); } },
+      })));
       const kind = g.kind ?? 'items';
       if (kind === 'items' || kind === 'choice') {
         if (kind === 'choice') row.append(num('count', 'How many to pick'));
@@ -500,7 +528,8 @@ export function advancementEditor(api, item, save, leveled) {
         row.append(el('div.row', {},
           el('label', {}, 'Of the type', el('select', { on: { change: (e) => set('from', e.target.value) } }, el('option', { value: '', text: 'Choose…' }),
             ...types.map(([k, t]) => el('option', { value: k, text: t.label ?? k, selected: g.from === k })))),
-          num('count', 'How many to pick')),
+          num('count', 'How many to pick'),
+          el('label', { title: 'The player may pick fewer, or none (an archetype)' }, el('input', { type: 'checkbox', checked: !!g.optional, on: { change: (e) => { if (e.target.checked) g.optional = true; else delete g.optional; changed(); } } }), ' Optional')),
         // Only some of them: "feat_type = combat" (several values: "feat_type = combat, critical").
         el('label', {}, 'Only where (field = value; several values separated by commas)', el('input', {
           value: Object.entries(g.where ?? {}).map(([k, v]) => `${k} = ${Array.isArray(v) ? v.join(', ') : v}`).join('; '), placeholder: 'e.g. feat_type = combat',

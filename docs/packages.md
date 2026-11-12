@@ -80,6 +80,8 @@ The file is a JSON array of documents shaped like the world's own (see [client-a
 
 Item entries can be dragged straight onto an actor's sheet. Importing makes a fresh copy (with the system template filled in), so the pack itself never changes. Pack files are only served through `/api/collections/<package>/<pack>`, which checks who's asking: players can't read non-public packs, even by guessing the file's URL. `packages/d20-lite` ships three packs as examples.
 
+**Books.** An entry can name the book it comes from in `data.source` ("Advanced Player's Guide"). The GM can then switch books off for a world (Settings → **📚 Books…**, which lists every book the world's packages name, with counts). Players aren't offered anything from a book that's off: `/api/collections` leaves those entries out of what it sends them, and the server refuses a level up that adds or picks one. That covers the Collections sidebar, the Ctrl+Space lookup, **+ Add** lists and the level-up dialog's picks. The GM still sees everything, marked "book off", and can hand something out anyway. Nothing already on a character is removed, and entries that don't name a book are always on. The world stores the choice as `settings.core.books.off`, a list of book names; `GET /api/books` (GM) lists the books.
+
 ## Server scripts (Rhai)
 
 Define any of these functions. Each runs for the system and every enabled module that defines it.

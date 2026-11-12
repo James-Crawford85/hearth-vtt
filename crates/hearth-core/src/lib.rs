@@ -7,6 +7,7 @@
 //! store their data in the free-form `data` / `flags` JSON of entities.
 
 pub mod advance;
+pub mod books;
 pub mod formula;
 pub mod geometry;
 pub mod model;

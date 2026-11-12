@@ -79,6 +79,9 @@ pub struct TypeDef {
     /// Item types: the data key counting the item's level (classes level up).
     #[serde(default)]
     pub levels: Option<String>,
+    /// Item types with levels: counted apart from the character's total level (mythic tiers).
+    #[serde(default)]
+    pub separate_levels: bool,
     /// Item types: items of this type give features (advancement).
     #[serde(default)]
     pub grants: bool,
@@ -313,7 +316,7 @@ impl Package {
         let types = |t: &BTreeMap<String, TypeDef>| {
             t.iter()
                 .map(|(k, d)| {
-                    (k.clone(), hearth_core::rules::TypeRules { formulas: d.formulas.clone(), resources: d.resources.clone(), actions: d.actions.clone(), effects: d.effects.clone(), levels: d.levels.clone(), advancement: d.advancement.clone(), forge: d.forge.clone() })
+                    (k.clone(), hearth_core::rules::TypeRules { formulas: d.formulas.clone(), resources: d.resources.clone(), actions: d.actions.clone(), effects: d.effects.clone(), levels: d.levels.clone(), separate_levels: d.separate_levels, advancement: d.advancement.clone(), forge: d.forge.clone() })
                 })
                 .collect()
         };

@@ -214,6 +214,10 @@ pub struct Node {
     /// Item types: the number field that counts levels (classes level up).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub levels: Option<String>,
+    /// Item types with levels: they don't add to the character's total level (mythic tiers), so
+    /// the character's own grants by total level don't come with them.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub separate_levels: bool,
     /// Item types: a checkbox field that switches the item on and off (Rage, Power Attack, a
     /// buff). Item cards show an On/Off button for it on items whose effects depend on it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -336,6 +340,7 @@ pub fn compile(bp: &Blueprint) -> Compiled {
                 if let Some(k) = t.levels.as_deref().filter(|k| !k.is_empty()) {
                     if template.get(k).is_some_and(Value::is_number) {
                         c.def.levels = Some(k.to_string());
+                        c.def.separate_levels = t.separate_levels;
                     } else {
                         c.errors.push(format!("{name}: levels are counted by \"{k}\", which should be a number field directly in this type"));
                     }
@@ -625,6 +630,7 @@ pub fn merge_type(built: TypeDef, hand: Option<&TypeDef>) -> TypeDef {
     out.effects.extend(hand.effects.clone());
     if hand.levels.is_some() {
         out.levels = hand.levels.clone();
+        out.separate_levels = hand.separate_levels;
     }
     out.grants |= hand.grants;
     if !hand.advancement.is_empty() {

@@ -373,12 +373,53 @@ pub async fn collection(
     }
     let text = tokio::fs::read_to_string(&file).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let docs: Value = serde_json::from_str(&text).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}: {e}", pack.path)))?;
-    if !docs.is_array() {
+    let Value::Array(mut docs) = docs else {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{} should be a JSON array", pack.path)));
+    };
+    // Players don't get anything from a book the GM has switched off for this world.
+    if user.role != hearth_core::Role::Gm {
+        let off = hearth_core::books::off(&state.world.read().await.settings);
+        hearth_core::books::filter_docs(&mut docs, &off);
     }
     let mut res = Json(docs).into_response();
     res.headers_mut().insert("cache-control", "no-store".parse().unwrap());
     Ok(res)
+}
+
+/// `GET /api/books` (GM): every book named by the content of this world's packages
+/// (`data.source`), with how many entries each has and whether it's switched off.
+pub async fn books(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Value>, (StatusCode, String)> {
+    let token = headers.get("x-hearth-session").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let user = state.session_user(token).await.ok_or((StatusCode::UNAUTHORIZED, "Join the game first".into()))?;
+    if user.role != hearth_core::Role::Gm {
+        return Err((StatusCode::FORBIDDEN, "Only the GM can choose the books".into()));
+    }
+    let (packages, off) = {
+        let world = state.world.read().await;
+        let reg = state.registry();
+        let pkgs: Vec<_> = reg.active(&world.system, &world.modules, world.theme.as_deref()).iter().map(|p| (p.dir.clone(), p.manifest.packs.clone())).collect();
+        (pkgs, hearth_core::books::off(&world.settings))
+    };
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for (dir, packs) in packages {
+        for pack in packs {
+            if !hearth_packages::safe_relative_path(&pack.path) {
+                continue;
+            }
+            let Ok(text) = tokio::fs::read_to_string(dir.join(&pack.path)).await else { continue };
+            let Ok(Value::Array(docs)) = serde_json::from_str::<Value>(&text) else { continue };
+            for d in &docs {
+                if let Some(s) = hearth_core::books::source_of(d.get("data").unwrap_or(&Value::Null)) {
+                    *counts.entry(s.to_string()).or_default() += 1;
+                }
+            }
+        }
+    }
+    let books: Vec<Value> = counts
+        .into_iter()
+        .map(|(name, count)| json!({ "name": name, "count": count, "off": off.iter().any(|o| o.eq_ignore_ascii_case(&name)) }))
+        .collect();
+    Ok(Json(json!({ "books": books })))
 }
 
 #[cfg(test)]

@@ -43,6 +43,12 @@ Item types can **give features**: tick that in the type's settings (the Advancem
 | Roll | Rolls dice (or takes the average) and records the result in a list on the item | Hit points: `1d{@item.hit_die}`, recorded in `hp_rolls` |
 | Pick any of a type | The player picks from every item of a type they can take (collections and the Items directory), optionally only those whose fields match (**Only where** `feat_type = combat`) | A feat: any feat; a fighter's bonus feat: a combat feat |
 
+A pick can be **Optional**: the player may pick fewer, or none. That suits archetypes and other "you may" choices.
+
+**Replacing features.** If a granted or picked item has a `replaces` field, the class's features with those names are left out. That field is a list of names, matched without case or a trailing " (Ex)", " (Su)" or " (Sp)". The level-up dialog shows them as replaced by the archetype. So an archetype picked at level 1, with `replaces: ["Fast Movement"]`, stops Fast Movement from arriving at that level and every later one. Put the archetype pick first in the class's advancement, so the swap applies from 1st level.
+
+A grant that isn't an item, such as a human's bonus feat pick or a +2 to one ability score, can be given a **Feature name** too ("Bonus Feat"). An item whose `replaces` lists that name leaves the whole grant out, so an alternate racial trait that replaces the bonus feat means there's no feat to pick.
+
 Any grant can have an **Only when** formula, checked with the new level in place: it's skipped when false (a full hit die only when `@level == 1`; a favored class bonus only when `@favored_class == @item.name`).
 
 A points grant's **Points** and **Cap** can be formulas, worked out with the new level in place: skill ranks of `@item.skill_ranks + @abilities.int.mod` per level, none above `@level`. The server works them out and the level-up dialog shows the result.
@@ -50,6 +56,8 @@ A points grant's **Points** and **Cap** can be formulas, worked out with the new
 **Advancement by character level.** An actor type (in the builder: select the type) can have grants of its own by *total* level, across all classes: a feat at levels 1, 3, 5… (level 1, again every 2), +1 to an ability every 4 levels. They come in the dialog of whichever class level reaches that total, and go if that level is taken back.
 
 A points grant asks only for as many points as can really be spent (its amount, limited by the allowed entries and caps). If the actor has nothing to raise, such as a monster with no skills list taking a Fighter level, the step is skipped and says so, rather than blocking the level.
+
+**Levels counted apart.** An item type with levels can be *counted apart from the character's level* (tick it under the level field). Its items level up with their own grants, but their levels don't add to the total level, so the character's grants by total level don't come with them. That suits mythic tiers: a 5th-level fighter on her 2nd mythic tier is still level 5. In `builder.json` this is `separate_levels: true` on the type.
 
 For classes, a grant can **repeat**: *Then again every N levels*, optionally *until level M*. One row gives hit points at every level from 2 (every 1), or ability points at 4, 8, 12 and 16 (every 4, until 16).
 

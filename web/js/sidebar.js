@@ -10,6 +10,7 @@ import { icon, hasIcon } from './icons.js';
 import { renderMarkdown } from './markdown.js';
 import { creationSteps, openCreationSettings } from './creation.js';
 import { forgeTypes, openForgeSettings } from './forge.js';
+import { openBooksSettings } from './books.js';
 
 const PANEL_W = 340;
 const RAIL_W = 52;
@@ -541,6 +542,7 @@ export class Sidebar {
         systemInfo().attribution ? el('p.small', { text: systemInfo().attribution }) : null) : null,
       gm ? el('div.row', {}, el('button', { text: '🛠 System builder', title: 'Design this world\'s system: stats, resources, items, rolls', on: { click: () => this.api.builder.open() } }),
         creationSteps().length ? el('button', { text: '🎲 Character creation…', title: 'How players set up new characters in this world (ability scores…)', on: { click: () => openCreationSettings(this.api) } }) : null,
+        el('button', { text: '📚 Books…', title: 'Which books this world uses: players aren\x27t offered content from the others', on: { click: () => openBooksSettings(this.api) } }),
         forgeTypes().length ? el('button', { text: '⚒ Item forge…', title: 'Whether players may use the item forge in this world', on: { click: () => openForgeSettings(this.api) } }) : null) : null,
       w.next_session ? el('p.muted', { text: `Next session: ${new Date(w.next_session).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}` }) : null,
       el('h4', { text: 'Players' }),

@@ -108,6 +108,25 @@ pub struct Grant {
     /// `@favored_class == @item.name` for a favored class bonus.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub when: String,
+    /// `pick`: may be left empty (an archetype is chosen at 1st level, but not required).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+    /// The feature this grant is (e.g. "Bonus Feat"): an item that replaces it (an alternate
+    /// racial trait) leaves the grant out, like a replaced feature item.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub feature: String,
+}
+
+/// A feature name compared loosely: "Fast Movement (Ex)" is "fast movement".
+fn feature_key(name: &str) -> String {
+    let n = name.trim().to_lowercase();
+    let n = n.strip_suffix(" (ex)").or_else(|| n.strip_suffix(" (su)")).or_else(|| n.strip_suffix(" (sp)")).unwrap_or(&n);
+    n.trim().to_string()
+}
+
+/// The features items replace (an archetype's `data.replaces`: ["fast movement", "trap sense"]).
+fn replaces_of(it: &Item) -> Vec<String> {
+    it.data.get("replaces").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(feature_key).collect()).unwrap_or_default()
 }
 
 impl Grant {
@@ -137,9 +156,15 @@ pub fn points_limits(g: &Grant, eng: &mut Engine) -> (i64, Option<i64>) {
     (amount.max(0), cap)
 }
 
-/// Total level: the levels of all the actor's items that have levels (classes).
+/// Total level: the levels of all the actor's items that have levels (classes), except types
+/// whose levels are counted apart (mythic tiers).
 pub fn total_level(actor: &Actor, rules: &Rules) -> u32 {
-    actor.items.iter().filter_map(|i| levels_key(rules, &i.kind).map(|k| level_of(i, k))).sum()
+    actor.items.iter().filter(|i| counts_toward_total(rules, &i.kind)).filter_map(|i| levels_key(rules, &i.kind).map(|k| level_of(i, k))).sum()
+}
+
+/// Whether an item type's levels add to the total level (classes do; mythic tiers don't).
+pub fn counts_toward_total(rules: &Rules, kind: &str) -> bool {
+    levels_key(rules, kind).is_some() && !rules.item_types.get(kind).is_some_and(|t| t.separate_levels)
 }
 
 /// The actor type's own grants that come at this total level.
@@ -158,8 +183,9 @@ pub fn plan(actor: &Actor, rules: &Rules, item_id: Option<&str>, add: Option<&It
     };
     let lkey = levels_key(rules, &target.kind).map(String::from);
     let level = lkey.as_deref().map_or(1, |k| level_of(&target, k) + 1);
-    let total = total_level(actor, rules) + u32::from(lkey.is_some());
-    let extra = if lkey.is_some() { actor_grants_at(rules, &actor.kind, total) } else { vec![] };
+    let counts = counts_toward_total(rules, &target.kind);
+    let total = total_level(actor, rules) + u32::from(counts);
+    let extra = if counts { actor_grants_at(rules, &actor.kind, total) } else { vec![] };
     let (view, idx) = after_view(actor, &target, is_new, lkey.as_deref(), level);
     let mut eng = Engine::new(&view, rules);
     eng.set_item(Some(idx));
@@ -177,7 +203,12 @@ pub fn plan(actor: &Actor, rules: &Rules, item_id: Option<&str>, add: Option<&It
         }
     }
     let label = rules.actor_types.get(&actor.kind).map(|_| format!("Level {total}")).unwrap_or_default();
-    Ok(json!({ "level": level, "total_level": total, "extra": extra, "extra_label": label, "limits": limits, "off": off }))
+    // Features replaced by what this class already gave (an archetype), so the dialog leaves them out.
+    let replaced: Vec<String> = actor.items.iter()
+        .filter(|i| i.flags.pointer("/core/granted_by/item").and_then(Value::as_str) == Some(target.id.as_str()))
+        .flat_map(replaces_of)
+        .collect();
+    Ok(json!({ "level": level, "total_level": total, "extra": extra, "extra_label": label, "limits": limits, "off": off, "replaced": replaced }))
 }
 
 /// The actor as it will be after this step (the item added, at its new level), and the item's index.
@@ -318,6 +349,12 @@ pub fn advance(
     let mut limits_eng = Engine::new(&after, rules);
     limits_eng.set_item(Some(after_idx));
 
+    // Features replaced by items this class already gave (an archetype taken at 1st level).
+    let mut replaced: Vec<String> = actor.items.iter()
+        .filter(|i| i.flags.pointer("/core/granted_by/item").and_then(Value::as_str) == Some(target.id.as_str()))
+        .flat_map(replaces_of)
+        .collect();
+
     // This item's grants, then those of items it gave that advance with it (subclasses).
     let mut sources: Vec<(Item, bool)> = vec![(target.clone(), lkey.is_some())];
     for it in &actor.items {
@@ -327,7 +364,7 @@ pub fn advance(
     }
     // The actor type's grants at the total level this reaches (a feat every odd level…),
     // as one more source that's applied whole. What they give comes with this class level.
-    if lkey.is_some() {
+    if counts_toward_total(rules, &target.kind) {
         let total = total_level(actor, rules) + 1;
         let extra = actor_grants_at(rules, &actor.kind, total);
         if !extra.is_empty() {
@@ -345,6 +382,14 @@ pub fn advance(
         for g in grants {
             let name = if g.label.is_empty() { src.name.clone() } else { g.label.clone() };
             if !g.when.trim().is_empty() && !limits_eng.eval_src(&g.when).truthy() {
+                continue;
+            }
+            if !g.feature.is_empty() && replaced.contains(&feature_key(&g.feature)) {
+                // Said once, even when a trait item of the same name was replaced too.
+                let note = format!("{} (replaced)", g.feature);
+                if !out.gained.contains(&note) {
+                    out.gained.push(note);
+                }
                 continue;
             }
             match g.kind {
@@ -365,7 +410,7 @@ pub fn advance(
                         _ => {
                             let want = g.count.max(1) as usize;
                             let chosen = req.picks.get(&g.id).cloned().unwrap_or_default();
-                            if chosen.len() != want {
+                            if chosen.len() != want && !(g.optional && chosen.len() < want) {
                                 return Err(format!("{name}: pick {want}"));
                             }
                             if let Some(bad) = chosen.iter().find(|it| !g.allows(it)) {
@@ -380,6 +425,12 @@ pub fn advance(
                         }
                     };
                     for it in &picked {
+                        // A feature an archetype (or similar) replaces isn't given.
+                        if g.kind == GrantKind::Items && replaced.contains(&feature_key(&it.name)) {
+                            out.gained.push(format!("{} (replaced)", it.name));
+                            continue;
+                        }
+                        replaced.extend(replaces_of(it));
                         let mut copy = it.clone();
                         copy.id = new_id();
                         let mut flags = if copy.flags.is_object() { copy.flags.clone() } else { json!({}) };
@@ -851,6 +902,34 @@ mod tests {
     }
 
     #[test]
+    fn separate_levels_dont_add_to_the_total() {
+        // Mythic tiers level on their own: no character feat with them, and they don't move
+        // the total level that the next class level reaches.
+        let r: Rules = serde_json::from_value(json!({
+            "item_types": { "class": { "levels": "levels" }, "path": { "levels": "tier", "separate_levels": true }, "feat": {} },
+            "actor_types": { "character": { "advancement": [ { "id": "feat", "level": 1, "every": 2, "kind": "pick", "from": "feat", "label": "Feat" } ] } }
+        })).unwrap();
+        let fighter: Item = serde_json::from_value(json!({ "id": "f", "name": "Fighter", "kind": "class", "data": { "levels": 1 } })).unwrap();
+        let path: Item = serde_json::from_value(json!({ "id": "p", "name": "Champion", "kind": "path", "data": { "tier": 0 },
+            "advancement": [ { "id": "power", "level": 1, "every": 1, "kind": "roll", "formula": "3", "path": "bonus_hp" } ] })).unwrap();
+        let mut a: Actor = serde_json::from_value(json!({ "id": "a", "name": "Ann", "kind": "character", "data": {} })).unwrap();
+        a.items.push(fighter);
+        let p = plan(&a, &r, None, Some(&path)).unwrap();
+        assert_eq!(p["extra"].as_array().map_or(0, Vec::len), 0, "a tier brings no character feat");
+        let adv = advance(&a, &r, &AdvanceRequest { add: Some(path), ..Default::default() }, &mut |_| Ok(1)).unwrap();
+        assert!(!adv.ops.is_empty());
+        let mut w = World::new("T", "x");
+        w.actors.insert("a".into(), a);
+        for op in &adv.ops {
+            w.apply(op).unwrap();
+        }
+        assert_eq!(total_level(&w.actors["a"], &r), 1, "the tier isn't a character level");
+        // The fighter's 2nd level is total level 2: still no feat.
+        let p = plan(&w.actors["a"], &r, Some("f"), None).unwrap();
+        assert_eq!(p["extra"].as_array().map_or(0, Vec::len), 0);
+    }
+
+    #[test]
     fn grants_only_when_their_formula_holds() {
         // A favored class bonus: +1 hit point per level, only in the favored class.
         let r: Rules = serde_json::from_value(json!({ "item_types": { "class": { "levels": "levels" } } })).unwrap();
@@ -868,6 +947,59 @@ mod tests {
         }
         let got = |n: &str| w.actors["a"].items.iter().find(|i| i.name == n).unwrap().data.get("favored_hp").cloned();
         assert_eq!((got("Rogue"), got("Wizard")), (Some(json!([1])), None));
+    }
+
+    #[test]
+    fn archetypes_replace_class_features_and_are_optional() {
+        let r = rules();
+        let barbarian = |with_archetype_pick: bool| -> Item {
+            let mut adv = vec![];
+            if with_archetype_pick {
+                adv.push(json!({ "id": "arch", "level": 1, "kind": "pick", "from": "feature", "optional": true, "where": { "option_type": "archetype" } }));
+            }
+            adv.push(json!({ "id": "f1", "level": 1, "kind": "items", "items": [feature("Fast Movement (Ex)"), feature("Rage (Ex)")] }));
+            adv.push(json!({ "id": "f3", "level": 3, "kind": "items", "items": [feature("Trap Sense (Ex)")] }));
+            serde_json::from_value(json!({ "id": "bb", "name": "Barbarian", "kind": "class", "data": { "levels": 0 }, "advancement": adv })).unwrap()
+        };
+        let breaker: Item = serde_json::from_value(json!({ "id": "br", "name": "Breaker", "kind": "feature",
+            "data": { "option_type": "archetype", "replaces": ["fast movement", "Trap Sense (Ex)"] },
+            "advancement": [ { "id": "d1", "level": 1, "kind": "items", "items": [feature("Destructive (Ex)")] } ] })).unwrap();
+        // Skipping the optional pick is fine.
+        let mut w = world();
+        run(&mut w, AdvanceRequest { add: Some(barbarian(true)), ..Default::default() }, 0).unwrap();
+        assert_eq!(names(&w), ["Barbarian", "Fast Movement (Ex)", "Rage (Ex)"]);
+        // With the archetype: its features instead of the ones it replaces, now and later.
+        let mut w = world();
+        let mut req = AdvanceRequest { add: Some(barbarian(true)), ..Default::default() };
+        req.picks.insert("arch".into(), vec![breaker]);
+        run(&mut w, req, 0).unwrap();
+        assert_eq!(names(&w), ["Barbarian", "Breaker", "Destructive (Ex)", "Rage (Ex)"]);
+        let id = fighter_id(&w);
+        for _ in 0..2 {
+            run(&mut w, AdvanceRequest { item_id: Some(id.clone()), ..Default::default() }, 0).unwrap();
+        }
+        assert!(!names(&w).contains(&"Trap Sense (Ex)".to_string()), "replaced at 3rd level too: {:?}", names(&w));
+        let a = w.actors["a"].clone();
+        assert_eq!(plan(&a, &r, Some(&id), None).unwrap()["replaced"], json!(["fast movement", "trap sense"]));
+    }
+
+    #[test]
+    fn a_replaced_feature_leaves_out_its_grant() {
+        // A human's bonus feat is a pick grant named "Bonus Feat"; an alternate trait replaces it.
+        let human = || -> Item {
+            serde_json::from_value(json!({ "id": "hu", "name": "Human", "kind": "class", "data": { "levels": 0 }, "advancement": [
+                { "id": "alt", "level": 1, "kind": "pick", "from": "feature", "optional": true, "count": 2 },
+                { "id": "feat", "level": 1, "kind": "pick", "from": "feature", "feature": "Bonus Feat" },
+            ] })).unwrap()
+        };
+        let mut w = world();
+        assert!(run(&mut w, AdvanceRequest { add: Some(human()), ..Default::default() }, 0).is_err(), "the bonus feat must be picked");
+        let alt: Item = serde_json::from_value(json!({ "id": "hh", "name": "Heart of the Fields", "kind": "feature", "data": { "replaces": ["bonus feat"] } })).unwrap();
+        let mut req = AdvanceRequest { add: Some(human()), ..Default::default() };
+        req.picks.insert("alt".into(), vec![alt]);
+        let mut w = world();
+        run(&mut w, req, 0).unwrap();
+        assert_eq!(names(&w), ["Heart of the Fields", "Human"]);
     }
 
     #[test]

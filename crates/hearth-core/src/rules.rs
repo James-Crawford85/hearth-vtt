@@ -80,6 +80,10 @@ pub struct TypeRules {
     /// Item types: the data key that counts the item's level (classes). Such items level up.
     #[serde(default)]
     pub levels: Option<String>,
+    /// Item types with levels: they're counted apart from the character's total level (mythic
+    /// tiers), so they bring only their own grants, never the actor type's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub separate_levels: bool,
     /// Actor types: grants by total level across all classes (a feat at every odd
     /// level, +1 to an ability every 4). They come with the class level that reaches it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

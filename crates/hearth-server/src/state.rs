@@ -1175,6 +1175,10 @@ impl AppState {
             if !world.owns_actor(user, actor_id) {
                 return Err("you can only level up characters you own".into());
             }
+            // Players can't add or pick anything from a book the GM has switched off.
+            if user.role != Role::Gm {
+                hearth_core::books::check_advance(&req, &hearth_core::books::off(&world.settings))?;
+            }
             let mut rng = rand_rng();
             let adv = hearth_core::advance::advance(&actor, &self.rules(), &req, &mut |f: &str| {
                 hearth_dice::roll_with(f, &|_| None, &mut rng).map(|r| r.total).map_err(|e| format!("{f}: {e}"))

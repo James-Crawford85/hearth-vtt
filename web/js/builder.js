@@ -321,6 +321,8 @@ export class Builder {
         el('label.check', {}, el('input', { type: 'checkbox', checked: !!n.grants || !!n.levels, on: { change: (e) => { n.grants = e.target.checked; if (!n.grants) n.levels = null; this.changed({ tree: false }); this.renderEdit(); } } }),
           'Items of this type give features (classes, ancestries, backgrounds)'),
         (n.grants || n.levels) ? levelSel : null,
+        n.levels ? el('label.check', {}, el('input', { type: 'checkbox', checked: !!n.separate_levels, on: { change: (e) => { if (e.target.checked) n.separate_levels = true; else delete n.separate_levels; this.changed({ tree: false }); } } }),
+          "Counted apart from the character's level (e.g. mythic tiers): they don't add to the total level or bring the character's own grants") : null,
         (n.grants || n.levels) && !numbers.length ? el('p.muted.small', { text: 'For classes, add a Number field (e.g. Levels) to this type, then pick it here.' }) : null,
         el('p.muted.small', { text: 'What each item gives is set on the item itself (e.g. the Fighter in the Items directory): open it to edit its advancement.' })));
       if (n.grants || n.levels) {

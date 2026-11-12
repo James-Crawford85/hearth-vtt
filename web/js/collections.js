@@ -31,6 +31,8 @@ export class Collections {
     this.windows = new Map(); // key → { win, query, selected }
     hooks.on('op', (op) => this.onOp(op));
     // The system changed (the builder saved, or something was added to a collection): read packs again.
+    // The GM switching books on or off changes what players get from the server: fetch again.
+    hooks.on('op', (op) => { if (op.op === 'world_update' && op.patch?.settings?.core?.books !== undefined) hooks.emit('packages'); });
     hooks.on('packages', () => { this.cache.clear(); if (api.lookup) api.lookup.packDocs = null; for (const [key, o] of this.windows) if (o.source.type === 'pack') this.loadPack(o.source.pack.pkg, o.source.pack.id).then(() => this.render(key)).catch(() => {}); });
   }
 
