@@ -334,7 +334,11 @@ export function givesView(doc) {
           el('div.gives-options', {}, ...(g.items ?? []).map(grantedItem))));
         break;
       case 'pick':
-        parts.push(el('div.gives-item', { text: `${g.label || `Pick ${/^[aeiou]/i.test(typeLabel) ? 'an' : 'a'} ${typeLabel.toLowerCase()}`}${g.optional ? ' (optional)' : ''}` }));
+      {
+        const what = g.label || `Pick ${/^[aeiou]/i.test(typeLabel) ? 'an' : 'a'} ${typeLabel.toLowerCase()}`;
+        // (Not "(optional) (optional)" when the label already says so.)
+        parts.push(el('div.gives-item', { text: `${what}${g.optional && !/optional/i.test(what) ? ' (optional)' : ''}` }));
+      }
         break;
       default:
         parts.push(el('div.gives-item.muted', { text: g.label || g.kind }));

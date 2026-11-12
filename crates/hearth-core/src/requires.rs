@@ -76,6 +76,7 @@ mod tests {
             "data": { "str": 14, "bab": 1 },
             "items": [ { "id": "f", "name": "Power Attack", "kind": "feat", "data": {} },
                        { "id": "i", "name": "Improved Critical (Rapier)", "kind": "feat", "data": {} },
+                       { "id": "t", "name": "Finesse Training (Ex)", "kind": "feature", "data": { "choose": "Weapon", "choice": "Dagger, Rapier" } },
                        { "id": "c", "name": "Fighter", "kind": "class", "data": { "levels": 4 } },
                        { "id": "d", "name": "Rogue", "kind": "class", "data": { "levels": 2 } },
                        { "id": "w", "name": "Weapon Focus (Longsword)", "kind": "feat", "data": { "choice": "Longsword" } },
@@ -103,8 +104,11 @@ mod tests {
             r("has_item('feat', 'Power Attack', 'Longsword')", ""),
             // Named by hand, with no stored choice.
             r("has_item('feat', 'Improved Critical', 'rapier')", ""),
+            // A feature taken for several weapons, any kind of item.
+            r("has_item('', 'Finesse Training', 'Rapier')", ""),
+            r("has_item('', 'Finesse Training', 'Whip')", ""),
         ]);
-        assert_eq!(got, vec![Met::Yes, Met::Yes, Met::No, Met::Check, Met::No, Met::Check, Met::Check, Met::Yes, Met::Yes, Met::No, Met::Yes, Met::No, Met::Yes, Met::No, Met::Yes]);
+        assert_eq!(got, vec![Met::Yes, Met::Yes, Met::No, Met::Check, Met::No, Met::Check, Met::Check, Met::Yes, Met::Yes, Met::No, Met::Yes, Met::No, Met::Yes, Met::No, Met::Yes, Met::Yes, Met::No]);
         assert_eq!(Requirement::of(&json!({ "requires": " @str > 1 ", "requires_note": "x" })).requires, "@str > 1");
     }
 }

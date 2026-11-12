@@ -655,7 +655,10 @@ impl Scope for Engine<'_> {
                 let chosen = |i: &crate::model::Item| match &choice {
                     None => true,
                     Some(want) => {
-                        ["choice", "choice_key"].iter().any(|k| i.data.get(*k).and_then(Value::as_str).is_some_and(|v| !v.is_empty() && v.trim().to_lowercase() == *want))
+                        // Several choices are kept comma-separated ("Dagger, Rapier").
+                        ["choice", "choice_key"].iter().any(|k| {
+                            i.data.get(*k).and_then(Value::as_str).is_some_and(|v| v.split(',').any(|c| !c.trim().is_empty() && c.trim().to_lowercase() == *want))
+                        })
                             || i.name.trim().to_lowercase() == format!("{name} ({want})")
                     }
                 };

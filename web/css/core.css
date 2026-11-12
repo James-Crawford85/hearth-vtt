@@ -742,3 +742,5 @@ body.resizing, body.resizing * { user-select: none !important; }
 .met.yes { color: var(--good, #6bbf6b); }
 .met.no { color: var(--bad, #e06b5b); }
 .met.check { color: var(--accent); }
+.bp-choice { display: inline-flex; gap: 4px; align-items: center; }
+.bp-chip-edit { cursor: pointer; border: 1px dashed var(--border); background: none; }

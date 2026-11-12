@@ -23,6 +23,7 @@ import { layoutItemSheet, layoutFor } from './layout-sheet.js';
 import { grantTypes, levelsKey, levelOf, openAdd, openAdvance, regress, removeItem, advancementEditor, effectsEditor, partsView } from './advancement.js';
 import { isCharacterType } from './creation.js';
 import { canForge, openForge } from './forge.js';
+import { choiceButton } from './taken-for.js';
 
 const lastTab = new Map(); // actor id → tab key
 
@@ -442,6 +443,8 @@ export function itemSection(actor, t, api, editable, { title } = {}) {
           from ? el('span.muted', { text: `from ${from.name}${by.level ? ` ${by.level}` : ''}` }) : null) : null),
       lkey ? el('span.bp-count', { text: levelOf(it), title: 'Level' }) : null,
       el('div.bp-item-buttons', {},
+        // "Finesse Training": which weapon? (items that ask; see taken-for.js)
+        choiceButton(api, actor, it, editable),
         toggleButton(it),
         ...actions.filter((a) => !(actor.derived?.items?.[it.id]?._off ?? []).includes(a.key)).map((a) => el('button.small.bp-btn', { type: 'button', 'data-use': a.key, 'data-item-id': it.id, text: label(a), title: a.roll })),
         editable && lkey ? el('button.small.bp-btn', { type: 'button', text: 'Level up', on: { click: () => openAdvance(api, actor.id, { itemId: it.id }) } }) : null,
