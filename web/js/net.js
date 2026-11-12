@@ -28,12 +28,19 @@ export class Connection {
   }
 
   open() {
+    // The version of the code this page loaded, learned once (before the first join) and kept,
+    // so after a server update this page still says what it really is and is told to reload.
+    if (!this.version) {
+      fetch('/api/info', { cache: 'no-store' }).then((r) => r.json()).then((i) => { this.version = i.version || 'unknown'; this.open(); })
+        .catch(() => setTimeout(() => this.open(), 2000));
+      return;
+    }
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     this.ws = ws;
     let welcomed = false; // per socket: was this connection accepted?
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'join', ...this.creds }));
+      ws.send(JSON.stringify({ type: 'join', ...this.creds, version: this.version ?? null }));
     };
     ws.onmessage = (e) => {
       let msg;

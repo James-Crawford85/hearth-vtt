@@ -22,6 +22,16 @@ async fn send<S: SinkExt<Message> + Unpin>(sink: &mut S, msg: &ServerMsg) -> boo
     sink.send(encode(msg)).await.is_ok()
 }
 
+/// Why a client of this version can't join, if it can't: it must match the server's exactly.
+pub fn version_mismatch(client: Option<&str>) -> Option<String> {
+    let server = env!("CARGO_PKG_VERSION");
+    match client.map(str::trim) {
+        Some(v) if v == server => None,
+        Some(v) if !v.is_empty() => Some(format!("This game runs Hearth {server}, but this page is Hearth {v}. Reload the page to update it.")),
+        _ => Some(format!("This game was updated to Hearth {server}. Reload the page to update it.")),
+    }
+}
+
 async fn connection(socket: WebSocket, state: Arc<AppState>) {
     let (mut sink, mut stream) = socket.split();
 
@@ -31,16 +41,22 @@ async fn connection(socket: WebSocket, state: Arc<AppState>) {
         Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str::<ClientMsg>(t.as_str()) {
             Ok(ClientMsg::Join(req)) => req,
             _ => {
-                let _ = send(&mut sink, &ServerMsg::Error { message: "expected join".into() }).await;
+                let _ = send(&mut sink, &ServerMsg::Error { message: "expected join".into(), code: None }).await;
                 return;
             }
         },
         _ => return,
     };
+    // A client must run the same version of Hearth as the server: a page left open while the
+    // server was updated (or anything else out of date) is told to reload instead of joining.
+    if let Some(message) = version_mismatch(req.version.as_deref()) {
+        let _ = send(&mut sink, &ServerMsg::Error { message, code: Some("version_mismatch".into()) }).await;
+        return;
+    }
     let joined = match state.join(req).await {
         Ok(j) => j,
         Err(message) => {
-            let _ = send(&mut sink, &ServerMsg::Error { message }).await;
+            let _ = send(&mut sink, &ServerMsg::Error { message, code: None }).await;
             return;
         }
     };
@@ -96,7 +112,7 @@ async fn run<S, R>(
                 let msg = match serde_json::from_str::<ClientMsg>(text.as_str()) {
                     Ok(m) => m,
                     Err(e) => {
-                        if !send(sink, &ServerMsg::Error { message: format!("bad message: {e}") }).await {
+                        if !send(sink, &ServerMsg::Error { message: format!("bad message: {e}"), code: None }).await {
                             return;
                         }
                         continue;
@@ -163,7 +179,7 @@ async fn run<S, R>(
                             match op {
                                 Op::UserUpsert { user: u } if u.id == user.id => *user = u.clone(),
                                 Op::UserDelete { id } if *id == user.id => {
-                                    let _ = send(sink, &ServerMsg::Error { message: "Your account was removed by the GM.".into() }).await;
+                                    let _ = send(sink, &ServerMsg::Error { message: "Your account was removed by the GM.".into(), code: None }).await;
                                     return;
                                 }
                                 _ => {}
@@ -176,7 +192,7 @@ async fn run<S, R>(
                     Err(RecvError::Lagged(n)) => {
                         // The client fell behind; it reconnects and gets a fresh snapshot.
                         tracing::warn!(user = %user.name, skipped = n, "client lagged, resyncing");
-                        let _ = send(sink, &ServerMsg::Error { message: "resync".into() }).await;
+                        let _ = send(sink, &ServerMsg::Error { message: "resync".into(), code: None }).await;
                         return;
                     }
                     Err(RecvError::Closed) => return,

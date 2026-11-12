@@ -61,6 +61,9 @@ function formatSession(iso) {
 async function loadInfo() {
   let info;
   try { info = await fetch('/api/info', { cache: 'no-store' }).then((r) => r.json()); } catch { return; }
+  // The version of the code this page loaded: sent when joining, so a page left open while the
+  // server was updated is told to reload rather than run old code against the new server.
+  conn.version ??= info.version;
   document.title = `${info.world} · Hearth`;
   document.getElementById('join-world').textContent = info.world;
   document.getElementById('join-system').textContent = info.system_name;
@@ -331,6 +334,12 @@ function handle(msg) {
       api._emit(msg.from, msg.channel, msg.payload);
       break;
     case 'error':
+      // The server runs another version of Hearth: reload once to get its code (then rejoin).
+      if (msg.code === 'version_mismatch' && sessionStorage.getItem('hearth.reloaded') !== msg.message) {
+        sessionStorage.setItem('hearth.reloaded', msg.message);
+        location.reload();
+        break;
+      }
       if (msg.refused) {
         // Join refused or account removed: back to the login page.
         store_.del(SESSION);

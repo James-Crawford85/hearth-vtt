@@ -402,6 +402,21 @@ fn normalize_address(raw: &str) -> R<tauri::Url> {
 }
 
 /// Ask the server what world it's running (best effort).
+/// Why this app (version `ours`) can't join a host running `theirs`, if it can't: the versions
+/// must match, and the message says who needs to update.
+fn version_problem(ours: &str, theirs: &str) -> Option<String> {
+    let parse = |v: &str| v.trim().trim_start_matches('v').split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let (a, b) = (parse(ours), parse(theirs));
+    if a == b {
+        return None;
+    }
+    Some(if a < b {
+        format!("This game runs Hearth {theirs}, newer than yours ({ours}). Update Hearth (it offers updates when it starts) and join again.")
+    } else {
+        format!("This game runs Hearth {theirs}, older than yours ({ours}). Ask the host to update Hearth, then join again.")
+    })
+}
+
 fn fetch_info(url: &tauri::Url) -> Option<serde_json::Value> {
     ureq::get(url.join("api/info").ok()?.as_str())
         .timeout(Duration::from_secs(4))
@@ -442,6 +457,13 @@ pub async fn join_game(state: State<'_, Desktop>, address: String, player_name: 
     })
     .await
     .map_err(err)??;
+
+    // The game only works when the host and this app run the same version of Hearth.
+    if let Some(theirs) = info.as_ref().and_then(|i| i["version"].as_str()) {
+        if let Some(message) = version_problem(env!("CARGO_PKG_VERSION"), theirs) {
+            return Err(message);
+        }
+    }
 
     let file = state.joined_file();
     let mut list: Vec<JoinedGame> = store::load(&file);
@@ -679,6 +701,15 @@ mod tests {
         assert!(newer("1.0.0", "0.9.9"));
         assert!(!newer("v0.1.0", "0.1.0"));
         assert!(!newer("0.1.0-beta", "0.1.0"));
+    }
+
+    #[test]
+    fn joining_needs_the_same_version() {
+        assert_eq!(version_problem("0.1.8", "0.1.8"), None);
+        assert_eq!(version_problem("0.1.8", "v0.1.8"), None);
+        assert!(version_problem("0.1.5", "0.1.8").unwrap().contains("Update Hearth"));
+        assert!(version_problem("0.1.9", "0.1.8").unwrap().contains("Ask the host"));
+        assert!(version_problem("0.1.10", "0.1.9").unwrap().contains("Ask the host"), "compared as numbers, not text");
     }
 }
 

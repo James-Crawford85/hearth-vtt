@@ -21,6 +21,10 @@ pub struct JoinRequest {
     pub user_id: Option<Id>,
     #[serde(default)]
     pub password: Option<String>,
+    /// The Hearth version of the client's code. A join from another version (or none: a page
+    /// loaded before the server was updated) is refused with the code `version_mismatch`.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// GM-only account management.
@@ -138,5 +142,10 @@ pub enum ServerMsg {
     /// The installed packages changed (e.g. the system builder saved): replaces Welcome's `packages`.
     Packages { packages: Value },
     PasswordChanged,
-    Error { message: String },
+    Error {
+        message: String,
+        /// What kind of error, for clients that act on it (`version_mismatch`: reload the page).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
 }

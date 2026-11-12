@@ -26,6 +26,13 @@
 - Packages load from the bundled folder and then the user's `packages` folder, so user copies override bundled ones by id.
 - Quitting the app stops the hosted server, which saves the world.
 
+## Versions must match
+
+A game page always comes from the server it plays on, so it runs that server's version of the web client. Versions can still drift, in two ways, and both are refused rather than allowed to misbehave:
+
+- **A page left open while the host updates.** The page keeps its old code and quietly reconnects. Every `join` message carries the client's version: the version from `/api/info` when the page loaded, kept from then on. The server refuses a join whose version isn't exactly its own, or that has none (pages from before this rule), with `{"type":"error","code":"version_mismatch","message":"This game was updated to Hearth 0.1.9. Reload the page…"}`. The web client reloads once to get the new code, and rejoins with its saved session if the server still has it. Older pages just show the message.
+- **The desktop app joining a host on another version.** Before opening the game, the launcher compares its own version with the host's `/api/info` and stops with who needs to update: "Update Hearth" when the host is newer, "Ask the host to update" when it's older.
+
 ## One world, one document
 
 A `World` (crates/hearth-core/src/model.rs) holds scenes → tokens, actors → items, users, chat and settings. Systems never add Rust types. Their data lives in free-form JSON fields:
