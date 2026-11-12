@@ -87,6 +87,14 @@ Clicking an entry shows it in a pane beside the list without choosing it: its fi
 
 When a list has entries with requirements, it shows **Only what Tara qualifies for**. It's on to start with and leaves out the ✗ ones; "? check" entries stay, since the rules can't rule them out. With it off, rows carry ✗ and ? badges, and the pane says which applies. It's a guide, not a lock: the button still takes an unmet one (**Add Cleave anyway**), so a GM's house rules win. `has_item` also matches a name followed by something in brackets, and `sum_items` can count one class's levels (`sum_items('class', 'levels', 'name', 'Fighter') >= 4`), which covers most "Weapon Focus" and "fighter level 4th" prerequisites.
 
+**Taken for a choice.** Some things are always taken for one weapon, skill or school: Weapon Focus, Skill Focus. Give the item `data.choose` (what to ask: "Weapon") and, optionally, `data.choose_from`, where suggestions come from:
+
+- an item type (`weapon`): the character's own, then the world's and the collections';
+- a list on the character (`skills`): its entries, by the system's labels;
+- a comma list (`abjuration, conjuration, …`).
+
+When it's added to a character, from **+ Add**, a level up's pick, a drop onto the sheet or **Give to…**, the player is asked. The copy is named *Weapon Focus (Longsword)* and keeps the answer in `data.choice`, plus `data.choice_key` (the entry's key) for a list. Formulas then use `has_item('feat', 'Weapon Focus', @item.name)` on a weapon, or `has_item('feat', 'Skill Focus', @key)` on a skill. Items without `choose` are added as before.
+
 Each filter offers only the values that are there, with how many entries each leaves. The most useful four show at once and **More filters** has the rest. In a collection's window, **Import all** imports what the search and filters leave.
 
 Each class row shows its level with **Level up** and **Level down** (take the last level back: its features, points and hit points go with it), and every item has **🗑** (also at the bottom of its own window): for a class, ancestry, background or subclass it removes the item *and everything it gave*, across all its levels; for anything else, just the item.

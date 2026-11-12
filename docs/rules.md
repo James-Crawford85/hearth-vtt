@@ -39,7 +39,7 @@ The key is where the value goes (`derived.ac`, `derived.abilities.str.mod`…). 
 | `table('name', key)` | Look up a table |
 | `count_items('kind')`, `sum_items('kind', 'path')`, `max_items(…)` | Over the actor's items, e.g. total level across classes. `count_items('spell', 'level', 3)` counts only those whose field has that value; `sum_items('class', 'levels', 'name', 'Fighter')` the same for sums |
 | `has_status('poisoned')` | Whether a condition is on |
-| `has_item('spell', 'Fireball')` | Whether the actor has an item of that kind (any kind with `''`) and name. A name also matches the same name with something in brackets after it: `has_item('feat', 'Weapon Focus')` is true for *Weapon Focus (longsword)* |
+| `has_item('spell', 'Fireball')` | Whether the actor has an item of that kind (any kind with `''`) and name. A name also matches the same name with something in brackets after it: `has_item('feat', 'Weapon Focus')` is true for *Weapon Focus (longsword)*. With a third argument, only one taken for that choice: `has_item('feat', 'Weapon Focus', @item.name)` (its `data.choice` or `choice_key`, or the name in brackets; see [taken for a choice](builder.md)) |
 | `len`, `has`, `if(c, a, b)`, `num`, `text`, `replace(text, from, to)` | Odds and ends |
 
 Missing values count as 0, so a typo gives a wrong number rather than a broken sheet. Problems are listed for the GM at the bottom of the automatic sheet (and in `derived._errors`).

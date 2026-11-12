@@ -13,6 +13,7 @@ import { nodeAt } from './layout-sheet.js';
 import { label, blueprintType } from './blueprint-sheet.js';
 import { renderMarkdown } from './markdown.js';
 import { finder } from './finder.js';
+import { takenFor } from './taken-for.js';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 const KINDS = [['items', 'Gives items'], ['choice', 'Choose from items'], ['pick', 'Pick any of a type (e.g. a feat)'], ['points', 'Spend points'], ['roll', 'Roll (e.g. hit points)']];
@@ -400,9 +401,12 @@ async function choosePick(api, actor, g, chosen, done) {
   win.body.replaceChildren(el('p.muted', { text: 'Loading…' }));
   const all = await availableItems(api, [g.from], (d) => pickAllows(g, d));
   const has = (c) => actor.items.some((i) => i.name === c.doc.name && pickAllows(g, i)) || chosen.some((x) => x.name === c.doc.name);
-  const take = (c) => {
+  const take = async (c) => {
     if (has(c)) return;
-    chosen.push(cleanDoc(c.doc));
+    // "Weapon Focus": which weapon? (only items that ask; see taken-for.js)
+    const doc = await takenFor(api, actor, cleanDoc(c.doc));
+    if (!doc) return;
+    chosen.push(doc);
     win.close();
     done();
   };

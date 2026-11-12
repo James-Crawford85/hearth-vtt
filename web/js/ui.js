@@ -163,6 +163,12 @@ export function formDialog({ title, fields, submit = 'Save' }) {
         input.checked = !!f.value;
       } else {
         input = el('input', { name: f.name, type: f.type ?? 'text', value: f.value ?? '', required: f.required ?? false, min: f.min, step: f.step });
+        // Optional suggestions to pick from while typing (anything can still be typed).
+        if (f.suggestions?.length) {
+          const id = `dl-${Math.random().toString(36).slice(2, 9)}`;
+          input.setAttribute('list', id);
+          form.append(el('datalist', { id }, ...f.suggestions.map((s) => el('option', { value: s }))));
+        }
       }
       form.append(f.type === 'checkbox' ? el('label.check', {}, input, f.label) : el('label', {}, f.label, input));
     }

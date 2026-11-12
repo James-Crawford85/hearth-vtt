@@ -139,6 +139,16 @@ cargo run -p hearth-server
 
 The web client and packages are served straight from disk, so edit and refresh. No rebuild needed.
 
+**Checking an engine change against every system.** `derive_snapshot` works out every actor's calculated values (in the worlds you name, and in each system's monster and NPC collections) and prints them in a stable order. Take one before a change and one after, then diff them: only the systems you meant to change should differ.
+
+```bash
+cargo run -q -p hearth-packages --example derive_snapshot -- packages --worlds worlds/dev > before.json
+# …make the change…
+cargo run -q -p hearth-packages --example derive_snapshot -- packages --worlds worlds/dev > after.json
+```
+
+Pass more package folders (an installed `packages` folder) and worlds after `--worlds` to cover them too.
+
 **Windows note:** if builds fail with *"An Application Control policy has blocked this file"*, Windows Smart App Control is blocking Cargo's build scripts. Build inside WSL, in a dev container, or turn Smart App Control off.
 
 ## Roadmap

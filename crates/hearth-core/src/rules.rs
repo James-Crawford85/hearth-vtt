@@ -641,13 +641,25 @@ impl Scope for Engine<'_> {
             // (any kind with ''), e.g. a crafter knowing the spell they put in a wand. A name
             // also matches the same name with something in brackets after it: 'Weapon Focus'
             // is met by "Weapon Focus (longsword)".
+            //
+            // has_item('feat', 'Weapon Focus', 'Longsword'): one taken for that choice, its
+            // data.choice or data.choice_key (an item that asked "which weapon?" when added).
             "has_item" => {
                 let (kind, name) = (key(0), key(1).trim().to_lowercase());
                 let named = |n: &str| {
                     let n = n.trim().to_lowercase();
                     n == name || n.strip_prefix(name.as_str()).is_some_and(|rest| rest.starts_with(" ("))
                 };
-                Val::Bool(!name.is_empty() && self.actor.items.iter().any(|i| (kind.is_empty() || i.kind == kind) && named(&i.name)))
+                let choice = (args.len() >= 3).then(|| key(2).trim().to_lowercase());
+                // The choice it stored, or what its name says in brackets ("Weapon Focus (longsword)").
+                let chosen = |i: &crate::model::Item| match &choice {
+                    None => true,
+                    Some(want) => {
+                        ["choice", "choice_key"].iter().any(|k| i.data.get(*k).and_then(Value::as_str).is_some_and(|v| !v.is_empty() && v.trim().to_lowercase() == *want))
+                            || i.name.trim().to_lowercase() == format!("{name} ({want})")
+                    }
+                };
+                Val::Bool(!name.is_empty() && self.actor.items.iter().any(|i| (kind.is_empty() || i.kind == kind) && named(&i.name) && chosen(i)))
             }
             // replace(text, from, to): every `from` in the text becomes `to` (e.g. a scroll's
             // spell roll at the scroll's own caster level).

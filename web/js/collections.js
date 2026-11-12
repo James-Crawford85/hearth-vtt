@@ -14,6 +14,7 @@ import { renderMarkdown } from './markdown.js';
 import { accessOf, accessBadge, editAccess, newId, rejectToast } from './directory.js';
 import { blueprintType } from './blueprint-sheet.js';
 import { finder } from './finder.js';
+import { takenFor } from './taken-for.js';
 
 export const DOC_MIME = 'application/x-hearth-doc';
 
@@ -281,7 +282,8 @@ export class Collections {
     const texts = [];
     const shown = (f, v) => {
       if (f.kind === 'checkbox') return v ? 'Yes' : null;
-      if (f.kind === 'choice') return (f.options ?? []).find((o) => o.value === v)?.label ?? v;
+      // An unset choice says nothing ("Adds spellcasting levels to —").
+      if (f.kind === 'choice') return v == null || v === '' ? null : (f.options ?? []).find((o) => o.value === v)?.label ?? v;
       if (f.kind === 'resource') return v && typeof v === 'object' ? (v.max ? `${v.value ?? 0} / ${v.max}` : null) : v;
       return v;
     };
@@ -290,7 +292,9 @@ export class Collections {
         if (f.hidden || ['action', 'effect', 'formula', 'list'].includes(f.kind)) continue;
         if (f.kind === 'group') { walk(f.children, f.flat ? obj : obj?.[f.key]); continue; }
         const v = shown(f, obj?.[f.key]);
-        if (v == null || v === '' || (typeof v === 'number' && v === 0 && f.default == null)) continue;
+        // A 0 that's only the field's starting value ("Levels 0", "Magic bonus 0") is left out;
+        // a 0 that means something (a 0-level spell, where the default isn't 0) stays.
+        if (v == null || v === '' || (typeof v === 'number' && v === 0 && (f.default == null || f.default === 0))) continue;
         if (f.kind === 'longtext') texts.push(String(v));
         else rows.push([f.label || f.key, String(v), f.key]);
       }
@@ -401,9 +405,12 @@ export class Collections {
   }
 
   /** Copy an item document onto an actor (also used for drops on a sheet). */
-  giveItem(actorId, doc) {
+  async giveItem(actorId, given) {
     const actor = store.world.actors[actorId];
     if (!actor) return;
+    // "Weapon Focus": which weapon? (only items that ask; see taken-for.js)
+    const doc = await takenFor(this.api, actor, given);
+    if (!doc) return;
     // The whole item: its effects (a ring's +2 AC) and advancement come too.
     this.api.op({ op: 'item_create', actor_id: actorId, item: { id: '', name: doc.name, kind: doc.kind, img: doc.img ?? null, data: structuredClone(doc.data ?? {}), flags: structuredClone(doc.flags ?? {}), effects: structuredClone(doc.effects ?? []), advancement: structuredClone(doc.advancement ?? []), parts: structuredClone(doc.parts ?? []) } }, rejectToast);
     toast(`Gave ${doc.name} to ${actor.name}.`);

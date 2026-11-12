@@ -93,7 +93,8 @@ function filtersFor(entries, withFields = true) {
   const keys = new Set();
   if (withFields) for (const e of entries) for (const k of Object.keys(e.doc.data ?? {})) keys.add(k);
   for (const key of keys) {
-    if (key === 'source' || key === 'description' || key === 'img') continue;
+    // Not the engine's own fields (requirements, "taken for" choices): they aren't things to sort by.
+    if (['source', 'description', 'img', 'requires', 'requires_note', 'choose', 'choose_from', 'choice', 'choice_key'].includes(key)) continue;
     const def = fieldDefs.get(key);
     if (def && /formula|resource|longtext|richtext|roll|items|effects/.test(def.kind)) continue;
     let get = (e) => valuesOf(e.doc.data?.[key]);
