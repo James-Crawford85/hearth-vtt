@@ -176,8 +176,9 @@ const classType = item('class', 'Class', [
   levels: 'levels',
   // Every new class made with "+ New item" starts with these; add its features and subclass.
   advancement: [
-    { id: 'hp1', level: 1, kind: 'roll', label: 'Hit points', formula: '@item.hit_die', path: 'hp_rolls' },
-    { id: 'hp', level: 2, every: 1, kind: 'roll', label: 'Hit points', formula: '1d{@item.hit_die}', path: 'hp_rolls', average: true },
+    // The full hit die only at the character's first level (a multiclass's first level rolls).
+    { id: 'hp1', level: 1, kind: 'roll', label: 'Hit points', formula: '@item.hit_die', path: 'hp_rolls', when: '@level == 1' },
+    { id: 'hp', level: 1, every: 1, kind: 'roll', label: 'Hit points', formula: '1d{@item.hit_die}', path: 'hp_rolls', average: true, when: '@level > 1' },
     { id: 'asi', level: 4, every: 4, until: 16, kind: 'points', label: ASI, path: 'abilities', field: 'value', amount: 2, max_each: 2, cap: 20 },
     { id: 'boon', level: 19, kind: 'points', label: 'Epic Boon (or +2 to one score / +1 to two, max 30)', path: 'abilities', field: 'value', amount: 2, max_each: 2, cap: 30 },
   ],
@@ -356,7 +357,7 @@ onSheet(equipment, { list_title: 'Gear', tab: 'inventory', summary: ['quantity',
 const style = { background: '#1b1b1d', header: '#141416', box: '#252527', raised: '#313134', input: '#1e1e20', accent: '#d9a52b', text: '#ebe8e3', muted: '#9c978f', border: '#3b3b3f', button: '#8e1d1d', heading_font: '"Trebuchet MS", sans-serif', radius: 6 };
 
 // Character creation: how ability scores are set (each world picks from these and can change the numbers).
-const creation = [{"id":"abilities","label":"Ability scores","path":"abilities","field":"value","methods":[{"id":"array","kind":"array","label":"Standard array","values":[15,14,13,12,10,8]},{"id":"points","kind":"pointbuy","label":"Point buy","points":27,"min":8,"max":15,"costs":{"8":0,"9":1,"10":2,"11":3,"12":4,"13":5,"14":7,"15":9}},{"id":"4d6","kind":"roll","label":"Roll 4d6, drop the lowest","formula":"4d6kh3"},{"id":"3d6","kind":"roll","label":"Roll 3d6 in order","formula":"3d6","in_order":true},{"id":"manual","kind":"manual","label":"Enter your own","min":3,"max":18}]}];
+const creation = [{"id":"abilities","label":"Ability scores","path":"abilities","field":"value","actor_types":["player"],"methods":[{"id":"array","kind":"array","label":"Standard array","values":[15,14,13,12,10,8]},{"id":"points","kind":"pointbuy","label":"Point buy","points":27,"min":8,"max":15,"costs":{"8":0,"9":1,"10":2,"11":3,"12":4,"13":5,"14":7,"15":9}},{"id":"4d6","kind":"roll","label":"Roll 4d6, drop the lowest","formula":"4d6kh3"},{"id":"3d6","kind":"roll","label":"Roll 3d6 in order","formula":"3d6","in_order":true},{"id":"manual","kind":"manual","label":"Enter your own","min":3,"max":18}]}];
 
 const blueprint = {
   style,
@@ -380,8 +381,8 @@ const usesN = (n, recharge = 'long', roll = '', activation = '') => ({ uses: { v
 const grant = (gid, level, label, kind, rest) => ({ id: gid, level, label, kind, ...rest });
 const asi = (gid, level, extra = {}) => grant(gid, level, ASI, 'points', { path: 'abilities', field: 'value', amount: 2, max_each: 2, cap: 20, ...extra });
 const hp = (cls, die) => [
-  grant(`${cls}_hp1`, 1, 'Hit points', 'roll', { formula: '@item.hit_die', path: 'hp_rolls' }),
-  grant(`${cls}_hp`, 2, 'Hit points', 'roll', { formula: '1d{@item.hit_die}', path: 'hp_rolls', average: true, every: 1 }),
+  grant(`${cls}_hp1`, 1, 'Hit points', 'roll', { formula: '@item.hit_die', path: 'hp_rolls', when: '@level == 1' }),
+  grant(`${cls}_hp`, 1, 'Hit points', 'roll', { formula: '1d{@item.hit_die}', path: 'hp_rolls', average: true, every: 1, when: '@level > 1' }),
 ];
 
 const featDoc = (name, category, description, effects = []) => doc('feat', name, { category, prerequisite: '', repeatable: false, description }, { effects });

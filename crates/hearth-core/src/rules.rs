@@ -39,6 +39,10 @@ use serde_json::{Map, Value};
 use crate::formula::{self, Ast, Scope, Val};
 use crate::model::{Actor, ChangeMode, Effect, Item};
 
+/// A change waiting to apply: how, the formula, the item it comes from, and its
+/// bonus type if it's one that doesn't stack.
+type PendingChange = (ChangeMode, String, Option<usize>, Option<String>);
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Rules {
     /// Lookup tables: name → `{ "1": 2, "5": 3 }` (step lookup) or a list.
@@ -54,6 +58,10 @@ pub struct Rules {
     /// Kinds of rest, e.g. `["short", "long"]`.
     #[serde(default)]
     pub rests: Vec<String>,
+    /// Bonus types that stack with themselves (e.g. `["dodge", "circumstance"]`). Other
+    /// typed bonuses on the same value don't: only the biggest of each type counts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stacking: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -72,6 +80,13 @@ pub struct TypeRules {
     /// Item types: the data key that counts the item's level (classes). Such items level up.
     #[serde(default)]
     pub levels: Option<String>,
+    /// Actor types: grants by total level across all classes (a feat at every odd
+    /// level, +1 to an ability every 4). They come with the class level that reaches it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advancement: Vec<crate::advance::Grant>,
+    /// Item types: how the item forge prices, checks and crafts them (see `crate::forge`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forge: Option<crate::forge::Forge>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -108,6 +123,17 @@ pub struct ActionDef {
     /// Only offered when this formula is true.
     #[serde(default)]
     pub when: Option<String>,
+    /// Attacks: the lowest natural d20 that threatens a critical, a formula (default 20;
+    /// a 19–20 weapon is 19, keen makes it 17).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threat: Option<String>,
+    /// Attacks: a threat must be confirmed with a second roll before it's a critical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
+    /// Damage: on a critical, roll the damage this many times (a formula, e.g. ×3) instead of
+    /// doubling the dice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crit_mult: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -140,7 +166,9 @@ pub struct Engine<'a> {
     rules: &'a Rules,
     actor_rules: Option<&'a TypeRules>,
     /// Active effect changes by target path, with the item they came from.
-    changes: HashMap<String, Vec<(ChangeMode, String, Option<usize>)>>,
+    changes: HashMap<String, Vec<PendingChange>>,
+    /// Changes to an item's own values (`item.damage` from its flaming part), by item index.
+    item_changes: HashMap<usize, HashMap<String, Vec<PendingChange>>>,
     cache: HashMap<String, Val>,
     busy: HashSet<String>,
     asts: HashMap<String, Result<Ast, String>>,
@@ -161,6 +189,7 @@ impl<'a> Engine<'a> {
             rules,
             actor_rules: rules.actor_types.get(&actor.kind),
             changes: HashMap::new(),
+            item_changes: HashMap::new(),
             cache: HashMap::new(),
             busy: HashSet::new(),
             asts: HashMap::new(),
@@ -187,8 +216,11 @@ impl<'a> Engine<'a> {
         }
         let all = self.rules;
         for (i, item) in actor.items.iter().enumerate() {
-            let type_fx = all.item_types.get(&item.kind).map(|t| t.effects.as_slice()).unwrap_or_default();
-            for fx in item.effects.iter().chain(type_fx) {
+            // The item's effects, its type's, and those of its parts (and their types'); a
+            // part's `requires` sees the item it's attached to as @item.
+            let type_fx = |kind: &str| all.item_types.get(kind).map(|t| t.effects.as_slice()).unwrap_or_default();
+            let parts = item.parts.iter().flat_map(|p| p.effects.iter().chain(type_fx(&p.kind)));
+            for fx in item.effects.iter().chain(type_fx(&item.kind)).chain(parts) {
                 if fx.disabled {
                     continue;
                 }
@@ -203,20 +235,29 @@ impl<'a> Engine<'a> {
                 active.push((fx, Some(i)));
             }
         }
-        let mut changes: HashMap<String, Vec<(ChangeMode, String, Option<usize>)>> = HashMap::new();
+        let mut changes: HashMap<String, Vec<PendingChange>> = HashMap::new();
+        let mut item_changes: HashMap<usize, HashMap<String, Vec<PendingChange>>> = HashMap::new();
         for (fx, item) in active {
             let rules = self.rules;
             let cond = fx.status.as_deref().and_then(|s| rules.conditions.iter().find(|c| c.id == s));
             for c in fx.changes.iter().chain(cond.map(|c| c.changes.iter()).into_iter().flatten()) {
-                changes.entry(c.path.clone()).or_default().push((c.mode, c.value.clone(), item));
+                // A typed bonus of a stacking type is as good as untyped.
+                let ty = c.bonus_type.as_deref().map(str::trim).filter(|t| !t.is_empty() && !rules.stacking.iter().any(|s| s.eq_ignore_ascii_case(t)));
+                let pending = (c.mode, c.value.clone(), item, ty.map(str::to_lowercase));
+                // `item.<field>` changes the item the effect belongs to (flaming: item.damage).
+                match (c.path.strip_prefix("item."), item) {
+                    (Some(field), Some(i)) => item_changes.entry(i).or_default().entry(field.to_string()).or_default().push(pending),
+                    _ => changes.entry(c.path.clone()).or_default().push(pending),
+                }
             }
         }
         // Apply in a fixed order: set, upgrade, downgrade, multiply, add.
-        for list in changes.values_mut() {
-            list.sort_by_key(|(m, _, _)| *m as u8);
+        for list in changes.values_mut().chain(item_changes.values_mut().flat_map(|m| m.values_mut())) {
+            list.sort_by_key(|(m, _, _, _)| *m as u8);
         }
         self.cache.clear();
         self.changes = changes;
+        self.item_changes = item_changes;
     }
 
     fn ast(&mut self, src: &str) -> Result<Ast, String> {
@@ -339,12 +380,26 @@ impl<'a> Engine<'a> {
         Val::Map(m)
     }
 
-    fn apply_changes(&mut self, key: &str, mut v: Val) -> Val {
+    fn apply_changes(&mut self, key: &str, v: Val) -> Val {
         let Some(list) = self.changes.get(key).cloned() else { return v };
-        for (mode, src, item) in list {
+        self.apply_list(list, v)
+    }
+
+    /// Apply changes (already in order) to a value.
+    fn apply_list(&mut self, list: Vec<PendingChange>, mut v: Val) -> Val {
+        // Typed bonuses: only the biggest of each type is added (penalties all count).
+        let mut best: BTreeMap<String, f64> = BTreeMap::new();
+        for (mode, src, item, ty) in list {
             let prev = std::mem::replace(&mut self.item, item);
             let x = self.eval_src(&src);
             self.item = prev;
+            if let (ChangeMode::Add, Some(ty), Val::Num(n)) = (mode, &ty, &x) {
+                if *n > 0.0 {
+                    let b = best.entry(ty.clone()).or_insert(0.0);
+                    *b = b.max(*n);
+                    continue;
+                }
+            }
             v = match mode {
                 ChangeMode::Set => x,
                 ChangeMode::Add => match (&v, &x) {
@@ -355,6 +410,9 @@ impl<'a> Engine<'a> {
                 ChangeMode::Upgrade => Val::Num(v.num().max(x.num())),
                 ChangeMode::Downgrade => Val::Num(v.num().min(x.num())),
             };
+        }
+        if !best.is_empty() {
+            v = Val::Num(v.num() + best.values().sum::<f64>());
         }
         v
     }
@@ -400,6 +458,11 @@ impl<'a> Engine<'a> {
                     Val::from_json(&d)
                 }
             }
+        };
+        // Changes from the item's own effects and its parts (flaming: +1d6 on item.damage).
+        let v = match self.item_changes.get(&idx).and_then(|m| m.get(&path.join("."))).cloned() {
+            Some(list) => self.apply_list(list, v),
+            None => v,
         };
         self.busy.remove(&key);
         self.cache.insert(key, v.clone());
@@ -555,7 +618,48 @@ impl Scope for Engine<'_> {
                     _ => Val::List(vals),
                 }
             }
+            // has_item('spell', 'Fireball'): whether the actor has an item of that kind and name
+            // (any kind with ''), e.g. a crafter knowing the spell they put in a wand.
+            "has_item" => {
+                let (kind, name) = (key(0), key(1));
+                Val::Bool(self.actor.items.iter().any(|i| (kind.is_empty() || i.kind == kind) && i.name.eq_ignore_ascii_case(&name)))
+            }
+            // replace(text, from, to): every `from` in the text becomes `to` (e.g. a scroll's
+            // spell roll at the scroll's own caster level).
+            "replace" => {
+                let text = args.first().map(|v| match v { Val::Null => String::new(), v => v.to_string() }).unwrap_or_default();
+                let from = key(1);
+                if from.is_empty() { Val::Str(text) } else { Val::Str(text.replace(&from, &key(2))) }
+            }
             "has_status" => Val::Bool(self.actor.effects.iter().any(|e| !e.disabled && e.status.as_deref() == Some(key(0).as_str()))),
+            // Over the current item's parts (a weapon's abilities): sum_parts('bonus'),
+            // max_parts('cl'), count_parts(), or count_parts('kind', 'material').
+            "sum_parts" | "max_parts" | "count_parts" | "nth_parts" | "parts" => {
+                let Some(item) = self.item.and_then(|i| self.actor.items.get(i)) else { return Some(Val::Num(0.0)) };
+                let path: Vec<String> = key(0).split('.').filter(|s| !s.is_empty()).map(String::from).collect();
+                let value_of = |p: &Item| -> Val {
+                    match path.as_slice() {
+                        [one] if one == "name" => Val::Str(p.name.clone()),
+                        [one] if one == "kind" => Val::Str(p.kind.clone()),
+                        _ => Val::from_json(&json_at(&p.data, &path)),
+                    }
+                };
+                let vals: Vec<Val> = item.parts.iter().map(value_of).collect();
+                match name {
+                    "sum_parts" => Val::Num(vals.iter().map(Val::num).sum()),
+                    "max_parts" => Val::Num(vals.iter().map(Val::num).fold(0.0, f64::max)),
+                    "count_parts" if args.len() >= 2 => Val::Num(vals.iter().filter(|v| v.key() == key(1)).count() as f64),
+                    "count_parts" => Val::Num(item.parts.len() as f64),
+                    // nth_parts('level', 2): the second-highest value (0 when there's none).
+                    "nth_parts" => {
+                        let mut nums: Vec<f64> = vals.iter().map(Val::num).collect();
+                        nums.sort_by(|a, b| b.total_cmp(a));
+                        let n = args.get(1).map(Val::num).unwrap_or(1.0).max(1.0) as usize;
+                        Val::Num(nums.get(n - 1).copied().unwrap_or(0.0))
+                    }
+                    _ => Val::List(vals),
+                }
+            }
             _ => return None,
         })
     }
@@ -725,6 +829,9 @@ pub struct ActionOptions {
     /// Cast or use at a higher level: `@cast_level` in formulas.
     #[serde(default)]
     pub level: Option<i64>,
+    /// This attack roll confirms a critical threat: its follow-ups are critical.
+    #[serde(default)]
+    pub confirming: bool,
 }
 
 /// An action ready to roll.
@@ -739,6 +846,10 @@ pub struct PlannedAction {
     pub then: Vec<(String, String)>,
     /// Where to spend from, and the new value: (item id or None for the actor, data patch).
     pub spend: Option<(Option<String>, Value)>,
+    /// Attacks: the lowest natural d20 that threatens a critical.
+    pub threat: i64,
+    /// Attacks: threats need confirming.
+    pub confirm: bool,
 }
 
 /// The actions an item (or the actor itself, with `None`) offers right now.
@@ -796,28 +907,56 @@ pub fn plan_action(actor: &Actor, rules: &Rules, item_id: Option<&str>, action: 
         }
     }
     if opts.crit && def.kind == "damage" {
-        formula = double_dice(&formula);
+        // A multiplier rolls the damage again (×3: three times); otherwise the dice double.
+        formula = match def.crit_mult.as_deref().filter(|m| !m.trim().is_empty()) {
+            Some(m) => {
+                let n = eng.eval_src(m).num().round().clamp(1.0, 10.0) as usize;
+                vec![format!("({formula})"); n].join(" + ")
+            }
+            None => double_dice(&formula),
+        };
     }
+    let threat = def.threat.as_deref().filter(|t| !t.trim().is_empty()).map_or(20, |t| (eng.eval_src(t).num().round() as i64).clamp(2, 20));
     // Spending: check there's enough, and work out the new value.
     let spend = match &def.cost {
         None => None,
         Some(c) => {
             let amount = eng.eval_src(&c.amount).num();
             let path = fill(&mut eng, &c.path);
-            let (on_actor, rel) = match path.strip_prefix("actor.") {
-                Some(p) => (true, p.to_string()),
-                None => (idx.is_none(), path.clone()),
+            // Where it's spent from: the actor (`actor.…`), another of the actor's items
+            // (`item[class:Wizard].…`, or `item[class:].…` for the first with enough), or this item.
+            enum From {
+                Actor,
+                Item(usize),
+            }
+            let (from, rel) = if let Some(p) = path.strip_prefix("actor.") {
+                (From::Actor, p.to_string())
+            } else if let Some(rest) = path.strip_prefix("item[") {
+                let (sel, after) = rest.split_once("].").ok_or_else(|| format!("{path}: write item[kind:name].path"))?;
+                let (kind, name) = sel.split_once(':').unwrap_or((sel, ""));
+                let (kind, name) = (kind.trim(), name.trim());
+                let segs: Vec<String> = after.split('.').map(String::from).chain(["value".to_string()]).collect();
+                let pick = actor.items.iter().enumerate().find(|(i, it)| {
+                    it.kind == kind && (if name.is_empty() { eng.item_value(*i, &segs).num() >= amount } else { it.name.eq_ignore_ascii_case(name) })
+                });
+                match pick {
+                    Some((i, _)) => (From::Item(i), after.to_string()),
+                    None if name.is_empty() => return Err(format!("No {kind} has {} left", after.replace('.', " "))),
+                    None => return Err(format!("{} has no {name} {kind}", actor.name)),
+                }
+            } else {
+                (match idx { Some(i) => From::Item(i), None => From::Actor }, path.clone())
             };
             let segs: Vec<String> = rel.split('.').map(String::from).collect();
             let value_path = [segs.clone(), vec!["value".into()]].concat();
-            let have = if on_actor { eng.resolve(&value_path) } else { eng.item_value(idx.unwrap(), &value_path) };
+            let have = match from { From::Actor => eng.resolve(&value_path), From::Item(i) => eng.item_value(i, &value_path) };
             if have.num() < amount {
                 return Err(format!("Not enough {} left", rel.replace('.', " ")));
             }
             let mut patch = Value::Object(Map::new());
             let mut errs = vec![];
             set_at(&mut patch, &value_path, Val::Num(have.num() - amount).to_json(), &mut errs);
-            Some((if on_actor { None } else { item_id.map(String::from) }, json_obj("data", patch)))
+            Some((match from { From::Actor => None, From::Item(i) => Some(actor.items[i].id.clone()) }, json_obj("data", patch)))
         }
     };
     let then = def
@@ -825,7 +964,7 @@ pub fn plan_action(actor: &Actor, rules: &Rules, item_id: Option<&str>, action: 
         .iter()
         .filter_map(|id| tr.actions.iter().find(|a| &a.id == id).map(|a| (a.id.clone(), a.label.clone())))
         .collect();
-    Ok(PlannedAction { label: def.label.clone(), kind: def.kind.clone(), formula, mode, then, spend })
+    Ok(PlannedAction { label: def.label.clone(), kind: def.kind.clone(), formula, mode, then, spend, threat, confirm: def.confirm })
 }
 
 /// Fill a roll formula: `{formula}` blocks are evaluated, then `@paths` replaced
@@ -1069,6 +1208,23 @@ mod tests {
         assert_eq!(at(&d.values, "items.rapier.attack"), 8);
         a.items[1].data["equipped"] = json!(false);
         assert_eq!(at(&derive(&a, &rules()).values, "ac"), 14, "unequipped armour stops counting");
+    }
+
+    #[test]
+    fn bonuses_of_one_type_dont_stack() {
+        let mut a = hero();
+        a.items.truncate(1);
+        let base = at(&derive(&a, &rules()).values, "ac").as_f64().unwrap();
+        let add = |ty: Option<&str>, v: &str| json!({ "path": "ac", "mode": "add", "value": v, "type": ty });
+        a.effects.push(serde_json::from_value(json!({ "name": "Spells", "changes": [
+            add(Some("deflection"), "2"), add(Some("deflection"), "1"),   // only the +2
+            add(Some("dodge"), "1"), add(Some("dodge"), "1"),             // dodge stacks (listed in `stacking`)
+            add(None, "1"), add(None, "1"),                                // untyped stacks
+            add(Some("deflection"), "-1"),                                 // penalties always count
+        ] })).unwrap());
+        let mut r = rules();
+        r.stacking = vec!["dodge".into()];
+        assert_eq!(at(&derive(&a, &r).values, "ac").as_f64().unwrap() - base, 5.0);
     }
 
     #[test]

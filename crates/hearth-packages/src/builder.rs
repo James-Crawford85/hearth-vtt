@@ -47,6 +47,9 @@ pub struct Blueprint {
     /// Character creation steps (e.g. setting ability scores), with the methods offered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub creation: Vec<hearth_core::creation::CreationStep>,
+    /// Bonus types that stack with themselves (e.g. dodge); other typed bonuses don't.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stacking: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,6 +124,15 @@ pub struct Node {
     pub then: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
+    /// Attack actions: the lowest natural d20 that threatens a critical (a formula; default 20).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub threat: String,
+    /// Attack actions: threats need a confirmation roll.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub confirm: bool,
+    /// Damage actions: on a critical, roll the damage this many times instead of doubling the dice.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub crit_mult: String,
     /// Actions: only offered when this is true. Effects: only apply when this is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
@@ -186,6 +198,7 @@ pub struct Node {
     pub layouts: Vec<Value>,
     /// Item types that give features: the advancement a new item of the type starts with
     /// (a class's hit points every level, ability points every 4 levels…), as grants.
+    /// Actor types: grants by total level across all classes (a feat every odd level).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advancement: Vec<Value>,
     /// Types: the id of the layout sheets use unless an actor picks another (empty: the first).
@@ -201,6 +214,9 @@ pub struct Node {
     /// Item types: the number field that counts levels (classes level up).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub levels: Option<String>,
+    /// Item types: how the item forge prices, checks and crafts them (see `hearth_core::forge`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forge: Option<hearth_core::forge::Forge>,
     /// Not shown on the sheet (still in the data and formulas).
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
@@ -297,6 +313,18 @@ pub fn compile(bp: &Blueprint) -> Compiled {
                 "none" if is_item => {}
                 "none" => c.errors.push(format!("{name}: actors always need a sheet")),
                 other => c.errors.push(format!("{name}: unknown sheet setting \"{other}\"")),
+            }
+            // Actor types: grants by total level (a feat every odd level…).
+            if !is_item {
+                for (i, g) in t.advancement.iter().enumerate() {
+                    match serde_json::from_value::<hearth_core::advance::Grant>(g.clone()) {
+                        Ok(g) => c.def.advancement.push(g),
+                        Err(e) => c.errors.push(format!("{name}: character advancement row {}: {e}", i + 1)),
+                    }
+                }
+            }
+            if is_item {
+                c.def.forge = t.forge.clone();
             }
             // Levels: a number field directly in the type.
             if is_item && (t.grants || t.levels.is_some()) {
@@ -545,6 +573,9 @@ impl TypeCompiler {
                     then: n.then.clone(),
                     cost: n.cost.clone().filter(|c| !c.path.trim().is_empty()),
                     when: n.when.clone().filter(|w| !w.trim().is_empty()),
+                    threat: (!n.threat.trim().is_empty()).then(|| n.threat.clone()),
+                    confirm: n.confirm,
+                    crit_mult: (!n.crit_mult.trim().is_empty()).then(|| n.crit_mult.clone()),
                 });
             }
             NodeKind::Effect => {
@@ -592,6 +623,12 @@ pub fn merge_type(built: TypeDef, hand: Option<&TypeDef>) -> TypeDef {
         out.levels = hand.levels.clone();
     }
     out.grants |= hand.grants;
+    if !hand.advancement.is_empty() {
+        out.advancement = hand.advancement.clone();
+    }
+    if hand.forge.is_some() {
+        out.forge = hand.forge.clone();
+    }
     out
 }
 

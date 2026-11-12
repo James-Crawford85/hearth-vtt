@@ -37,6 +37,8 @@ pub enum GrantKind {
     Choice,
     Points,
     Roll,
+    /// The player picks `count` items of a type (`from`, e.g. any feat) from what they can take.
+    Pick,
 }
 
 /// Something an item gives at a level (classes) or when added (others).
@@ -88,10 +90,112 @@ pub struct Grant {
     /// Classes: a repeating grant stops after this level (0: no end).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub until: u32,
+    /// `points`: the amount as a formula, used instead of `amount` when set
+    /// (e.g. `@item.skill_ranks + @abilities.int.mod`). Worked out with the new level in place.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub amount_formula: String,
+    /// `points`: the cap as a formula, used instead of `cap` when set (e.g. `@level`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cap_formula: String,
+    /// `pick`: the item type to pick from (e.g. `feat`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    /// `pick`: only items whose data matches (field → value, or a list of allowed values),
+    /// e.g. `{ "feat_type": "combat" }` for a fighter's bonus feats.
+    #[serde(default, rename = "where", skip_serializing_if = "Map::is_empty")]
+    pub only_where: Map<String, Value>,
+    /// Only given when this formula is true at that step (with the new level in place), e.g.
+    /// `@favored_class == @item.name` for a favored class bonus.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub when: String,
+}
+
+impl Grant {
+    /// Whether an item can be picked for this grant (its type and the `where` fields).
+    pub fn allows(&self, it: &Item) -> bool {
+        (self.from.is_empty() || it.kind == self.from)
+            && self.only_where.iter().all(|(k, want)| {
+                let have = it.data.get(k).unwrap_or(&Value::Null);
+                match want {
+                    Value::Array(options) => options.contains(have),
+                    w => w == have,
+                }
+            })
+    }
 }
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+/// A points grant's amount and cap here, with formulas worked out (`eng`'s `@item` is the advancing item).
+pub fn points_limits(g: &Grant, eng: &mut Engine) -> (i64, Option<i64>) {
+    let amount = if g.amount_formula.trim().is_empty() { g.amount } else { eng.eval_src(&g.amount_formula).num().floor() as i64 };
+    let cap = if g.cap_formula.trim().is_empty() { g.cap } else { Some(eng.eval_src(&g.cap_formula).num().floor() as i64) };
+    (amount.max(0), cap)
+}
+
+/// Total level: the levels of all the actor's items that have levels (classes).
+pub fn total_level(actor: &Actor, rules: &Rules) -> u32 {
+    actor.items.iter().filter_map(|i| levels_key(rules, &i.kind).map(|k| level_of(i, k))).sum()
+}
+
+/// The actor type's own grants that come at this total level.
+pub fn actor_grants_at(rules: &Rules, kind: &str, total: u32) -> Vec<Grant> {
+    rules.actor_types.get(kind).map(|t| t.advancement.iter().filter(|g| g.comes_at(total)).cloned().collect()).unwrap_or_default()
+}
+
+/// What a step will ask for, worked out on the server: the step's level, the total
+/// level it reaches, the actor type's grants at that total, and every points grant's
+/// amount and cap (grant id → `{ amount, cap }`), for the level-up dialog.
+pub fn plan(actor: &Actor, rules: &Rules, item_id: Option<&str>, add: Option<&Item>) -> Result<Value, String> {
+    let (target, is_new) = match (item_id, add) {
+        (Some(id), _) => (actor.items.iter().find(|i| i.id == id).cloned().ok_or("That item isn't on this character")?, false),
+        (None, Some(a)) => (a.clone(), true),
+        _ => return Err("Pick something to level up or add".into()),
+    };
+    let lkey = levels_key(rules, &target.kind).map(String::from);
+    let level = lkey.as_deref().map_or(1, |k| level_of(&target, k) + 1);
+    let total = total_level(actor, rules) + u32::from(lkey.is_some());
+    let extra = if lkey.is_some() { actor_grants_at(rules, &actor.kind, total) } else { vec![] };
+    let (view, idx) = after_view(actor, &target, is_new, lkey.as_deref(), level);
+    let mut eng = Engine::new(&view, rules);
+    eng.set_item(Some(idx));
+    let mut limits = Map::new();
+    let subs = actor.items.iter().filter(|i| i.flags.pointer("/core/granted_by/item").and_then(Value::as_str) == Some(target.id.as_str()));
+    let all = target.advancement.iter().chain(subs.flat_map(|i| i.advancement.iter())).chain(extra.iter());
+    let mut off = vec![];
+    for g in all {
+        if !g.when.trim().is_empty() && !eng.eval_src(&g.when).truthy() {
+            off.push(g.id.clone());
+        }
+        if g.kind == GrantKind::Points {
+            let (amount, cap) = points_limits(g, &mut eng);
+            limits.insert(g.id.clone(), json!({ "amount": amount, "cap": cap }));
+        }
+    }
+    let label = rules.actor_types.get(&actor.kind).map(|_| format!("Level {total}")).unwrap_or_default();
+    Ok(json!({ "level": level, "total_level": total, "extra": extra, "extra_label": label, "limits": limits, "off": off }))
+}
+
+/// The actor as it will be after this step (the item added, at its new level), and the item's index.
+fn after_view(actor: &Actor, target: &Item, is_new: bool, lkey: Option<&str>, level: u32) -> (Actor, usize) {
+    let mut view = actor.clone();
+    let mut t = target.clone();
+    if let Some(k) = lkey {
+        set_data(&mut t, k, json!(level));
+    }
+    match view.items.iter().position(|i| i.id == t.id) {
+        Some(i) if !is_new => {
+            view.items[i] = t;
+            (view, i)
+        }
+        _ => {
+            view.items.push(t);
+            let i = view.items.len() - 1;
+            (view, i)
+        }
+    }
 }
 
 impl Grant {
@@ -131,6 +235,9 @@ pub struct AdvanceRequest {
     /// `roll` grants: grant id → `"average"` to take the average (otherwise rolled).
     #[serde(default)]
     pub rolls: BTreeMap<Id, String>,
+    /// `pick` grants: grant id → the items picked (documents from the Items directory or a collection).
+    #[serde(default)]
+    pub picks: BTreeMap<Id, Vec<Item>>,
 }
 
 /// The ops a level-up makes, and a summary for chat.
@@ -204,11 +311,26 @@ pub fn advance(
     let mut log_points: Map<String, Value> = Map::new();
     let mut log_rolls: Vec<Value> = vec![];
 
+    // Formulas in points grants see the actor after this step (the new level in place).
+    let (after, after_idx) = after_view(actor, &target, is_new, lkey.as_deref(), level);
+    let mut limits_eng = Engine::new(&after, rules);
+    limits_eng.set_item(Some(after_idx));
+
     // This item's grants, then those of items it gave that advance with it (subclasses).
     let mut sources: Vec<(Item, bool)> = vec![(target.clone(), lkey.is_some())];
     for it in &actor.items {
         if it.flags.pointer("/core/granted_by/item").and_then(Value::as_str) == Some(target.id.as_str()) && !it.advancement.is_empty() {
             sources.push((it.clone(), true));
+        }
+    }
+    // The actor type's grants at the total level this reaches (a feat every odd level…),
+    // as one more source that's applied whole. What they give comes with this class level.
+    if lkey.is_some() {
+        let total = total_level(actor, rules) + 1;
+        let extra = actor_grants_at(rules, &actor.kind, total);
+        if !extra.is_empty() {
+            let advancement = extra.into_iter().map(|mut g| { g.level = 0; g.every = 0; g.until = 0; g }).collect();
+            sources.push((Item { id: new_id(), name: format!("Level {total}"), advancement, ..Default::default() }, false));
         }
     }
     let mut i = 0;
@@ -220,22 +342,42 @@ pub fn advance(
         let grants: Vec<&Grant> = if fresh { src.advancement.iter().filter(|g| g.came_by(level)).collect() } else { grants_at(&src, level, leveled) };
         for g in grants {
             let name = if g.label.is_empty() { src.name.clone() } else { g.label.clone() };
+            if !g.when.trim().is_empty() && !limits_eng.eval_src(&g.when).truthy() {
+                continue;
+            }
             match g.kind {
-                GrantKind::Items | GrantKind::Choice => {
-                    let picked: Vec<&Item> = if g.kind == GrantKind::Items {
-                        g.items.iter().collect()
-                    } else {
-                        let want = g.count.max(1) as usize;
-                        let idx = req.choices.get(&g.id).cloned().unwrap_or_default();
-                        let mut seen = idx.clone();
-                        seen.sort_unstable();
-                        seen.dedup();
-                        if seen.len() != want.min(g.items.len()) || seen.iter().any(|&n| n >= g.items.len()) {
-                            return Err(format!("{name}: pick {want}"));
+                GrantKind::Items | GrantKind::Choice | GrantKind::Pick => {
+                    let picked: Vec<Item> = match g.kind {
+                        GrantKind::Items => g.items.clone(),
+                        GrantKind::Choice => {
+                            let want = g.count.max(1) as usize;
+                            let idx = req.choices.get(&g.id).cloned().unwrap_or_default();
+                            let mut seen = idx.clone();
+                            seen.sort_unstable();
+                            seen.dedup();
+                            if seen.len() != want.min(g.items.len()) || seen.iter().any(|&n| n >= g.items.len()) {
+                                return Err(format!("{name}: pick {want}"));
+                            }
+                            seen.iter().map(|&n| g.items[n].clone()).collect()
                         }
-                        seen.iter().map(|&n| &g.items[n]).collect()
+                        _ => {
+                            let want = g.count.max(1) as usize;
+                            let chosen = req.picks.get(&g.id).cloned().unwrap_or_default();
+                            if chosen.len() != want {
+                                return Err(format!("{name}: pick {want}"));
+                            }
+                            if let Some(bad) = chosen.iter().find(|it| !g.allows(it)) {
+                                return Err(format!("{name}: {} can't be picked here", bad.name));
+                            }
+                            let mut names: Vec<&str> = chosen.iter().map(|i| i.name.as_str()).collect();
+                            names.sort_unstable();
+                            if names.windows(2).any(|w| w[0] == w[1]) {
+                                return Err(format!("{name}: pick {want} different ones"));
+                            }
+                            chosen
+                        }
                     };
-                    for it in picked {
+                    for it in &picked {
                         let mut copy = it.clone();
                         copy.id = new_id();
                         let mut flags = if copy.flags.is_object() { copy.flags.clone() } else { json!({}) };
@@ -252,6 +394,8 @@ pub fn advance(
                 }
                 GrantKind::Points => {
                     let field = if g.field.is_empty() { "value" } else { g.field.as_str() };
+                    let (amount, cap) = points_limits(g, &mut limits_eng);
+                    let g = &Grant { amount, cap, ..g.clone() };
                     // What can be raised: the actor's entries in the list (only the allowed ones), up to the caps.
                     let list_ptr = format!("/{}", g.path.replace('.', "/"));
                     let entries: Vec<String> = actor_data.pointer(&list_ptr).and_then(Value::as_object)
@@ -644,6 +788,94 @@ mod tests {
         assert!(run(&mut w, pick(&[("arcana", 1)]), 0).unwrap_err().contains("arcana isn't one of the choices"));
         run(&mut w, pick(&[("athletics", 1)]), 0).unwrap();
         assert_eq!(w.actors["a"].data["skills"]["athletics"]["prof"], 1);
+    }
+
+    #[test]
+    fn formula_points_character_levels_and_picks() {
+        // Skill ranks: class ranks + Int mod per level, no skill above the total level.
+        // A feat at every odd total level, picked from any feat; it goes with the class level.
+        let r: Rules = serde_json::from_value(json!({
+            "item_types": { "class": { "levels": "levels" }, "feat": {} },
+            "actor_types": { "character": {
+                "formulas": { "abilities.*.mod": "floor((@this.value - 10) / 2)", "level": "sum_items('class', 'levels')" },
+                "advancement": [ { "id": "feat", "level": 1, "every": 2, "kind": "pick", "from": "feat", "label": "Feat" } ] } }
+        })).unwrap();
+        let rogue: Item = serde_json::from_value(json!({ "id": "rogue", "name": "Rogue", "kind": "class", "data": { "levels": 0, "ranks": 8 },
+            "advancement": [ { "id": "sk", "level": 1, "every": 1, "kind": "points", "path": "skills", "field": "ranks",
+                "amount_formula": "@item.ranks + @abilities.int.mod", "cap_formula": "@level" } ] })).unwrap();
+        let mut w = World::new("T", "x");
+        w.actors.insert("a".into(), serde_json::from_value(json!({ "id": "a", "name": "Ann", "kind": "character",
+            "data": { "abilities": { "int": { "value": 14 } }, "skills": { "stealth": { "ranks": 0 }, "climb": { "ranks": 0 } } } })).unwrap());
+        let a = w.actors["a"].clone();
+        let p = plan(&a, &r, None, Some(&rogue)).unwrap();
+        assert_eq!(p["limits"]["sk"], json!({ "amount": 10, "cap": 1 }), "8 + Int 2, and level 1 caps each skill at 1");
+        assert_eq!(p["extra"][0]["id"], "feat", "a feat at level 1");
+        let feat = |n: &str| -> Item { serde_json::from_value(json!({ "id": n, "name": n, "kind": "feat", "data": {} })).unwrap() };
+        let go = |w: &mut World, req: AdvanceRequest| -> Result<Advance, String> {
+            let a = w.actors["a"].clone();
+            let adv = advance(&a, &r, &req, &mut |_| Ok(1))?;
+            for op in &adv.ops {
+                w.apply(op).unwrap();
+            }
+            Ok(adv)
+        };
+        let pts = |n: i64| [("sk".to_string(), [("stealth".to_string(), n.min(1)), ("climb".to_string(), n.min(1))].into_iter().collect())].into_iter().collect();
+        // Only 2 points can really go anywhere at level 1 (two skills, cap 1).
+        let mut req = AdvanceRequest { add: Some(rogue.clone()), points: pts(1), ..Default::default() };
+        assert!(go(&mut w, req.clone()).unwrap_err().contains("Feat: pick 1"));
+        req.picks.insert("feat".into(), vec![feat("Toughness"), feat("Rogue")]);
+        assert!(go(&mut w, req.clone()).unwrap_err().contains("pick 1"));
+        req.picks.insert("feat".into(), vec![feat("Toughness")]);
+        go(&mut w, req).unwrap();
+        let has = |w: &World, n: &str| w.actors["a"].items.iter().any(|i| i.name == n);
+        assert!(has(&w, "Toughness"));
+        assert_eq!(w.actors["a"].data["skills"]["stealth"]["ranks"], 1);
+        // Level 2: no feat; the cap is now 2.
+        let id = w.actors["a"].items.iter().find(|i| i.kind == "class").unwrap().id.clone();
+        let a = w.actors["a"].clone();
+        let p = plan(&a, &r, Some(&id), None).unwrap();
+        assert_eq!((p["limits"]["sk"]["cap"].clone(), p["extra"].as_array().unwrap().len()), (json!(2), 0));
+        go(&mut w, AdvanceRequest { item_id: Some(id.clone()), points: pts(1), ..Default::default() }).unwrap();
+        // Level 3: another feat; taking level 3 back takes it away again.
+        let mut req = AdvanceRequest { item_id: Some(id.clone()), points: pts(1), ..Default::default() };
+        req.picks.insert("feat".into(), vec![feat("Dodge")]);
+        go(&mut w, req).unwrap();
+        assert!(has(&w, "Dodge"));
+        let a = w.actors["a"].clone();
+        for op in regress(&a, &r, &id).unwrap().ops {
+            w.apply(&op).unwrap();
+        }
+        assert!(!has(&w, "Dodge") && has(&w, "Toughness"));
+    }
+
+    #[test]
+    fn grants_only_when_their_formula_holds() {
+        // A favored class bonus: +1 hit point per level, only in the favored class.
+        let r: Rules = serde_json::from_value(json!({ "item_types": { "class": { "levels": "levels" } } })).unwrap();
+        let cls = |name: &str| -> Item { serde_json::from_value(json!({ "id": name, "name": name, "kind": "class", "data": { "levels": 0 },
+            "advancement": [ { "id": "fcb", "level": 1, "every": 1, "kind": "roll", "formula": "1", "path": "favored_hp", "when": "@favored == @item.name" } ] })).unwrap() };
+        let mut w = World::new("T", "x");
+        w.actors.insert("a".into(), serde_json::from_value(json!({ "id": "a", "name": "Ann", "kind": "c", "data": { "favored": "Rogue" } })).unwrap());
+        for name in ["Rogue", "Wizard"] {
+            let a = w.actors["a"].clone();
+            let p = plan(&a, &r, None, Some(&cls(name))).unwrap();
+            assert_eq!(p["off"].as_array().unwrap().is_empty(), name == "Rogue", "{name}");
+            for op in advance(&a, &r, &AdvanceRequest { add: Some(cls(name)), ..Default::default() }, &mut |_| Ok(1)).unwrap().ops {
+                w.apply(&op).unwrap();
+            }
+        }
+        let got = |n: &str| w.actors["a"].items.iter().find(|i| i.name == n).unwrap().data.get("favored_hp").cloned();
+        assert_eq!((got("Rogue"), got("Wizard")), (Some(json!([1])), None));
+    }
+
+    #[test]
+    fn picks_only_where_the_data_matches() {
+        let g: Grant = serde_json::from_value(json!({ "kind": "pick", "from": "feat", "where": { "feat_type": ["combat", "critical"] } })).unwrap();
+        let feat = |t: &str| -> Item { serde_json::from_value(json!({ "id": "x", "name": "X", "kind": "feat", "data": { "feat_type": t } })).unwrap() };
+        assert!(g.allows(&feat("combat")) && g.allows(&feat("critical")));
+        assert!(!g.allows(&feat("general")), "a fighter's bonus feat must be a combat feat");
+        let spell: Item = serde_json::from_value(json!({ "id": "s", "name": "S", "kind": "spell", "data": { "feat_type": "combat" } })).unwrap();
+        assert!(!g.allows(&spell), "and a feat at all");
     }
 
     #[test]

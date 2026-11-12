@@ -41,6 +41,13 @@ Item types can **give features**: tick that in the type's settings (the Advancem
 | Choose from items | The player picks some | Fighting style: Archery or Defense |
 | Spend points | The player raises entries of a list (optionally **only** some of them) | Ability score improvement: +2, at most 2 on one, none above 20; Fighter skills: 2 of Athletics, Perception… |
 | Roll | Rolls dice (or takes the average) and records the result in a list on the item | Hit points: `1d{@item.hit_die}`, recorded in `hp_rolls` |
+| Pick any of a type | The player picks from every item of a type they can take (collections and the Items directory), optionally only those whose fields match (**Only where** `feat_type = combat`) | A feat: any feat; a fighter's bonus feat: a combat feat |
+
+Any grant can have an **Only when** formula, checked with the new level in place: it's skipped when false (a full hit die only when `@level == 1`; a favored class bonus only when `@favored_class == @item.name`).
+
+A points grant's **Points** and **Cap** can be formulas, worked out with the new level in place: skill ranks of `@item.skill_ranks + @abilities.int.mod` per level, none above `@level`. The server works them out and the level-up dialog shows the result.
+
+**Advancement by character level.** An actor type (in the builder: select the type) can have grants of its own by *total* level, across all classes: a feat at levels 1, 3, 5… (level 1, again every 2), +1 to an ability every 4 levels. They come in the dialog of whichever class level reaches that total, and go if that level is taken back.
 
 A points grant asks only for as many points as can really be spent (its amount, limited by the allowed entries and caps). If the actor has nothing to raise, such as a monster with no skills list taking a Fighter level, the step is skipped and says so, rather than blocking the level.
 
@@ -68,6 +75,8 @@ Under **Rules → Character creation**, a system lists the steps a new character
 | Point buy | Spend a budget; each score costs what the table says | points (27), lowest and highest (8–15), the cost table |
 | Roll dice | Roll a formula some number of times, then place the results (or **in order**) | the dice (`4d6kh3`, `3d6`…), how many rolls |
 | Enter your own | Type them in | lowest and highest (3–18) |
+
+A step can be **for** some actor types only (tick them; none ticked means every type), so monsters don't get asked for ability scores. The "New character? Add their class…" prompt follows the same choice.
 
 **Each world chooses** (GM: Settings → **🎲 Character creation…**): which methods players may use, the default, any of the numbers above (e.g. **32 points** instead of 27; blank uses the system's), and whether scores lock once set.
 

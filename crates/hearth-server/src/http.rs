@@ -133,6 +133,45 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// `POST /api/advance/plan` `{ actor_id, item_id?, add? }`: what a level up (or adding a
+/// class, ancestry…) will ask for, worked out on the server: the level, the total level,
+/// the character's own grants at that total, and points grants' amounts and caps.
+pub async fn advance_plan(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+    let token = headers.get("x-hearth-session").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let user = state.session_user(token).await.ok_or((StatusCode::UNAUTHORIZED, "Join the game first".into()))?;
+    let actor_id = body.get("actor_id").and_then(Value::as_str).unwrap_or_default();
+    let world = state.world.read().await;
+    let actor = world.actors.get(actor_id).ok_or((StatusCode::NOT_FOUND, "No such actor".into()))?;
+    if !world.owns_actor(&user, actor_id) {
+        return Err((StatusCode::FORBIDDEN, "You can only level up characters you own".into()));
+    }
+    let add: Option<hearth_core::Item> = match body.get("add").filter(|v| !v.is_null()) {
+        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?),
+        None => None,
+    };
+    let item_id = body.get("item_id").and_then(Value::as_str);
+    hearth_core::advance::plan(actor, &state.rules(), item_id, add.as_ref()).map(Json).map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+/// `POST /api/forge/preview` `{ actor_id?, item, candidates? }`: the item's price, the
+/// rules it breaks, which candidate parts fit, and crafting numbers for the actor.
+pub async fn forge_preview(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+    let user = session_of(&state, &headers).await?;
+    state.forge_preview(&user, &body).await.map(Json).map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+/// `POST /api/forge/make` `{ actor_id?, item, mode: "create" | "craft" }`: make the item.
+pub async fn forge_make(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+    let user = session_of(&state, &headers).await?;
+    state.forge_make(&user, &body).await.map(Json).map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+/// The user behind a request's `x-hearth-session` header, or an error.
+async fn session_of(state: &AppState, headers: &HeaderMap) -> Result<hearth_core::User, (StatusCode, String)> {
+    let token = headers.get("x-hearth-session").and_then(|v| v.to_str().ok()).unwrap_or("");
+    state.session_user(token).await.ok_or((StatusCode::UNAUTHORIZED, "Join the game first".into()))
+}
+
 /// The GM behind a request's `x-hearth-session` header, or an error.
 async fn gm_of(state: &AppState, headers: &HeaderMap) -> Result<hearth_core::User, (StatusCode, String)> {
     let token = headers.get("x-hearth-session").and_then(|v| v.to_str().ok()).unwrap_or("");

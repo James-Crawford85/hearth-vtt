@@ -36,6 +36,16 @@ pub struct CreationStep {
     pub field: String,
     #[serde(default)]
     pub methods: Vec<ScoreMethod>,
+    /// The actor types that go through this step (e.g. characters, not monsters). Empty: all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actor_types: Vec<String>,
+}
+
+impl CreationStep {
+    /// Whether actors of this type go through the step.
+    pub fn applies_to(&self, kind: &str) -> bool {
+        self.actor_types.is_empty() || self.actor_types.iter().any(|k| k == kind)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

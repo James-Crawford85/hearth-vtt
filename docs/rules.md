@@ -39,7 +39,8 @@ The key is where the value goes (`derived.ac`, `derived.abilities.str.mod`…). 
 | `table('name', key)` | Look up a table |
 | `count_items('kind')`, `sum_items('kind', 'path')`, `max_items(…)` | Over the actor's items, e.g. total level across classes |
 | `has_status('poisoned')` | Whether a condition is on |
-| `len`, `has`, `if(c, a, b)`, `num`, `text` | Odds and ends |
+| `has_item('spell', 'Fireball')` | Whether the actor has an item of that kind and name |
+| `len`, `has`, `if(c, a, b)`, `num`, `text`, `replace(text, from, to)` | Odds and ends |
 
 Missing values count as 0, so a typo gives a wrong number rather than a broken sheet. Problems are listed for the GM at the bottom of the automatic sheet (and in `derived._errors`).
 
@@ -113,7 +114,9 @@ when = "@item.prepared"                                 # only when this is true
 - **Rolls**: `@paths` are filled in (text like `1d8` is kept as dice), then the server rolls.
 - **Advantage**: for `attack`, `check` and `save` actions, the first `d20` becomes `2d20kh1` (or `kl1`). It's the player's choice (Alt-click / Ctrl-click on sheets), otherwise it comes from the actor's `mods.<kind>.advantage` and `mods.<kind>.disadvantage` values (both on cancels out). Conditions usually set these.
 - **Crits**: a natural 20 on an attack marks the follow-ups as critical; critical damage doubles the dice (`1d8 + 3` → `2d8 + 3`).
-- **Costs**: `cost.path` is a resource on the item (`uses`), or on the actor with `actor.` in front. Without enough left, the action is refused.
+  - An attack's `threat` (a formula) widens the range: `19` threatens on 19–20. With `confirm = true`, a threat isn't a critical yet: the card offers **Confirm critical**, a second roll of the attack whose follow-ups are critical.
+  - A damage action's `crit_mult` (a formula, e.g. `3`) rolls the damage that many times on a critical instead of doubling the dice: `(1d12 + 3) + (1d12 + 3) + (1d12 + 3)`.
+- **Costs**: `cost.path` is a resource on the item (`uses`), on the actor with `actor.` in front, or on another of the actor's items: `item[class:Wizard].slots.l3` (a spell spending its class's slot), or `item[class:].slots.l3` for the first class with one left. Without enough left, the action is refused.
 - **Levels**: `level` in the options (upcasting) is `@cast_level`.
 - **Uses that grow**: an item's resource can carry its own max formula, `uses.formula` (e.g. `@abilities.cha.mod`, `@level >= 6 ? 3 : 2`, `@prof`). It beats the type's formula, is worked out live (`derived.items.<id>.uses.max`), and rests refill to it. Sheets show a box for it under the item's uses.
 - **When**: actions whose `when` is false right now are listed in `derived._off` (actor actions) and `derived.items.<id>._off` (item actions); sheets hide their buttons.
@@ -137,7 +140,35 @@ An effect is a list of changes. Actors carry effects (`actor.effects`), and so d
 | `multiply` | Multiplies | Slowed: speed × 0.5 |
 | `add` (default) | Adds | Shield: AC + 2 |
 
-They apply in that order, so the base is chosen first (armour or unarmoured), then bonuses are added. `requires` is a formula checked against the item (it sees values before effects). Effects can target any path, including data values that formulas read (a belt's Strength feeds the Strength modifier).
+They apply in that order, so the base is chosen first (armour or unarmoured), then bonuses are added.
+
+**Bonus types.** An `add` change can name a type: `{ "path": "ac_bonus.deflection", "mode": "add", "value": "2", "type": "deflection" }`. Bonuses of the same type on the same value don't stack: only the biggest counts (a ring of protection +1 and a cloak +2 give +2). Untyped bonuses and all penalties (negative values) always add up, and so do types the system lists as stacking (`stacking = ["dodge", "circumstance"]` at the top of `hearth.toml`, or in the builder under Rules › Rests and bonuses). `requires` is a formula checked against the item (it sees values before effects). Effects can target any path, including data values that formulas read (a belt's Strength feeds the Strength modifier).
+
+**Effects on the item itself.** A change whose path starts with `item.` changes the item the effect belongs to rather than its owner: `{ "path": "item.damage", "mode": "add", "value": "'1d6'" }` makes a weapon's damage `1d8+1d6`. Items can carry **parts** (`item.parts`): other items attached to them, such as a weapon's flaming ability or armor's mithral. A part's effects apply as if they were the item's own (`requires` sees the item as `@item`), and formulas can total them with `sum_parts('bonus')`, `max_parts('cl')`, `count_parts()` or `count_parts('part_type', 'material')`.
+
+## The item forge
+
+An item type can declare **forge** rules, and then the GM (and, if the world allows, players) can make items of that type in the forge: start from a base item, set its numbers (enhancement…), attach parts, and see the price and any broken rules as you go.
+
+```json
+"forge": {
+  "price": "@item.value + 2000 * (@item.enhancement + sum_parts('bonus')) * (@item.enhancement + sum_parts('bonus'))",
+  "parts": ["enchantment"],
+  "fits": "@part.applies_to == 'weapon'",
+  "checks": [ { "when": "@item.enhancement > 5", "message": "The enhancement bonus goes up to +5" } ],
+  "craft": { "feat": "'Craft Magic Arms and Armor'", "bonus": "@skills.spellcraft.total", "dc": "5 + 3 * @item.enhancement",
+             "cost": "@price / 2", "days": "ceil(@price / 1000)", "currency": "currency.gp" }
+}
+```
+
+- `name` (optional) suggests a name for what's being made (`'Wand of ' + parts('name')[0]`); the forge uses it until the maker types their own.
+- **Spells as parts.** A consumable can take a spell as its part: `replace(parts('roll')[0], '@spells.caster_level', text(@item.cl))` gives the spell's roll at the item's own caster level, for a Use button to roll.
+- `price`, `checks` and `craft` are formulas about the item (`@item…`, with its parts applied) and the crafter. `@price` is the worked-out price. `fits` decides which parts can go on it (`@part` is the part).
+- **Create** makes the item outright: on a character, or (GM, from the Items directory's ⚒ Forge) into the Items directory, folder *Forged*.
+- **Craft** makes it as a character: they need the feat (an item of that name) and the money; the money is spent, the check is rolled (`1d20 + bonus` against the DC), and the item is made on a success. The result goes to chat.
+- **Who may use it** is each world's choice (GM: Settings → **⚒ Item forge…**): GM only, players craft by the rules, or players make anything.
+
+Forge rules are edited in the system builder (select an item type: **Item forge**), and saved as the type's `forge` in `builder.json` (or written in `hearth.toml`). `nth_parts('level', 2)` gives the second-highest value among the parts, for prices that rank them (a staff's spells).
 
 **Conditions** are effects the system names, which players and the GM switch on and off:
 

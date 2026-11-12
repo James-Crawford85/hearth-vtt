@@ -383,7 +383,8 @@ export class Collections {
   giveItem(actorId, doc) {
     const actor = store.world.actors[actorId];
     if (!actor) return;
-    this.api.op({ op: 'item_create', actor_id: actorId, item: { id: '', name: doc.name, kind: doc.kind, img: doc.img ?? null, data: structuredClone(doc.data ?? {}), flags: structuredClone(doc.flags ?? {}) } }, rejectToast);
+    // The whole item: its effects (a ring's +2 AC) and advancement come too.
+    this.api.op({ op: 'item_create', actor_id: actorId, item: { id: '', name: doc.name, kind: doc.kind, img: doc.img ?? null, data: structuredClone(doc.data ?? {}), flags: structuredClone(doc.flags ?? {}), effects: structuredClone(doc.effects ?? []), advancement: structuredClone(doc.advancement ?? []), parts: structuredClone(doc.parts ?? []) } }, rejectToast);
     toast(`Gave ${doc.name} to ${actor.name}.`);
   }
 

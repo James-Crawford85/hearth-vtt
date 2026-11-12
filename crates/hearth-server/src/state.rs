@@ -1120,7 +1120,11 @@ impl AppState {
         } else {
             Some(hearth_dice::roll_with(&plan.formula, &|_| None, &mut rand_rng()).map_err(|e| format!("{}: {e}", plan.formula))?)
         };
-        let crit = plan.kind == "attack" && result.as_ref().is_some_and(|r| r.has_natural(20, 20));
+        // A natural roll in the threat range (20, or 19–20…) threatens a critical. Systems that
+        // confirm get a "Confirm critical" roll whose follow-ups are critical; others crit outright.
+        let threatens = plan.kind == "attack" && !options.confirming && result.as_ref().is_some_and(|r| (plan.threat..=20).any(|n| r.has_natural(20, n)));
+        let threat = threatens && plan.confirm;
+        let crit = (threatens && !plan.confirm) || (plan.kind == "attack" && options.confirming);
         let fumble = plan.kind == "attack" && result.as_ref().is_some_and(|r| r.has_natural(20, 1));
         let mut flags = match &result {
             Some(r) => self.scripts.read().unwrap().on_roll(r, Some(&actor)),
@@ -1128,10 +1132,10 @@ impl AppState {
         };
         let then: Vec<Value> = plan.then.iter().map(|(id, label)| serde_json::json!({ "id": id, "label": label })).collect();
         merge_patch(&mut flags, &serde_json::json!({ "core": { "action": {
-            "actor_id": actor_id, "item_id": item_id, "kind": plan.kind, "then": then,
-            "crit": crit || options.crit, "level": options.level,
+            "actor_id": actor_id, "item_id": item_id, "kind": plan.kind, "then": then, "action": action,
+            "crit": crit || options.crit, "threat": threat, "level": options.level,
         } } }));
-        if crit || fumble {
+        if (crit && !options.confirming) || fumble {
             merge_patch(&mut flags, &serde_json::json!({ "crit": crit, "fumble": fumble }));
         }
         let mut msg = Self::message(user, Some(actor_id.to_string()));
@@ -1144,6 +1148,11 @@ impl AppState {
         }
         if options.crit && plan.kind == "damage" {
             flavor.push_str(" (critical)");
+        }
+        if options.confirming {
+            flavor.push_str(" (confirming a critical)");
+        } else if threat {
+            flavor.push_str(" (critical threat)");
         }
         if result.is_none() {
             msg.content = format!("{} uses {flavor}.", actor.name);
@@ -1193,6 +1202,115 @@ impl AppState {
         Ok(())
     }
 
+    // ------------------------------------------------------------------ item forge
+
+    /// Who besides the GM may use the forge in this world: `off`, `craft` (by the
+    /// crafting rules: feat, check, money) or `free` (make anything).
+    fn forge_players(world: &World) -> String {
+        world.settings.pointer("/core/forge/players").and_then(Value::as_str).unwrap_or("off").to_string()
+    }
+
+    /// The forge's request: the item, the actor making or receiving it (if any), and
+    /// candidate parts to check. Checks the user may use the forge for that actor.
+    fn forge_request(world: &World, user: &User, body: &Value) -> Result<(Option<hearth_core::Actor>, hearth_core::Item, Vec<hearth_core::Item>), String> {
+        let gm = user.role == hearth_core::Role::Gm;
+        if !gm && Self::forge_players(world) == "off" {
+            return Err("Only the GM can use the forge in this world".into());
+        }
+        let actor = match body.get("actor_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            Some(id) => {
+                if !world.owns_actor(user, id) {
+                    return Err("You can only forge for characters you own".into());
+                }
+                Some(world.actors.get(id).ok_or("actor not found")?.clone())
+            }
+            None if gm => None,
+            None => return Err("Pick the character who makes it".into()),
+        };
+        let mut item: hearth_core::Item = serde_json::from_value(body.get("item").cloned().unwrap_or_default()).map_err(|e| format!("item: {e}"))?;
+        if item.name.trim().is_empty() {
+            item.name = "New item".into();
+        }
+        let candidates: Vec<hearth_core::Item> = body.get("candidates").cloned().map(serde_json::from_value).transpose().map_err(|e| format!("candidates: {e}"))?.unwrap_or_default();
+        Ok((actor, item, candidates))
+    }
+
+    fn stand_in() -> hearth_core::Actor {
+        serde_json::from_value(serde_json::json!({ "id": "", "name": "The forge", "kind": "", "data": {} })).expect("a stand-in actor")
+    }
+
+    /// Price, rule problems, fitting parts and crafting numbers for an item at the forge.
+    pub async fn forge_preview(&self, user: &User, body: &Value) -> Result<Value, String> {
+        let world = self.world.read().await;
+        let (actor, item, candidates) = Self::forge_request(&world, user, body)?;
+        let p = hearth_core::forge::preview(&actor.unwrap_or_else(Self::stand_in), &self.rules(), &item, &candidates)?;
+        let mut out = serde_json::to_value(&p).map_err(|e| e.to_string())?;
+        out["players"] = Value::from(Self::forge_players(&world));
+        Ok(out)
+    }
+
+    /// Make an item: `create` (the GM, or anyone where the world allows it freely) puts it on
+    /// the actor or, without one, in the Items directory; `craft` makes it as the actor by the
+    /// crafting rules, spending their money and rolling the check.
+    pub async fn forge_make(&self, user: &User, body: &Value) -> Result<Value, String> {
+        let gm = user.role == hearth_core::Role::Gm;
+        let craft = body.get("mode").and_then(Value::as_str) == Some("craft");
+        let (msg, result) = {
+            let mut world = self.world.write().await;
+            let (actor, mut item, _) = Self::forge_request(&world, user, body)?;
+            if !craft && !gm && Self::forge_players(&world) != "free" {
+                return Err("In this world, players make items by crafting them".into());
+            }
+            let rules = self.rules();
+            item.id = hearth_core::new_id();
+            let speaker = actor.as_ref().map(|a| a.id.clone());
+            let mut msg = Self::message(user, speaker);
+            let mut result = serde_json::json!({ "made": false });
+            match (&actor, craft) {
+                (Some(a), true) => {
+                    let mut rng = rand_rng();
+                    let (done, left) = hearth_core::forge::craft(a, &rules, &item, &mut |f: &str| {
+                        hearth_dice::roll_with(f, &|_| None, &mut rng).map(|r| r.total).map_err(|e| format!("{f}: {e}"))
+                    })?;
+                    let mut ops = vec![hearth_core::ops::Op::ActorUpdate { id: a.id.clone(), patch: serde_json::json!({ "data": hearth_core::forge::money_patch(&done.currency, left) }) }];
+                    if done.success {
+                        ops.push(hearth_core::ops::Op::ItemCreate { actor_id: a.id.clone(), item: item.clone() });
+                    }
+                    for mut op in ops {
+                        self.normalize(&world, user, &mut op)?;
+                        self.commit(&mut world, &user.id, op, 0)?;
+                    }
+                    msg.content = format!(
+                        "{} crafts {} ({} {} over {} day{}): check {} vs DC {} — {}.",
+                        a.name, item.name, done.cost, done.currency.rsplit('.').next().unwrap_or_default(), done.days, if done.days == 1.0 { "" } else { "s" }, done.total, done.dc,
+                        if done.success { "success" } else { "failed; the materials are spent" }
+                    );
+                    result = serde_json::json!({ "made": done.success, "result": done });
+                }
+                (None, true) => return Err("Pick the character who crafts it".into()),
+                (Some(a), false) => {
+                    let mut op = hearth_core::ops::Op::ItemCreate { actor_id: a.id.clone(), item: item.clone() };
+                    self.normalize(&world, user, &mut op)?;
+                    self.commit(&mut world, &user.id, op, 0)?;
+                    msg.content = format!("{} forges {} for {}.", user.name, item.name, a.name);
+                    result["made"] = Value::Bool(true);
+                }
+                (None, false) => {
+                    let mut doc = serde_json::to_value(&item).map_err(|e| e.to_string())?;
+                    doc["folder"] = Value::from("Forged");
+                    let lib: hearth_core::LibraryItem = serde_json::from_value(doc).map_err(|e| e.to_string())?;
+                    self.commit(&mut world, &user.id, hearth_core::ops::Op::LibraryItemCreate { item: lib }, 0)?;
+                    msg.content = format!("{} forges {} (in the Items directory, folder Forged).", user.name, item.name);
+                    result["made"] = Value::Bool(true);
+                }
+            }
+            self.dirty.store(true, Ordering::Release);
+            (msg, result)
+        };
+        self.post_chat(msg).await;
+        Ok(result)
+    }
+
     // ------------------------------------------------------------------ character creation
 
     /// A creation step of the world's system, the world's choices for it, and the
@@ -1208,6 +1326,9 @@ impl AppState {
         let reg = self.registry();
         let bp = reg.get(&world.system).and_then(|p| p.blueprint.as_ref()).ok_or("This system has no character creation")?;
         let step = bp.creation.iter().find(|s| s.id == step_id).cloned().ok_or_else(|| format!("No creation step \"{step_id}\""))?;
+        if !step.applies_to(&actor.kind) {
+            return Err(format!("{} doesn't go through {}", actor.name, if step.label.is_empty() { &step.id } else { &step.label }));
+        }
         let choice = world_choice(&step, world.settings.pointer(&format!("/core/creation/{step_id}")).unwrap_or(&Value::Null));
         let method = choice.methods.iter().find(|m| m.id == method_id).cloned().ok_or("The GM doesn't allow that method in this world")?;
         // The list's entries, ordered as the system builder lists them.
@@ -1306,29 +1427,43 @@ impl AppState {
     }
 
     /// Current and max of each of an actor's calculated-max resources (hit points…).
-    fn resource_maxes(&self, world: &World, actor_id: &str) -> Vec<(String, f64, f64)> {
+    /// The actor's resources with a calculated max (its own, and its items': a class's spell
+    /// slots, a feature's uses): (item id or None, path, value, max).
+    fn resource_maxes(&self, world: &World, actor_id: &str) -> Vec<(Option<Id>, String, f64, f64)> {
         let Some(actor) = world.actors.get(actor_id) else { return vec![] };
         let rules = self.rules();
-        let Some(tr) = rules.actor_types.get(&actor.kind) else { return vec![] };
         let at = |v: &Value, path: &str| path.split('.').fold(v, |v, k| &v[k]).as_f64();
-        tr.resources
-            .iter()
-            .filter(|(_, r)| r.max.is_some())
-            .map(|(path, _)| {
-                let value = at(&actor.data, &format!("{path}.value")).unwrap_or(0.0);
-                let max = at(&actor.derived, &format!("{path}.max")).unwrap_or(0.0);
-                (path.clone(), value, max)
-            })
-            .collect()
+        let mut out = vec![];
+        if let Some(tr) = rules.actor_types.get(&actor.kind) {
+            for (path, _) in tr.resources.iter().filter(|(_, r)| r.max.is_some()) {
+                out.push((None, path.clone(), at(&actor.data, &format!("{path}.value")).unwrap_or(0.0), at(&actor.derived, &format!("{path}.max")).unwrap_or(0.0)));
+            }
+        }
+        for item in &actor.items {
+            let Some(tr) = rules.item_types.get(&item.kind) else { continue };
+            for path in tr.resources.keys() {
+                let derived = &actor.derived["items"][&item.id];
+                if let Some(max) = at(derived, &format!("{path}.max")) {
+                    out.push((Some(item.id.clone()), path.clone(), at(&item.data, &format!("{path}.value")).unwrap_or(0.0), max));
+                }
+            }
+        }
+        out
     }
 
-    /// After a level up or down, a resource whose max changed moves its current
-    /// value by the same amount (never below 0 or above the new max).
-    fn follow_maxes(&self, world: &mut World, by: &Id, actor_id: &str, before: &[(String, f64, f64)]) -> Result<(), String> {
+    /// After a level up or down, a resource whose max changed moves its current value by
+    /// the same amount (never below 0 or above the new max). An item that's new (a class just
+    /// added) counts as having had a max of 0, so its slots start full.
+    fn follow_maxes(&self, world: &mut World, by: &Id, actor_id: &str, before: &[(Option<Id>, String, f64, f64)]) -> Result<(), String> {
         let after = self.resource_maxes(world, actor_id);
-        let mut patch = Value::Object(serde_json::Map::new());
-        for (path, value, max) in &after {
-            let Some((_, _, old_max)) = before.iter().find(|(p, _, _)| p == path) else { continue };
+        let had_item = |id: &Id| before.iter().any(|(i, _, _, _)| i.as_ref() == Some(id));
+        let mut patches: BTreeMap<Option<Id>, Value> = BTreeMap::new();
+        for (item, path, value, max) in &after {
+            let old_max = match before.iter().find(|(i, p, _, _)| i == item && p == path) {
+                Some((_, _, _, m)) => *m,
+                None if item.as_ref().is_some_and(|id| !had_item(id)) => 0.0,
+                None => continue,
+            };
             if (max - old_max).abs() < f64::EPSILON {
                 continue;
             }
@@ -1338,12 +1473,16 @@ impl AppState {
                 v = serde_json::json!({ k: v });
             }
             // Merge, so two resources under one parent (slot levels) both land.
-            merge_patch(&mut patch, &v);
+            merge_patch(patches.entry(item.clone()).or_insert_with(|| Value::Object(serde_json::Map::new())), &v);
         }
-        if patch.as_object().is_none_or(|o| o.is_empty()) {
-            return Ok(());
+        for (item, patch) in patches {
+            let op = match item {
+                None => Op::ActorUpdate { id: actor_id.to_string(), patch: serde_json::json!({ "data": patch }) },
+                Some(id) => Op::ItemUpdate { actor_id: actor_id.to_string(), id, patch: serde_json::json!({ "data": patch }) },
+            };
+            self.commit(world, by, op, 0)?;
         }
-        self.commit(world, by, Op::ActorUpdate { id: actor_id.to_string(), patch: serde_json::json!({ "data": patch }) }, 0)
+        Ok(())
     }
 
     /// Take back an item's last level, and what it gave.

@@ -10,9 +10,11 @@ import { ITEM_MIME } from './items.js';
 import { DOC_MIME } from './collections.js';
 import { nodeAt } from './layout-sheet.js';
 import { label } from './blueprint-sheet.js';
+import { renderMarkdown } from './markdown.js';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
-const KINDS = [['items', 'Gives items'], ['choice', 'Choose from items'], ['points', 'Spend points'], ['roll', 'Roll (e.g. hit points)']];
+const KINDS = [['items', 'Gives items'], ['choice', 'Choose from items'], ['pick', 'Pick any of a type (e.g. a feat)'], ['points', 'Spend points'], ['roll', 'Roll (e.g. hit points)']];
+const cleanDoc = (doc) => { const d = structuredClone(doc); for (const k of ['folder', 'access', 'players']) delete d[k]; return d; };
 const MODES = [['set', 'Set to'], ['upgrade', 'At least'], ['downgrade', 'At most'], ['multiply', 'Multiply by'], ['add', 'Add']];
 
 /** Item types that give features, and which of them level (from the system builder / hearth.toml). */
@@ -56,7 +58,7 @@ export const levelOf = (item) => Number(item.data?.[levelsKey(item.kind)] ?? 0);
 // ------------------------------------------------------------------ the level-up / add dialog
 
 /** Level up an item the actor has (itemId), or add a new one (add = an item document). */
-export function openAdvance(api, actorId, { itemId = null, add = null } = {}) {
+export async function openAdvance(api, actorId, { itemId = null, add = null } = {}) {
   const actor = store.world.actors[actorId];
   const target = itemId ? actor.items.find((i) => i.id === itemId) : add;
   if (!target) return;
@@ -64,9 +66,24 @@ export function openAdvance(api, actorId, { itemId = null, add = null } = {}) {
   const level = lkey ? levelOf(target) + 1 : 1;
   const title = itemId ? `${target.name}: level ${level}` : lkey ? `Add ${target.name} (level 1)` : `Add ${target.name}`;
   const win = openWindow({ title, width: 480 });
-  const picks = { choices: {}, points: {}, rolls: {} };
+  const picks = { choices: {}, points: {}, rolls: {}, picks: {} };
   const body = el('div.advance');
   const errorEl = el('p.error-text');
+  win.body.replaceChildren(el('p.muted', { text: 'Loading…' }));
+
+  // The server works out formula amounts (skill ranks = class + Int) and the
+  // character's own grants at the total level this reaches (a feat every odd level).
+  let plan = null;
+  try {
+    const res = await fetch('/api/advance/plan', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-hearth-session': api.session ?? '' },
+      body: JSON.stringify({ actor_id: actorId, item_id: itemId, add: itemId ? null : add }),
+    });
+    if (res.ok) plan = await res.json();
+    else { win.body.replaceChildren(el('p.error-text', { text: await res.text() })); return; }
+  } catch { /* older server: work from the grants alone */ }
+  const lim = (g) => (plan?.limits?.[g.id] ? { ...g, ...plan.limits[g.id] } : g);
 
   // Grants this step brings: the item's, plus those of items it gave that advance with it.
   const sources = [{ item: target, leveled: !!lkey, fresh: false }];
@@ -75,7 +92,11 @@ export function openAdvance(api, actorId, { itemId = null, add = null } = {}) {
       if (it.flags?.core?.granted_by?.item === itemId && it.advancement?.length) sources.push({ item: it, leveled: true, fresh: false });
     }
   }
+  if (plan?.extra?.length) {
+    sources.push({ item: { name: plan.extra_label || `Level ${plan.total_level}`, advancement: plan.extra.map((g) => ({ ...g, level: 0, every: 0, until: 0 })) }, leveled: false, fresh: false });
+  }
   const grantsOf = (src) => (src.item.advancement ?? []).filter((g) => {
+    if (plan?.off?.includes(g.id)) return false; // its `when` doesn't hold at this step
     if (src.fresh) return Array.from({ length: level }, (_, i) => i + 1).some((l) => comesAt(g, l));
     if (!src.leveled) return (g.level ?? 0) <= 1;
     return comesAt(g, level);
@@ -130,7 +151,18 @@ export function openAdvance(api, actorId, { itemId = null, add = null } = {}) {
         }
         break;
       }
+      case 'pick': {
+        const want = Math.max(1, g.count || 1);
+        const chosen = picks.picks[g.id] ??= [];
+        const typeLabel = systemInfo().item_types?.[g.from]?.label ?? g.from ?? 'item';
+        box.append(el('p.muted.small', { text: `Pick ${want === 1 ? `one ${typeLabel.toLowerCase()}` : `${want} (${typeLabel.toLowerCase()})`}.` }),
+          el('div.grant-items', {}, ...chosen.map((d, i) => el('span.chip', {}, d.name,
+            el('button.icon', { type: 'button', text: '✕', title: 'Remove', on: { click: () => { chosen.splice(i, 1); rerender(); } } })))));
+        if (chosen.length < want) box.append(el('button.small', { type: 'button', text: `Choose ${typeLabel.toLowerCase()}…`, on: { click: () => choosePick(api, actor, g, chosen, rerender) } }));
+        break;
+      }
       case 'points': {
+        g = lim(g);
         const spent = picks.points[g.id] ??= {};
         const field = g.field || 'value';
         const list = getPath(actor.data, g.path) ?? {};
@@ -198,20 +230,56 @@ export function openAdvance(api, actorId, { itemId = null, add = null } = {}) {
         for (const src of sources) {
           for (const g of grantsOf(src)) {
             if (g.kind === 'choice' && (picks.choices[g.id]?.length ?? 0) < Math.min(Math.max(1, g.count || 1), g.items?.length ?? 0)) { errorEl.textContent = `${g.label || 'A choice'}: make your pick.`; return; }
+            if (g.kind === 'pick' && (picks.picks[g.id]?.length ?? 0) < Math.max(1, g.count || 1)) { errorEl.textContent = `${g.label || 'A pick'}: make your pick.`; return; }
             if (g.kind === 'points') {
-              const need = pointsWanted(g, getPath(actor.data, g.path) ?? {});
+              const need = pointsWanted(lim(g), getPath(actor.data, g.path) ?? {});
               const s = Object.values(picks.points[g.id] ?? {}).reduce((a, b) => a + b, 0);
               if (s !== need) { errorEl.textContent = `${g.label || 'Points'}: spend all ${need}.`; return; }
             }
           }
         }
-        const req = { type: 'advance', actor_id: actorId, item_id: itemId, add: itemId ? null : add, choices: picks.choices, points: picks.points, rolls: picks.rolls };
+        const req = { type: 'advance', actor_id: actorId, item_id: itemId, add: itemId ? null : add, choices: picks.choices, points: picks.points, rolls: picks.rolls, picks: picks.picks };
         api._send(req);
         win.close();
       },
     },
   });
   win.body.replaceChildren(body, errorEl, el('div.row', {}, el('span.grow'), el('button', { type: 'button', text: 'Cancel', on: { click: () => win.close() } }), confirm));
+}
+
+/** Whether a pick grant takes this item: its type, and the grant's `where` fields (mirrors the server). */
+export function pickAllows(g, doc) {
+  if (g.from && doc.kind !== g.from) return false;
+  return Object.entries(g.where ?? {}).every(([k, want]) => {
+    const have = doc.data?.[k] ?? null;
+    return Array.isArray(want) ? want.includes(have) : want === have;
+  });
+}
+
+/** A searchable list for a "pick any of a type" grant (any feat…); picked documents go into `chosen`. */
+async function choosePick(api, actor, g, chosen, done) {
+  const typeLabel = systemInfo().item_types?.[g.from]?.label ?? g.from;
+  const win = openWindow({ title: `Choose ${typeLabel.toLowerCase()}`, width: 440 });
+  win.body.replaceChildren(el('p.muted', { text: 'Loading…' }));
+  const all = (await availableItems(api, [g.from])).filter((c) => pickAllows(g, c.doc)).sort((a, b) => String(a.doc.name).localeCompare(String(b.doc.name)));
+  const search = el('input', { type: 'search', placeholder: `Find ${typeLabel.toLowerCase()}…`, 'aria-label': 'Search' });
+  const list = el('ul.entity-list.picker-list');
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    const shown = all.filter((c) => !q || String(c.doc.name).toLowerCase().includes(q) || String(c.doc.data?.description ?? '').toLowerCase().includes(q)).slice(0, 300);
+    list.replaceChildren(...shown.map((c) => {
+      const has = actor.items.some((i) => i.kind === c.doc.kind && i.name === c.doc.name) || chosen.some((d) => d.name === c.doc.name);
+      const about = String(c.doc.data?.prerequisites ?? c.doc.data?.prerequisite ?? '') || String(c.doc.data?.description ?? '').slice(0, 110);
+      return el(`li.entity${has ? '.muted' : ''}`, { on: { click: () => { if (has) return; chosen.push(cleanDoc(c.doc)); win.close(); done(); } } },
+        el('span.grow', {}, el('span', { text: c.doc.name }), el('small.muted', { text: ` ${c.from}` }), about ? el('div.small.muted', { text: about }) : null),
+        has ? el('span.badge', { text: 'has it' }) : null);
+    }));
+    if (!shown.length) list.append(el('li.muted', { text: all.length ? 'Nothing matches.' : `There are no ${typeLabel.toLowerCase()} items to pick from yet.` }));
+  };
+  search.addEventListener('input', draw);
+  draw();
+  win.body.replaceChildren(search, list);
+  search.focus();
 }
 
 /**
@@ -418,13 +486,46 @@ export function advancementEditor(api, item, save, leveled) {
         row.append(el('div.row.grant-repeat', {}, num('every', 'Then again every … levels', 3), num('until', 'Until level (blank: no end)', 3),
           el('small.muted', { text: g.every > 0 ? `Comes at level ${Math.max(1, g.level ?? 1)}, then every ${g.every} level${g.every === 1 ? '' : 's'}${g.until ? ` up to ${g.until}` : ''}.` : 'Comes once.' })));
       }
+      row.append(el('label', {}, 'Only when (a formula; blank: always)', el('input', {
+        value: g.when ?? '', placeholder: 'e.g. @favored_class == @item.name',
+        on: { input: (e) => { const v = e.target.value.trim(); if (v) g.when = v; else delete g.when; changed(); } },
+      })));
       const kind = g.kind ?? 'items';
       if (kind === 'items' || kind === 'choice') {
         if (kind === 'choice') row.append(num('count', 'How many to pick'));
         row.append(el('div.grant-items', {}, ...(g.items ?? []).map((it, i) => el('span.chip', {}, it.name, it.advancement?.length ? ' ✦' : '',
           el('button.icon', { type: 'button', text: '✕', title: 'Remove', on: { click: () => { g.items.splice(i, 1); draw(); changed(); } } }))), pickItems(g)));
+      } else if (kind === 'pick') {
+        const types = Object.entries(systemInfo().item_types ?? {});
+        row.append(el('div.row', {},
+          el('label', {}, 'Of the type', el('select', { on: { change: (e) => set('from', e.target.value) } }, el('option', { value: '', text: 'Choose…' }),
+            ...types.map(([k, t]) => el('option', { value: k, text: t.label ?? k, selected: g.from === k })))),
+          num('count', 'How many to pick')),
+        // Only some of them: "feat_type = combat" (several values: "feat_type = combat, critical").
+        el('label', {}, 'Only where (field = value; several values separated by commas)', el('input', {
+          value: Object.entries(g.where ?? {}).map(([k, v]) => `${k} = ${Array.isArray(v) ? v.join(', ') : v}`).join('; '), placeholder: 'e.g. feat_type = combat',
+          on: {
+            input: (e) => {
+              const where = {};
+              for (const part of e.target.value.split(';')) {
+                const [k, v] = part.split('=').map((x) => x?.trim());
+                if (!k || !v) continue;
+                const vals = v.split(',').map((x) => x.trim()).filter(Boolean).map((x) => (x === 'true' ? true : x === 'false' ? false : /^-?\d+(\.\d+)?$/.test(x) ? Number(x) : x));
+                where[k] = vals.length === 1 ? vals[0] : vals;
+              }
+              if (Object.keys(where).length) g.where = where; else delete g.where;
+              changed();
+            },
+          },
+        })),
+        el('p.muted.small', { text: 'The player picks from every item of that type they can take: the system\'s and world\'s collections and the Items directory.' }));
       } else if (kind === 'points') {
-        row.append(el('div.row', {}, txt('path', 'On the list', 'abilities'), txt('field', 'Field', 'value'), num('amount', 'Points'), num('max_each', 'Most on one'), num('cap', 'Cap')),
+        // A number, or a formula worked out at that level (skill ranks: @item.skill_ranks + @abilities.int.mod; cap: @level).
+        const numOr = (k, fk, label, ph) => el('label', {}, label, el('input', {
+          size: 10, value: g[fk] || (g[k] ?? ''), placeholder: ph, title: 'A number, or a formula worked out at that level',
+          on: { input: (e) => { const v = e.target.value.trim(); if (v === '' || /^-?\d+$/.test(v)) { g[k] = v === '' ? (k === 'cap' ? null : 0) : Number(v); delete g[fk]; } else { g[fk] = v; if (k !== 'cap') g[k] = 0; else delete g[k]; } changed(); } },
+        }));
+        row.append(el('div.row', {}, txt('path', 'On the list', 'abilities'), txt('field', 'Field', 'value'), numOr('amount', 'amount_formula', 'Points', '2 or a formula'), num('max_each', 'Most on one'), numOr('cap', 'cap_formula', 'Cap', '20 or @level')),
           el('label', {}, 'Only these entries (keys, separated by commas; blank: any)', el('input', {
             value: (g.only ?? []).join(', '), placeholder: 'e.g. athletics, intimidation, perception',
             on: { input: (e) => { const keys = e.target.value.split(',').map((k) => k.trim()).filter(Boolean); if (keys.length) g.only = keys; else delete g.only; changed(); } },
@@ -439,6 +540,26 @@ export function advancementEditor(api, item, save, leveled) {
   draw();
   root.append(body, el('button.small', { type: 'button', text: '+ Grant', on: { click: () => { list.push({ id: uid(), level: leveled ? Math.max(1, ...list.map((g) => g.level ?? 1)) : 1, kind: 'items', label: '', items: [] }); draw(); changed(); } } }),
     el('p.muted.small', { text: 'Drag items from the Items directory or a collection onto a grant. Items with advancement of their own (✦, e.g. a subclass) bring their grants at the same class levels.' }));
+  return root;
+}
+
+// ------------------------------------------------------------------ an item's parts
+
+/**
+ * The parts attached to an item (a weapon's abilities, armor's material), each with its
+ * text to read; `save(parts)` stores the list after one is removed.
+ */
+export function partsView(item, save, editable = true) {
+  const parts = structuredClone(item.parts ?? []);
+  const root = el('fieldset.bfield.item-parts', {}, el('legend', { text: 'Abilities and materials' }));
+  parts.forEach((p, i) => {
+    const d = p.data ?? {};
+    const note = [d.bonus ? `+${d.bonus} bonus` : '', d.price && !d.bonus ? d.price : '', d.aura ? `${d.aura}${d.cl ? `, CL ${d.cl}` : ''}` : ''].filter(Boolean).join(' · ');
+    root.append(el('details.item-part', {},
+      el('summary', {}, el('strong', { text: p.name }), note ? el('span.muted.small', { text: ` ${note}` }) : null,
+        editable ? el('button.icon', { type: 'button', text: '✕', title: `Remove ${p.name}`, on: { click: (e) => { e.preventDefault(); if (confirm(`Remove ${p.name} from ${item.name}?`)) { parts.splice(i, 1); save(parts); } } } }) : null),
+      d.description ? el('div.small', {}, renderMarkdown(String(d.description))) : el('p.muted.small', { text: 'No description.' })));
+  });
   return root;
 }
 
@@ -458,6 +579,7 @@ export function effectsEditor(item, save, editable = true) {
         el('input', { value: c.path, placeholder: 'value it changes, e.g. abilities.str.value', disabled: !editable, on: { input: (e) => { c.path = e.target.value.replace(/^@/, ''); changed(); } } }),
         el('select', { disabled: !editable, on: { change: (e) => { c.mode = e.target.value; changed(); } } }, ...MODES.map(([v, l]) => el('option', { value: v, text: l, selected: (c.mode ?? 'add') === v }))),
         el('input.grow', { value: c.value, placeholder: 'formula', disabled: !editable, on: { input: (e) => { c.value = e.target.value; changed(); } } }),
+        el('input', { size: 9, value: c.type ?? '', placeholder: 'bonus type', title: 'Bonuses of the same type don\'t stack: only the biggest counts (e.g. enhancement, morale). Blank: always stacks.', disabled: !editable, on: { input: (e) => { const t = e.target.value.trim(); if (t) c.type = t; else delete c.type; changed(); } } }),
         editable ? el('button.icon', { type: 'button', text: '✕', on: { click: () => { fx.changes.splice(j, 1); draw(); changed(); } } }) : null)));
       return el('div.grant', {},
         el('div.row', {},

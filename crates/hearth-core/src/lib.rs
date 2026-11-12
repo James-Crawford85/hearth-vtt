@@ -12,6 +12,7 @@ pub mod geometry;
 pub mod model;
 pub mod ops;
 pub mod creation;
+pub mod forge;
 pub mod patch;
 pub mod protocol;
 pub mod rules;

@@ -7,8 +7,10 @@ import { hooks } from './hooks.js';
 import { store, isGM, ownsActor, systemInfo } from './store.js';
 import { el, toast, openWindow, formDialog } from './ui.js';
 import { accessOf, atLeast, accessBadge, folderList, directoryPanel, editAccess, newId, rejectToast } from './directory.js';
-import { grantTypes, levelsKey, advancementEditor, effectsEditor } from './advancement.js';
+import { grantTypes, levelsKey, advancementEditor, effectsEditor, partsView } from './advancement.js';
 import { blueprintType } from './blueprint-sheet.js';
+import { canForge, openForge } from './forge.js';
+import { isCharacterType } from './creation.js';
 
 export const ITEM_MIME = 'application/x-hearth-item';
 
@@ -27,6 +29,7 @@ export class Items {
 
   renderPanel(panel) {
     const buttons = isGM() ? [el('button.primary', { text: '+ New item', on: { click: () => this.create() } })] : [];
+    if (canForge()) buttons.push(el('button', { text: '⚒ Forge', title: isGM() ? 'Make a magic item into the Items directory' : 'Make or craft a magic item for your character', on: { click: () => this.forge() } }));
     directoryPanel(panel, this.panelState, {
       buttons,
       placeholder: 'Search items',
@@ -162,6 +165,7 @@ export class Items {
     } else {
       parts.push(el('div.auto-grid', {}, ...dataFields(x.data, 'data', gm, (path, value) => send(pathPatch(path, value)))));
     }
+    if (x.parts?.length) parts.push(partsView(x, (p) => send({ parts: p }), gm));
     if (gm) {
       parts.push(effectsEditor(x, (effects) => send({ effects })));
       if (grantTypes().some((g) => g.key === x.kind)) parts.push(advancementEditor(this.api, x, (advancement) => send({ advancement }), !!levelsKey(x.kind)));
@@ -186,12 +190,25 @@ export class Items {
     if (!atLeast(x, 'observer')) { toast('You can\'t take that item.'); return; }
     this.api.op({
       op: 'item_create', actor_id: actorId,
-      item: { id: '', name: x.name, kind: x.kind, img: x.img ?? null, data: structuredClone(x.data ?? {}), flags: structuredClone(x.flags ?? {}) },
+      // The whole item: its effects (a ring's +2 AC) and advancement come too.
+      item: { id: '', name: x.name, kind: x.kind, img: x.img ?? null, data: structuredClone(x.data ?? {}), flags: structuredClone(x.flags ?? {}), effects: structuredClone(x.effects ?? []), advancement: structuredClone(x.advancement ?? []), parts: structuredClone(x.parts ?? []) },
     }, rejectToast);
     toast(`Added ${x.name} to ${store.world.actors[actorId]?.name ?? 'the actor'}.`);
   }
 
+  /** The forge: the GM's goes to the Items directory; a player's to their character (asked which, if several). */
+  async forge() {
+    if (isGM()) { openForge(this.api); return; }
+    const mine = Object.values(store.world.actors).filter((a) => ownsActor(a.id) && isCharacterType(a.kind));
+    if (!mine.length) { toast('You need a character of your own to forge for.'); return; }
+    if (mine.length === 1) { openForge(this.api, { actorId: mine[0].id }); return; }
+    const r = await formDialog({ title: 'Forge for which character?', submit: 'Open the forge', fields: [{ name: 'actor', label: 'Character', type: 'select', value: mine[0].id, options: mine.map((a) => [a.id, a.name]) }] });
+    if (r) openForge(this.api, { actorId: r.actor });
+  }
+
   onOp(op) {
+    // The forge setting can change who sees the ⚒ Forge button.
+    if (op.op === 'world_update' && op.patch?.settings?.core?.forge && this.panelState.list) this.api.sidebar?.refresh('items');
     if (!op.op.startsWith('library_item_')) return;
     const id = op.item?.id ?? op.id;
     if (op.op === 'library_item_delete') this.windows.get(id)?.close();

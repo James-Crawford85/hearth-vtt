@@ -58,7 +58,19 @@ function entriesOf(actor, step) {
 /** Steps this actor still has to do (for its owners). */
 export function pendingSteps(actor) {
   if (!ownsActor(actor.id)) return [];
-  return creationSteps().filter((s) => !stepState(actor, s).done && entriesOf(actor, s).length && worldMethods(s).length);
+  return creationSteps().filter((s) => appliesTo(s, actor.kind) && !stepState(actor, s).done && entriesOf(actor, s).length && worldMethods(s).length);
+}
+
+/** Whether actors of this type go through a step (empty `actor_types`: all of them). */
+export const appliesTo = (step, kind) => !step.actor_types?.length || step.actor_types.includes(kind);
+
+/**
+ * Whether actors of this type are characters that get set up (the "New character?" prompt):
+ * the types creation steps name, or every type when no step names any.
+ */
+export function isCharacterType(kind) {
+  const steps = creationSteps();
+  return !steps.some((s) => s.actor_types?.length) || steps.some((s) => s.actor_types?.includes(kind));
 }
 
 /** A prompt at the top of a new character's sheet; for the GM, a way to let a player redo a step. */
@@ -160,8 +172,11 @@ export function openCreation(api, actorId, stepId) {
       }
     } else if (m.kind === 'pointbuy') {
       const lo = m.min ?? 8, hi = m.max ?? 15;
-      for (const e of entries) st.assign[e.key] ??= lo;
       const cost = (v) => m.costs?.[String(v)];
+      // Start at the score that costs nothing (8 in 5e, 10 in some systems), or the lowest.
+      const free = Object.entries(m.costs ?? {}).find(([, c]) => c === 0)?.[0];
+      const start = free != null && Number(free) >= lo && Number(free) <= hi ? Number(free) : lo;
+      for (const e of entries) st.assign[e.key] ??= start;
       const spent = entries.reduce((s, e) => s + (cost(st.assign[e.key]) ?? 0), 0);
       body.append(el('p', {}, el('strong', { text: `${m.points - spent}` }), ` of ${m.points} points left. Scores ${lo}–${hi}.`));
       for (const e of entries) {

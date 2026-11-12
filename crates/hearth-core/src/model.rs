@@ -556,7 +556,7 @@ impl Actor {
 }
 
 /// Weapons, spells, features… owned by an actor.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Item {
     pub id: Id,
     pub name: String,
@@ -572,6 +572,10 @@ pub struct Item {
     /// backgrounds). See `crate::advance`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advancement: Vec<crate::advance::Grant>,
+    /// Items attached to this one (a weapon's flaming ability, armor's mithral). Their
+    /// effects' changes to `item.<field>` change this item; others change its owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<Item>,
     #[serde(default)]
     pub flags: Value,
 }
@@ -611,6 +615,11 @@ pub struct Change {
     pub mode: ChangeMode,
     /// A formula.
     pub value: String,
+    /// The kind of bonus (`enhancement`, `morale`, `armor`…). Added bonuses of the
+    /// same type don't stack: only the biggest counts (penalties always stack, and so
+    /// do types the system lists in `stacking`). None: untyped, always stacks.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub bonus_type: Option<String>,
 }
 
 /// How a change applies. Changes run in this order: first the base is

@@ -188,7 +188,7 @@ export class Builder {
     for (const t of this.bp.item_types) row(t, 0, true);
     if (!this.bp.item_types.length) rows.push(el('div.muted.small.btree-empty', { text: 'No item types yet.' }));
     rows.push(el('div.btree-head', { text: 'Rules' }));
-    for (const [id, name] of [['tables', `Tables (${Object.keys(this.bp.tables).length})`], ['conditions', `Conditions (${this.bp.conditions.length})`], ['rests', 'Rests'], ['creation', `Character creation (${this.bp.creation.length})`], ['style', 'Sheet style']]) {
+    for (const [id, name] of [['tables', `Tables (${Object.keys(this.bp.tables).length})`], ['conditions', `Conditions (${this.bp.conditions.length})`], ['rests', 'Rests and bonuses'], ['creation', `Character creation (${this.bp.creation.length})`], ['style', 'Sheet style']]) {
       rows.push(el('div', { class: this.sel === id ? 'btree-row sel' : 'btree-row', on: { click: () => { this.sel = id; this.renderTree(); this.renderEdit(); } } },
         el('span.btree-icon', { text: '⚙' }), el('span.grow', { text: name })));
     }
@@ -331,6 +331,14 @@ export class Builder {
         add(box);
       }
     }
+    if (n.kind === 'type' && f.isItem) add(this.forgeEditor(n, f));
+    if (n.kind === 'type' && !f.isItem) {
+      // Grants by total level across all classes: a feat every odd level, +1 to an ability every 4…
+      const box = advancementEditor(this.api, { advancement: n.advancement ?? [] }, (adv) => { if (adv.length) n.advancement = adv; else delete n.advancement; this.changed({ tree: false }); }, true);
+      box.querySelector('legend').textContent = 'Advancement by character level';
+      box.prepend(el('p.muted.small', { text: `Grants every ${(n.label || n.key).toLowerCase()} gets at a total level (all classes together), e.g. a feat at levels 1, 3, 5… (level 1, again every 2). They come with whichever class level reaches it, and go if that level is taken back.` }));
+      add(box);
+    }
     switch (n.kind) {
       case 'number':
         add(el('div.row', {}, this.input(n, 'default', { label: 'Starting value', type: 'number' }), this.input(n, 'min', { label: 'Min', type: 'number' }), this.input(n, 'max', { label: 'Max', type: 'number' })));
@@ -366,6 +374,15 @@ export class Builder {
           el('label', {}, 'Kind', this.select(n, 'roll_kind', ROLL_KINDS)),
           this.thenEditor(n, f), this.costEditor(n),
           this.formulaInput(n, 'when', 'Only when (optional)', f));
+        // Criticals: when an attack threatens one, and how a critical multiplies damage.
+        if (n.roll_kind === 'attack') {
+          add(el('fieldset.bfield', {}, el('legend', { text: 'Critical hits' }),
+            this.formulaInput(n, 'threat', 'Threatens on a natural (blank: 20)', f, 'The lowest d20 roll that threatens, e.g. @item.threat for a 19–20 weapon.'),
+            this.check(n, 'confirm', 'A threat must be confirmed with a second attack roll')));
+        }
+        if (n.roll_kind === 'damage') {
+          add(this.formulaInput(n, 'crit_mult', 'On a critical, roll the damage this many times (blank: double the dice)', f, 'e.g. @item.crit_mult for ×2, ×3, ×4 weapons.'));
+        }
         break;
       case 'effect':
         add(this.formulaInput(n, 'when', 'Only while (e.g. @item.equipped)', f), this.changesEditor(n, n.changes ??= [], f));
@@ -435,6 +452,55 @@ export class Builder {
         },
       },
     }));
+  }
+
+  /** Item types: the item forge's rules (price, which parts fit, checks, crafting). See docs/rules.md. */
+  forgeEditor(n, f) {
+    const box = el('fieldset.bfield.forge-editor', {}, el('legend', { text: 'Item forge' }));
+    const on = !!n.forge;
+    box.append(el('label.check', {}, el('input', {
+      type: 'checkbox', checked: on,
+      on: { change: (e) => { if (e.target.checked) n.forge = { price: '0', parts: [], checks: [] }; else delete n.forge; this.changed({ tree: false }); this.renderEdit(); } },
+    }), `Items of this type can be made in the forge (magic weapons, potions…)`));
+    if (!on) return box;
+    const fg = n.forge;
+    fg.checks ??= [];
+    const types = this.bp.item_types.filter((t) => t.key !== n.key);
+    const craftOn = !!fg.craft;
+    box.append(
+      this.formulaInput(fg, 'price', 'Price', f, 'A formula about @item (with its parts: sum_parts(\'bonus\'), max_parts(\'cl\'), count_parts()).'),
+      this.formulaInput(fg, 'name', 'Suggested name (optional)', f, 'e.g. \'Wand of \' + parts(\'name\')[0]; used until the maker types their own.'),
+      el('div.row', {}, el('span.muted.small', { text: 'Parts it takes:' }), ...types.map((t) => el('label.check', {}, el('input', {
+        type: 'checkbox', checked: (fg.parts ?? []).includes(t.key),
+        on: { change: (e) => { const s = new Set(fg.parts ?? []); if (e.target.checked) s.add(t.key); else s.delete(t.key); fg.parts = [...s]; this.changed({ tree: false }); } },
+      }), t.label || t.key))),
+      this.formulaInput(fg, 'fits', 'Which parts fit (optional)', f, '@part is the part, e.g. @part.applies_to == \'weapon\'.'),
+    );
+    const checks = el('div');
+    const drawChecks = () => checks.replaceChildren(...fg.checks.map((c, i) => el('div.row.change-row', {},
+      el('input', { value: c.when ?? '', placeholder: 'problem when, e.g. @item.enhancement > 5', on: { input: (e) => { c.when = e.target.value; this.changed({ tree: false }); } } }),
+      el('input.grow', { value: c.message ?? '', placeholder: 'message', on: { input: (e) => { c.message = e.target.value; this.changed({ tree: false }); } } }),
+      el('button.icon', { type: 'button', text: '✕', on: { click: () => { fg.checks.splice(i, 1); drawChecks(); this.changed({ tree: false }); } } }))));
+    drawChecks();
+    box.append(el('fieldset.bfield', {}, el('legend', { text: 'Rules it must keep' }), checks,
+      el('button.small', { type: 'button', text: '+ Rule', on: { click: () => { fg.checks.push({ when: '', message: '' }); drawChecks(); this.changed({ tree: false }); } } })));
+    const craftBox = el('fieldset.bfield', {}, el('legend', { text: 'Crafting by a character' }),
+      el('label.check', {}, el('input', {
+        type: 'checkbox', checked: craftOn,
+        on: { change: (e) => { if (e.target.checked) fg.craft = { feat: '', bonus: '', dc: '', cost: '@price / 2', days: '1', currency: '' }; else delete fg.craft; this.changed({ tree: false }); this.renderEdit(); } },
+      }), 'Characters can craft these (needs a feat, a check and money)'));
+    if (craftOn) {
+      const c = fg.craft;
+      craftBox.append(
+        this.formulaInput(c, 'feat', 'Feat needed (a formula giving its name; \'\' for none)', f),
+        this.formulaInput(c, 'bonus', 'Check bonus', f, 'e.g. @skills.spellcraft.total'),
+        this.formulaInput(c, 'dc', 'DC', f),
+        this.formulaInput(c, 'cost', 'Cost', f, '@price is the price.'),
+        this.formulaInput(c, 'days', 'Days', f),
+        this.input(c, 'currency', { label: 'Money spent from (a number in the character\'s data, e.g. currency.gp)' }));
+    }
+    box.append(craftBox);
+    return box;
   }
 
   check(obj, key, label) {
@@ -548,6 +614,7 @@ export class Builder {
         el('input', { value: c.path, placeholder: 'value it changes, e.g. ac', on: { input: (e) => { c.path = e.target.value.replace(/^@/, ''); this.changed({ tree: false }); } } }),
         this.select(c, 'mode', MODES),
         el('input.grow', { value: c.value, placeholder: 'formula', on: { input: (e) => { c.value = e.target.value; this.changed({ tree: false }); } } }),
+        el('input', { size: 9, value: c.type ?? '', placeholder: 'bonus type', title: 'Bonuses of the same type don\'t stack: only the biggest counts. Blank: always stacks.', on: { input: (e) => { const t = e.target.value.trim(); if (t) c.type = t; else delete c.type; this.changed({ tree: false }); } } }),
         el('button.icon', { type: 'button', text: '✕', on: { click: () => { changes.splice(i, 1); draw(); this.changed({ tree: false }); } } }))));
     };
     draw();
@@ -910,6 +977,11 @@ export class Builder {
       parts.push(el('fieldset.bfield', {}, el('legend', {}, step.label || step.id, ' ', el('button.icon', { type: 'button', text: '✕', title: 'Remove this step', on: { click: () => { if (confirm(`Remove the "${step.label || step.id}" step?`)) { steps.splice(si, 1); ch(); this.editCreation(); } } } })),
         el('div.row', {}, field(step, 'label', 'Name', { placeholder: 'Ability scores' }), field(step, 'id', 'Key', { width: '100px' }),
           field(step, 'path', 'Sets the list', { placeholder: 'abilities', width: '110px' }), field(step, 'field', 'Field in each entry', { placeholder: 'value', width: '90px' })),
+        // Which actor types go through it (e.g. characters, not monsters). None ticked: all.
+        el('div.row', {}, el('span.muted.small', { text: 'For:' }), ...this.bp.actor_types.map((t) => el('label.check', {}, el('input', {
+          type: 'checkbox', checked: !!step.actor_types?.includes(t.key),
+          on: { change: (e) => { const s = new Set(step.actor_types ?? []); if (e.target.checked) s.add(t.key); else s.delete(t.key); if (s.size) step.actor_types = [...s]; else delete step.actor_types; ch(); } },
+        }), t.label || t.key)), el('span.muted.small', { text: '(none ticked: every type)' })),
         ...step.methods.map((m, i) => methodBox(step, m, i)),
         el('button.small', { type: 'button', text: '+ Method', on: { click: () => { const n = step.methods.length + 1; step.methods.push({ id: `method_${n}`, kind: 'manual', label: 'New method' }); ch(); this.editCreation(); } } })));
     });
@@ -934,9 +1006,12 @@ export class Builder {
 
   editRests() {
     const ta = el('input', { value: this.bp.rests.join(', '), placeholder: 'short, long', on: { input: (e) => { this.bp.rests = e.target.value.split(',').map((x) => slug(x)).filter(Boolean); this.changed({ tree: false }); } } });
-    this.editEl.replaceChildren(el('div.builder-edit-head', {}, el('strong', { text: '⚙ Rests' })),
+    const stack = el('input', { value: (this.bp.stacking ?? []).join(', '), placeholder: 'dodge, circumstance', on: { input: (e) => { const v = e.target.value.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean); if (v.length) this.bp.stacking = v; else delete this.bp.stacking; this.changed({ tree: false }); } } });
+    this.editEl.replaceChildren(el('div.builder-edit-head', {}, el('strong', { text: '⚙ Rests and bonuses' })),
       el('label', {}, 'Kinds of rest, separated by commas', ta),
-      el('p.muted.small', { text: 'Sheets get a button for each. Resources say what each rest restores.' }));
+      el('p.muted.small', { text: 'Sheets get a button for each. Resources say what each rest restores.' }),
+      el('label', {}, 'Bonus types that stack with themselves, separated by commas', stack),
+      el('p.muted.small', { text: 'A change that adds can name a bonus type (enhancement, morale, deflection…). Bonuses of one type on the same value don\'t stack: only the biggest counts. Types listed here (and untyped bonuses, and all penalties) always add up.' }));
   }
 
   // ------------------------------------------------------------------ preview

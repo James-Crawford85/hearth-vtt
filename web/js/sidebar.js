@@ -9,6 +9,7 @@ import { el, formDialog, openWindow, toast } from './ui.js';
 import { icon, hasIcon } from './icons.js';
 import { renderMarkdown } from './markdown.js';
 import { creationSteps, openCreationSettings } from './creation.js';
+import { forgeTypes, openForgeSettings } from './forge.js';
 
 const PANEL_W = 340;
 const RAIL_W = 52;
@@ -189,8 +190,13 @@ export class Sidebar {
   /** Buttons for an action's follow-ups (damage after an attack), for whoever controls the actor. */
   followUps(m) {
     const a = m.flags?.core?.action;
-    if (!a?.then?.length || !(isGM() || ownsActor(a.actor_id))) return null;
-    return el('div.row.follow-ups', {}, ...a.then.map((t) => el('button.small', {
+    if (!a || !(a.then?.length || a.threat) || !(isGM() || ownsActor(a.actor_id))) return null;
+    // A critical threat that needs confirming: roll the same attack again; if that hits, its damage is critical.
+    const confirm = a.threat && a.action ? el('button.small.primary', {
+      text: '⚠ Confirm critical', title: 'Roll the attack again: if it hits, the damage is a critical',
+      on: { click: (e) => this.api.actions.use(a.actor_id, a.item_id, a.action, { confirming: true, level: a.level ?? undefined }, e.shiftKey) },
+    }) : null;
+    return el('div.row.follow-ups', {}, confirm, ...(a.then ?? []).map((t) => el('button.small', {
       text: a.crit ? `${t.label} (critical)` : t.label,
       class: a.crit ? 'small primary' : 'small',
       on: { click: (e) => this.api.actions.use(a.actor_id, a.item_id, t.id, { crit: !!a.crit, level: a.level ?? undefined }, e.shiftKey) },
@@ -534,7 +540,8 @@ export class Sidebar {
       systemInfo().license || systemInfo().attribution ? el('details.system-license', {}, el('summary.muted.small', { text: `License: ${systemInfo().license ?? 'see notice'}` }),
         systemInfo().attribution ? el('p.small', { text: systemInfo().attribution }) : null) : null,
       gm ? el('div.row', {}, el('button', { text: '🛠 System builder', title: 'Design this world\'s system: stats, resources, items, rolls', on: { click: () => this.api.builder.open() } }),
-        creationSteps().length ? el('button', { text: '🎲 Character creation…', title: 'How players set up new characters in this world (ability scores…)', on: { click: () => openCreationSettings(this.api) } }) : null) : null,
+        creationSteps().length ? el('button', { text: '🎲 Character creation…', title: 'How players set up new characters in this world (ability scores…)', on: { click: () => openCreationSettings(this.api) } }) : null,
+        forgeTypes().length ? el('button', { text: '⚒ Item forge…', title: 'Whether players may use the item forge in this world', on: { click: () => openForgeSettings(this.api) } }) : null) : null,
       w.next_session ? el('p.muted', { text: `Next session: ${new Date(w.next_session).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}` }) : null,
       el('h4', { text: 'Players' }),
       el('ul.users', {}, ...users.map(userRow)),

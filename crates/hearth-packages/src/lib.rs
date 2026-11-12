@@ -82,6 +82,12 @@ pub struct TypeDef {
     /// Item types: items of this type give features (advancement).
     #[serde(default)]
     pub grants: bool,
+    /// Actor types: grants by total level across all classes (see `hearth_core::advance`).
+    #[serde(default)]
+    pub advancement: Vec<hearth_core::advance::Grant>,
+    /// Item types: how the item forge prices, checks and crafts them.
+    #[serde(default)]
+    pub forge: Option<hearth_core::forge::Forge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +133,9 @@ pub struct Manifest {
     /// Systems: kinds of rest (e.g. `["short", "long"]`).
     #[serde(default)]
     pub rests: Vec<String>,
+    /// Systems: bonus types that stack with themselves (e.g. `["dodge"]`); other typed bonuses don't.
+    #[serde(default)]
+    pub stacking: Vec<String>,
 }
 
 /// A collection of ready-made documents in a package: a JSON array in `path`.
@@ -240,6 +249,11 @@ impl Package {
                 manifest.rests.push(r.clone());
             }
         }
+        for s in &bp.stacking {
+            if !manifest.stacking.contains(s) {
+                manifest.stacking.push(s.clone());
+            }
+        }
         (Some(bp), compiled.errors)
     }
 
@@ -299,7 +313,7 @@ impl Package {
         let types = |t: &BTreeMap<String, TypeDef>| {
             t.iter()
                 .map(|(k, d)| {
-                    (k.clone(), hearth_core::rules::TypeRules { formulas: d.formulas.clone(), resources: d.resources.clone(), actions: d.actions.clone(), effects: d.effects.clone(), levels: d.levels.clone() })
+                    (k.clone(), hearth_core::rules::TypeRules { formulas: d.formulas.clone(), resources: d.resources.clone(), actions: d.actions.clone(), effects: d.effects.clone(), levels: d.levels.clone(), advancement: d.advancement.clone(), forge: d.forge.clone() })
                 })
                 .collect()
         };
@@ -309,6 +323,7 @@ impl Package {
             item_types: types(&m.item_types),
             conditions: m.conditions.clone(),
             rests: m.rests.clone(),
+            stacking: m.stacking.clone(),
         }
     }
 

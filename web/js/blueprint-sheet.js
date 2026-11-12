@@ -20,7 +20,9 @@ import { el, openWindow, toast } from './ui.js';
 import { sheetIcon } from './icons.js';
 import { bindSheet, bindInputs, conditionsBar, restsBar, errorsBox, loadTemplate, renderTemplate } from './sheets.js';
 import { layoutItemSheet, layoutFor } from './layout-sheet.js';
-import { grantTypes, levelsKey, levelOf, openAdd, openAdvance, regress, removeItem, advancementEditor, effectsEditor } from './advancement.js';
+import { grantTypes, levelsKey, levelOf, openAdd, openAdvance, regress, removeItem, advancementEditor, effectsEditor, partsView } from './advancement.js';
+import { isCharacterType } from './creation.js';
+import { canForge, openForge } from './forge.js';
 
 const lastTab = new Map(); // actor id → tab key
 
@@ -306,7 +308,8 @@ export function blueprintSheet(actor, type, api) {
       ...headerGroups(placed('header'), ctx, 'bp-header-stats')),
     el('div.bp-vitals', {},
       ...headerGroups(placed('vitals'), ctx, 'bp-vitals-group'),
-      canAdvance ? el('button.small.bp-btn', { type: 'button', text: '⬆ Advance', title: 'Level up a class, or add an ancestry, background or class', on: { click: () => openAdd(api, actor.id) } }) : null));
+      canAdvance ? el('button.small.bp-btn', { type: 'button', text: '⬆ Advance', title: 'Level up a class, or add an ancestry, background or class', on: { click: () => openAdd(api, actor.id) } }) : null,
+      editable && canForge() && isCharacterType(actor.kind) ? el('button.small.bp-btn', { type: 'button', text: '⚒ Forge', title: 'Make or craft a magic item for this character', on: { click: () => openForge(api, { actorId: actor.id }) } }) : null));
   const root = el('div.sheet.bp-sheet', { 'data-type': type.key }, header);
   if (top.length) {
     const grid = gridFor(null, renderNodes(top, [], ctx));
@@ -316,7 +319,7 @@ export function blueprintSheet(actor, type, api) {
 
   // A brand-new character: offer to set them up.
   const starters = grantTypes();
-  if (canAdvance && starters.length && !actor.items.some((i) => starters.some((t) => t.key === i.kind))) {
+  if (canAdvance && starters.length && isCharacterType(actor.kind) && !actor.items.some((i) => starters.some((t) => t.key === i.kind))) {
     root.append(el('div.new-character', {},
       el('span.grow', { text: `New character? Add their ${starters.map((t) => t.label.toLowerCase()).join(', ')} to fill in their features.` }),
       el('button.primary', { type: 'button', text: 'Start', on: { click: () => openAdd(api, actor.id) } })));
@@ -505,6 +508,7 @@ export function openItemSheet(actorId, itemId, api) {
     bindSheet(root, actor, api);
     // Effects this particular item gives, and (GM) what it grants.
     const save = (patch) => api.op({ op: 'item_update', actor_id: actorId, id: itemId, patch });
+    if (item.parts?.length) root.append(partsView(item, (parts) => save({ parts }), ctx.editable));
     if (ctx.editable || item.effects?.length) root.append(effectsEditor(item, (effects) => save({ effects }), ctx.editable));
     if (isGM() && grantTypes().some((g) => g.key === item.kind)) root.append(advancementEditor(api, item, (advancement) => save({ advancement }), !!levelsKey(item.kind)));
     if (ctx.editable) {
