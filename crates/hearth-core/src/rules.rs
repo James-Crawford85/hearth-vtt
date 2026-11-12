@@ -608,6 +608,13 @@ impl Scope for Engine<'_> {
                 let t = rules.tables.get(&key(0))?;
                 lookup_table(t, args.get(1).unwrap_or(&Val::Null))
             }
+            // count_items('spell'), or only those whose field has a value: count_items('spell', 'level', 3).
+            "count_items" if args.len() >= 3 => {
+                let path: Vec<String> = key(1).split('.').filter(|s| !s.is_empty()).map(String::from).collect();
+                let want = key(2);
+                let idx = self.items_of(&key(0));
+                Val::Num(idx.into_iter().filter(|&i| self.item_value(i, &path).key() == want).count() as f64)
+            }
             "count_items" => Val::Num(self.items_of(&key(0)).len() as f64),
             "sum_items" | "max_items" | "items" => {
                 let path: Vec<String> = key(1).split('.').filter(|s| !s.is_empty()).map(String::from).collect();

@@ -396,6 +396,18 @@ export function itemSection(actor, t, api, editable, { title } = {}) {
   const gives = grantTypes().some((g) => g.key === t.key);
 
   const inline = sheetMode(t) === 'none';
+  // The type's switch (Rage, Power Attack, a buff): an On/Off button on items whose effects depend on it.
+  const toggle = t.toggle;
+  const switchable = (it) => toggle && [...(it.effects ?? []), ...(t.children ?? []).filter((c) => c.kind === 'effect').map((c) => ({ requires: c.when }))]
+    .some((fx) => String(fx.requires ?? '').includes(`@item.${toggle}`));
+  const toggleButton = (it) => {
+    if (!switchable(it)) return null;
+    const on = !!it.data?.[toggle];
+    return el(`button.small.bp-btn.bp-toggle${on ? '.on' : ''}`, {
+      type: 'button', text: on ? 'On' : 'Off', 'aria-pressed': String(on), title: on ? `${it.name} is on: click to switch it off` : `Switch ${it.name} on`, disabled: !editable,
+      on: { click: () => api.op({ op: 'item_update', actor_id: actor.id, id: it.id, patch: { data: { [toggle]: !on } } }) },
+    });
+  };
   const itemCtx = (it) => ({ actor, item: it, itemId: it.id, type: t, prefix: `items.${it.id}.data`, derived: actor.derived?.items?.[it.id] ?? {}, editable, api });
   const details = (it) => el('div.bp-item-inline', {},
     gridFor(t, renderNodes(fields.filter((c) => !['effect', 'action'].includes(c.kind)), [], itemCtx(it))));
@@ -430,6 +442,7 @@ export function itemSection(actor, t, api, editable, { title } = {}) {
           from ? el('span.muted', { text: `from ${from.name}${by.level ? ` ${by.level}` : ''}` }) : null) : null),
       lkey ? el('span.bp-count', { text: levelOf(it), title: 'Level' }) : null,
       el('div.bp-item-buttons', {},
+        toggleButton(it),
         ...actions.filter((a) => !(actor.derived?.items?.[it.id]?._off ?? []).includes(a.key)).map((a) => el('button.small.bp-btn', { type: 'button', 'data-use': a.key, 'data-item-id': it.id, text: label(a), title: a.roll })),
         editable && lkey ? el('button.small.bp-btn', { type: 'button', text: 'Level up', on: { click: () => openAdvance(api, actor.id, { itemId: it.id }) } }) : null,
         editable && lkey && levelOf(it) > 1 ? el('button.small.bp-btn', { type: 'button', text: 'Level down', title: `Take back level ${levelOf(it)} and what it gave`, on: { click: () => regress(api, actor.id, it) } }) : null,

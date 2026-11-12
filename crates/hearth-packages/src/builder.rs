@@ -214,6 +214,10 @@ pub struct Node {
     /// Item types: the number field that counts levels (classes level up).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub levels: Option<String>,
+    /// Item types: a checkbox field that switches the item on and off (Rage, Power Attack, a
+    /// buff). Item cards show an On/Off button for it on items whose effects depend on it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub toggle: String,
     /// Item types: how the item forge prices, checks and crafts them (see `hearth_core::forge`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forge: Option<hearth_core::forge::Forge>,

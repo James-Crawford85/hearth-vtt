@@ -63,6 +63,8 @@ On a character's sheet, **⬆ Advance** adds an ancestry, background or class, o
 
 Formulas can total it all up: `level = sum_items('class', 'levels')`, a class's `hp_total = sum(@item.hp_rolls)`, hit points `max = sum_items('class', 'hp_total') + @abilities.con.mod * @level`. When a level up or down changes a resource's max, the current value moves by the same amount.
 
+**Switches.** An item type can name one of its checkboxes as its **On/Off switch** (in the type's settings). Item cards on sheets then show an On/Off button for items whose effects depend on it, i.e. effects that apply "Only while `@item.active`": Rage, Power Attack, a Bless buff. Items whose effects always apply (Toughness) show no button.
+
 Individual items can also carry **effects** (a ring's +1 AC, an ancestry's +2 Dexterity): in the item's window, **Effects on whoever has it**. They can be switched off, and can apply only while a formula holds (`@item.equipped`).
 
 ## Character creation (ability scores)

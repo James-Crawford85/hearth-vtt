@@ -331,7 +331,15 @@ export class Builder {
         add(box);
       }
     }
-    if (n.kind === 'type' && f.isItem) add(this.forgeEditor(n, f));
+    if (n.kind === 'type' && f.isItem) {
+      // A switch: Rage, Power Attack, a buff. Effects that should only apply while it's on use "Only while @item.<field>".
+      const boxes = (n.children ?? []).filter((c) => c.kind === 'checkbox');
+      add(el('label', {}, 'On/Off switch on each item (a checkbox field)', el('select', { on: { change: (e) => { if (e.target.value) n.toggle = e.target.value; else delete n.toggle; this.changed({ tree: false }); } } },
+        el('option', { value: '', text: boxes.length ? 'None' : 'None (add a Checkbox field first)' }),
+        ...boxes.map((c) => el('option', { value: c.key, text: c.label || c.key, selected: n.toggle === c.key })))),
+      el('p.muted.small', { text: 'Item cards show On/Off for items whose effects depend on it (an effect with "Only while @item.active").' }));
+      add(this.forgeEditor(n, f));
+    }
     if (n.kind === 'type' && !f.isItem) {
       // Grants by total level across all classes: a feat every odd level, +1 to an ability every 4…
       const box = advancementEditor(this.api, { advancement: n.advancement ?? [] }, (adv) => { if (adv.length) n.advancement = adv; else delete n.advancement; this.changed({ tree: false }); }, true);

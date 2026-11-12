@@ -115,7 +115,9 @@ impl Grant {
     pub fn allows(&self, it: &Item) -> bool {
         (self.from.is_empty() || it.kind == self.from)
             && self.only_where.iter().all(|(k, want)| {
-                let have = it.data.get(k).unwrap_or(&Value::Null);
+                // `name` matches the item's name (a list of feats a bloodline offers); others its data.
+                let name = Value::String(it.name.clone());
+                let have = if k == "name" { &name } else { it.data.get(k).unwrap_or(&Value::Null) };
                 match want {
                     Value::Array(options) => options.contains(have),
                     w => w == have,

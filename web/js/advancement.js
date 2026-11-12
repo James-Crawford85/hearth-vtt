@@ -251,7 +251,7 @@ export async function openAdvance(api, actorId, { itemId = null, add = null } = 
 export function pickAllows(g, doc) {
   if (g.from && doc.kind !== g.from) return false;
   return Object.entries(g.where ?? {}).every(([k, want]) => {
-    const have = doc.data?.[k] ?? null;
+    const have = k === 'name' ? doc.name : (doc.data?.[k] ?? null);
     return Array.isArray(want) ? want.includes(have) : want === have;
   });
 }

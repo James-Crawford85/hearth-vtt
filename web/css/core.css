@@ -709,3 +709,4 @@ body.resizing, body.resizing * { user-select: none !important; }
 .item-parts .item-part:first-of-type { border-top: 0; }
 .item-parts summary { cursor: pointer; display: flex; gap: 6px; align-items: baseline; }
 .item-parts summary .icon { margin-left: auto; }
+.bp-toggle.on { background: var(--sheet-accent, var(--accent, #c8902e)); color: #111; font-weight: 600; }

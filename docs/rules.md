@@ -37,7 +37,7 @@ The key is where the value goes (`derived.ac`, `derived.abilities.str.mod`…). 
 | `a ? b : c` | If a then b, else c |
 | `floor ceil round abs min max sum clamp` | Maths. `min`/`max`/`sum` also take lists |
 | `table('name', key)` | Look up a table |
-| `count_items('kind')`, `sum_items('kind', 'path')`, `max_items(…)` | Over the actor's items, e.g. total level across classes |
+| `count_items('kind')`, `sum_items('kind', 'path')`, `max_items(…)` | Over the actor's items, e.g. total level across classes. `count_items('spell', 'level', 3)` counts only those whose field has that value |
 | `has_status('poisoned')` | Whether a condition is on |
 | `has_item('spell', 'Fireball')` | Whether the actor has an item of that kind and name |
 | `len`, `has`, `if(c, a, b)`, `num`, `text`, `replace(text, from, to)` | Odds and ends |
