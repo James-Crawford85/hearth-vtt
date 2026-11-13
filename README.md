@@ -13,7 +13,7 @@ The desktop app hosts your world (or joins someone else's); players join from th
 
 - **Fast Rust server** (Tokio + Axum) with real-time sync over WebSockets. The server is authoritative: it validates every change, rolls every die, and hides what players shouldn't see.
 - **Browser client, no install for players.** Plain ES modules, no build step.
-- **Board:** pan/zoom canvas, square grid with snapping, background images, tokens, hidden tokens, measuring ruler, pings.
+- **Board:** pan/zoom canvas, square grid with snapping, images or animated video maps (with a tool to line a map up with the grid, and an importer for Dungeon Alchemist, Dungeondraft and Universal VTT maps with their walls, doors and lights), tokens, hidden tokens, measuring ruler, pings.
 - **Actors and items** with system-defined types and data templates.
 - **Sheets:** HTML templates with two-way binding and roll buttons, or a fully custom JS renderer, or an auto-generated form if the system defines nothing.
 - **Dice engine:** `4d6dl1`, `2d20kh1 + @abilities.dex.mod`, `3d6!`, `2d6r1`, `4dF`, `d%`, arithmetic, and variables pulled from actor data.

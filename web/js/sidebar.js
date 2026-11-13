@@ -11,6 +11,9 @@ import { renderMarkdown } from './markdown.js';
 import { creationSteps, openCreationSettings } from './creation.js';
 import { forgeTypes, openForgeSettings } from './forge.js';
 import { openBooksSettings } from './books.js';
+import { coverScene } from './grid-align.js';
+import { mediaSize } from './media.js';
+import { openSceneImport } from './scene-import.js';
 
 const PANEL_W = 340;
 const RAIL_W = 52;
@@ -438,6 +441,10 @@ export class Sidebar {
           });
         },
       },
+    }), el('button', {
+      text: 'Import map…',
+      title: 'A map from Dungeon Alchemist, Dungeondraft or similar, with its walls, doors and lights',
+      on: { click: () => openSceneImport(this.api) },
     })), list);
   }
 
@@ -458,7 +465,7 @@ export class Sidebar {
         el('option', { value: 'square', text: 'Square', selected: g.kind === 'square' }),
         el('option', { value: 'none', text: 'None', selected: g.kind === 'none' }))),
       el('label', {}, 'Background colour', el('input', { name: 'background_color', type: 'color', value: s.background_color })),
-      el('label', {}, 'Background image', el('input', { name: 'file', type: 'file', accept: 'image/*' })),
+      el('label', {}, 'Map (an image, or an MP4/WebM video for an animated map)', el('input', { name: 'file', type: 'file', accept: 'image/*,video/mp4,video/webm' })),
       el('fieldset.auto', {},
         el('legend', { text: 'Vision' }),
         el('label.check', {}, el('input', { name: 'vision_enabled', type: 'checkbox', checked: !!s.vision?.enabled }),
@@ -499,9 +506,26 @@ export class Sidebar {
         },
         darkness: Number(f.darkness.value) || 0,
       };
+      // A new map keeps its own size and shape: placed at the top-left at 1:1. Line it up with
+      // the grid afterwards with the alignment tool.
+      let background = s.background;
+      let fit = s.background_fit ?? null;
       if (f.file.files[0]) {
-        try { patch.background = await this.api.upload(f.file.files[0]); }
+        try { background = patch.background = await this.api.upload(f.file.files[0]); }
         catch (err) { toast(err.message, 'error'); return; }
+        fit = patch.background_fit = { x: 0, y: 0, sx: 1, sy: 1 };
+      }
+      // The scene covers a placed map: never cropped by the columns and rows, the grow to fit it.
+      if (background && fit) {
+        const img = await mediaSize(background);
+        if (img) {
+          const cover = coverScene(fit, img, size);
+          patch.width = Math.max(patch.width, cover.width);
+          patch.height = Math.max(patch.height, cover.height);
+          if (patch.width > Number(f.cols.value) * size || patch.height > Number(f.rows.value) * size) {
+            toast(`The scene is ${patch.width / size} × ${patch.height / size} squares, to fit the whole map.`);
+          }
+        }
       }
       this.api.update.scene(id, patch);
       win.close();

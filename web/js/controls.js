@@ -12,6 +12,7 @@ import { hooks } from './hooks.js';
 import { isGM } from './store.js';
 import { el, toast } from './ui.js';
 import { icon } from './icons.js';
+import { animatedMaps, setAnimatedMaps } from './media.js';
 
 const SOON = 'Coming soon';
 
@@ -26,6 +27,13 @@ function groups(api) {
         { id: 'box-select', kind: 'board', icon: 'box-select', label: 'Box selection: drag a rectangle to select tokens (Shift adds)', mode: 'box-select' },
         { id: 'target', kind: 'board', icon: 'target', label: 'Target: click tokens to target them (Shift adds; click empty space to clear)', mode: 'target' },
         { id: 'measure', kind: 'board', icon: 'ruler', label: 'Measure distance (also Ctrl-drag anywhere)', mode: 'measure' },
+        {
+          id: 'animated-maps', kind: 'toggle', icon: 'film',
+          label: 'Animated maps: play video maps (off shows a still frame, easier on slower computers)',
+          get: () => animatedMaps(),
+          set: (on) => { setAnimatedMaps(on); board.invalidate(); toast(on ? 'Animated maps play.' : 'Animated maps paused on a still frame.'); },
+        },
+        { id: 'grid-align', kind: 'board', icon: 'grid-align', gmOnly: true, label: 'Align the map to the grid: drag from one grid corner across a block of squares (3 × 3 to start)', mode: 'grid-align' },
         {
           id: 'unconstrained', kind: 'toggle', icon: 'unconstrained', gmOnly: true,
           label: 'Unconstrained movement: move tokens through walls, off the grid',

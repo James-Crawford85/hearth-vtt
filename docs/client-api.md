@@ -76,7 +76,41 @@ hearth.hooks.once(name, fn); hearth.hooks.off(name, fn)
 | `board:tokenMove` | token, {x, y} | return `false` to block a move |
 | `journal:render` | root, entry, hearth | after a journal entry is drawn |
 | `combat:turn` | combat, combatant | the active combatant changed (combatant is `null` if hidden from you) |
-| `board:tool` | tool | the board tool changed (`select`, `box-select`, `target`, `measure`, `wall-select`, `wall-draw`, `light-select`, `light-draw`, `sound-select`, `sound-place`, `draw-select`, `draw-rect`, `draw-ellipse`, `draw-polygon`, `draw-freehand`, `draw-text`) |
+| `board:tool` | tool | the board tool changed (`select`, `box-select`, `target`, `measure`, `grid-align`, `wall-select`, `wall-draw`, `light-select`, `light-draw`, `sound-select`, `sound-place`, `draw-select`, `draw-rect`, `draw-ellipse`, `draw-polygon`, `draw-freehand`, `draw-text`) |
+
+**A board tool of your own.** `hearth.board.registerTool(id, handler)` gives a tool its own left clicks, drags, keys and drawing while it's selected (`hearth.board.setTool(id)`). Right-drag still pans and the wheel still zooms. Everything is optional, and positions are scene pixels:
+
+```js
+hearth.board.registerTool('my-tool', {
+  cursor: 'crosshair',
+  enter() {}, leave() {},           // selected / deselected
+  down(w, e) {}, move(w, e) {}, up(w, e) {},
+  key(e) { return false; },         // true: the key was used
+  draw(ctx, board) {},              // after everything else, in scene coordinates
+});
+```
+
+## The map and the grid
+
+The grid always starts at the scene's top-left corner, with squares of `scene.grid.size` pixels. A map placed on a scene has `scene.background_fit = { x, y, sx, sy }`: its top-left corner (may be negative, to crop) and its scale on each axis. The board draws it there, cut to the scene.
+
+A map can be an image or a video (MP4 or WebM) for an animated map. A video plays muted and looped, each player's copy on its own clock; only the scene on screen plays. Each player can pause animation with **Animated maps** in the token tools, which leaves a still frame and saves battery on slower computers.
+
+**Importing a ready-made map.** **Import map…** in the Scenes tab makes a scene from a map exported by Dungeon Alchemist, Dungeondraft and similar tools, grid, walls, doors and lights included:
+
+- **Foundry-style scene JSON** (Dungeon Alchemist's export, beside its PNG or MP4): choose the JSON and the map. Walls become Hearth's wall kinds by what they block: movement and sight make a wall; movement only, a window (or an invisible wall if it lets sound through); sight only, an ethereal wall; limited sight, terrain; doors and secret doors stay doors, locked or open as exported. Lights keep their ranges (in the scene's units) and their colour when it's tinted. Padding and grid shift are respected. "Global light" keeps the darkness under half, so the whole map stays visible.
+- **Universal VTT** (`.dd2vtt`, `.uvtt`): the map image is inside the file. Lines of sight become walls, portals become doors, and light ranges in squares become distances.
+
+Vision is switched on when the map has walls, so players see only what their tokens see.
+
+A map loaded in the scene settings keeps its own size and shape: `{ x: 0, y: 0, sx: 1, sy: 1 }`, never stretched. The scene grows to whole squares around it if it's bigger than the columns and rows chosen, and saving the settings later never crops a placed map. Scenes from before this (no `background_fit`) still stretch their map over the scene as they always did; **Original size** in the alignment tool fixes one in a click.
+
+The GM's **Align the map to the grid** tool (with the token tools) sets it. Drag from a grid corner drawn on the map to the corner a few squares across and down (3 × 3 to start; more is more precise). Then pick:
+
+- **Fit the grid to the map:** the grid's squares become the measured size (rounded to a pixel), and the map is scaled by the small remainder.
+- **Fit the map to the grid:** the grid keeps its size, and the map is scaled to it. Better once tokens, walls or drawings are placed, since they stay where they are in pixels.
+
+Either way the map's squares land exactly on the grid's, and the scene grows or shrinks to whole squares around the map. If the measured squares aren't square (a stretched scan), the panel says so and the map is evened out. Arrow keys nudge the far corner (Shift: 10 px), Enter applies, **Undo** takes it back, and **Original size** puts the map back at 1:1 with the scene around it.
 
 ## Walls and vision
 
