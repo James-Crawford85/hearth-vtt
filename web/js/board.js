@@ -30,12 +30,15 @@ import { segmentsCross, visibilityPolygon, sees, pointInPolygon, wallRules, bits
 import { toast, formDialog } from './ui.js';
 import { soundDialog } from './audio.js';
 import { drawDrawing, drawSelection, hitDrawing, simplify } from './drawings.js';
+import { isVideo, sizeOf, animatedMaps } from './media.js';
 
 export class Board {
   constructor(canvas, api) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.api = api;
+    // Tools that live in their own module (e.g. grid alignment): id → { down, move, up, key, draw, enter, leave, cursor }.
+    this.toolHandlers = {};
     this.sceneId = null;
     this.cam = { x: 0, y: 0, z: 1 };
     this.selected = new Set();
@@ -133,6 +136,28 @@ export class Board {
     return img.complete && img.naturalWidth ? img : null;
   }
 
+  /**
+   * A scene's map, image or video, once it can be drawn (null until then). A video plays muted
+   * and looped; only the one on screen plays, and none do when this player turned animation off.
+   */
+  background(url) {
+    if (!isVideo(url)) return this.image(url);
+    this.videos ??= new Map();
+    let v = this.videos.get(url);
+    if (!v) {
+      v = document.createElement('video');
+      Object.assign(v, { muted: true, loop: true, playsInline: true, preload: 'auto' });
+      v.addEventListener('loadeddata', () => this.invalidate());
+      v.src = url;
+      this.videos.set(url, v);
+    }
+    for (const [u, other] of this.videos) if (u !== url && !other.paused) other.pause();
+    const animate = animatedMaps();
+    if (animate && v.paused && v.readyState >= 2) v.play().catch(() => {});
+    if (!animate && !v.paused) v.pause();
+    return v.readyState >= 2 ? v : null;
+  }
+
   tokens() {
     const s = this.scene;
     return s ? Object.values(s.tokens) : [];
@@ -179,8 +204,25 @@ export class Board {
 
     ctx.fillStyle = s.background_color || '#1d1f24';
     ctx.fillRect(0, 0, s.width, s.height);
-    const bg = this.image(s.background);
-    if (bg) ctx.drawImage(bg, 0, 0, s.width, s.height);
+    const bg = this.background(s.background);
+    if (bg) {
+      // Placed (aligned to the grid): at its own position and scale, cut to the scene. Otherwise
+      // stretched over the scene.
+      const f = s.background_fit;
+      if (f && f.sx > 0 && f.sy > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, s.width, s.height);
+        ctx.clip();
+        const { w, h } = sizeOf(bg);
+        ctx.drawImage(bg, f.x, f.y, w * f.sx, h * f.sy);
+        ctx.restore();
+      } else ctx.drawImage(bg, 0, 0, s.width, s.height);
+      // An animated map: draw again next frame while it plays.
+      if (bg instanceof HTMLVideoElement && !bg.paused) this.dirty = true;
+    } else if (!s.background) {
+      for (const v of this.videos?.values() ?? []) if (!v.paused) v.pause();
+    }
     hooks.emit('board:drawBackground', ctx, s, this);
 
     if (s.grid?.kind !== 'none') this.drawGrid(s);
@@ -203,7 +245,15 @@ export class Board {
     this.drawDraft();
     if (this.ruler) this.drawRuler();
     this.drawPings();
+    this.toolHandlers[this.tool]?.draw?.(ctx, this);
   }
+
+  /**
+   * A tool handled by its own module: `setTool(id)` hands it the board's left clicks, drags,
+   * keys and a draw call (world coordinates). Handlers: down(w, e), move(w, e), up(w, e),
+   * key(e) → true if used, draw(ctx, board), enter(), leave(); `cursor` for the pointer.
+   */
+  registerTool(id, handler) { this.toolHandlers[id] = handler; }
 
   // ------------------------------------------------------------------ vision
 
@@ -807,6 +857,8 @@ export class Board {
   }
 
   setTool(tool) {
+    if (this.tool !== tool) this.toolHandlers[this.tool]?.leave?.();
+    const entering = this.tool !== tool;
     this.tool = tool;
     this.selectedWall = null;
     this.selectedDrawing = null;
@@ -815,7 +867,8 @@ export class Board {
     this.polyDraft = null;
     this.drag = null;
     const cross = ['wall-draw', 'light-draw', 'sound-place', 'measure', 'box-select', 'target'].includes(tool) || (tool.startsWith('draw-') && tool !== 'draw-select');
-    this.canvas.style.cursor = cross ? 'crosshair' : '';
+    this.canvas.style.cursor = this.toolHandlers[tool]?.cursor ?? (cross ? 'crosshair' : '');
+    if (entering) this.toolHandlers[tool]?.enter?.();
     hooks.emit('board:tool', tool);
     this.invalidate();
   }
@@ -1241,6 +1294,9 @@ export class Board {
         this.drag = { kind: 'pan', sx: e.clientX, sy: e.clientY, cam: { ...this.cam }, button: e.button, w };
         return;
       }
+      // A tool from its own module takes the left button.
+      const th = this.toolHandlers[this.tool];
+      if (th) { th.down?.(w, e); return; }
       if (isGM() && this.tool === 'sound-select') {
         const x = this.soundAt(w);
         this.selectedSound = x?.id ?? null;
@@ -1358,6 +1414,8 @@ export class Board {
         if (this.tool.startsWith('sound-')) this.invalidate();
       }
       const d = this.drag;
+      const th = this.toolHandlers[this.tool];
+      if (th && !d) { th.move?.(this.toWorld(e.offsetX, e.offsetY), e); return; }
       if (!d && this.polyDraft) {
         const w = this.toWorld(e.offsetX, e.offsetY);
         this.polyDraft.cursor = [w.x, w.y];
@@ -1400,6 +1458,8 @@ export class Board {
     c.addEventListener('pointerup', (e) => {
       const d = this.drag;
       this.drag = null;
+      const th = this.toolHandlers[this.tool];
+      if (th && !d) { th.up?.(this.toWorld(e.offsetX, e.offsetY), e); return; }
       if (d?.kind === 'pan' && d.button === 2 && isGM() && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 4) {
         const l = this.tool.startsWith('light-') ? this.lightAt(d.w) : null;
         const snd = this.tool.startsWith('sound-') ? this.soundAt(d.w) : null;
@@ -1489,6 +1549,7 @@ export class Board {
     });
 
     c.addEventListener('keydown', (e) => {
+      if (this.toolHandlers[this.tool]?.key?.(e)) { e.preventDefault(); return; }
       if (this.polyDraft && (e.key === 'Enter' || e.key === 'Escape')) {
         if (e.key === 'Enter') this.finishPolygon();
         else { this.polyDraft = null; this.invalidate(); }

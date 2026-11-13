@@ -2,6 +2,7 @@ import { Connection } from './net.js';
 import { store, applyOp, isGM } from './store.js';
 import { hooks } from './hooks.js';
 import { createApi, loadPackages } from './api.js';
+import { registerGridAlign } from './grid-align.js';
 import { Board } from './board.js';
 import { Sidebar } from './sidebar.js';
 import { Controls } from './controls.js';
@@ -191,6 +192,7 @@ async function start() {
   if (!started) {
     started = true;
     api.board = new Board(document.getElementById('board'), api);
+registerGridAlign(api);
     api.journal = new Journal(api);
     api.items = new Items(api);
     api.tables = new Tables(api, conn);

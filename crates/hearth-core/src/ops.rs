@@ -637,6 +637,24 @@ mod light_tests {
     use serde_json::json;
 
     #[test]
+    fn background_fit_is_set_changed_and_cleared() {
+        let mut w = World::new("T", "freeform");
+        let sid = w.active_scene.clone().unwrap();
+        assert!(w.scenes[&sid].background_fit.is_none(), "a new scene stretches its map, as before");
+        w.apply(&Op::SceneUpdate { id: sid.clone(), patch: json!({"background_fit": {"x": -12.5, "y": 3, "sx": 0.71, "sy": 0.7}, "grid": {"size": 70}}) }).unwrap();
+        let s = &w.scenes[&sid];
+        assert_eq!(s.background_fit, Some(BackgroundFit { x: -12.5, y: 3.0, sx: 0.71, sy: 0.7 }));
+        assert_eq!(s.grid.size, 70);
+        w.apply(&Op::SceneUpdate { id: sid.clone(), patch: json!({"background_fit": {"x": 0}}) }).unwrap();
+        assert_eq!(w.scenes[&sid].background_fit.unwrap().x, 0.0, "a partial patch merges");
+        w.apply(&Op::SceneUpdate { id: sid.clone(), patch: json!({"background_fit": null}) }).unwrap();
+        assert!(w.scenes[&sid].background_fit.is_none());
+        // Saved worlds from before have no such field and load as before; it isn't written when unset.
+        let json = serde_json::to_value(&w.scenes[&sid]).unwrap();
+        assert!(json.get("background_fit").is_none());
+    }
+
+    #[test]
     fn lights_darkness_and_token_light() {
         let mut w = World::new("T", "freeform");
         let sid = w.active_scene.clone().unwrap();

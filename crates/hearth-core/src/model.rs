@@ -147,6 +147,10 @@ pub struct Scene {
     pub height: u32,
     #[serde(default)]
     pub background: Option<String>,
+    /// Where the background image sits and how big it is (set by aligning it to the grid). Without
+    /// it, the image is stretched over the whole scene.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_fit: Option<BackgroundFit>,
     #[serde(default = "default_bg_color")]
     pub background_color: String,
     #[serde(default)]
@@ -173,6 +177,16 @@ pub struct Scene {
     pub darkness: f64,
     #[serde(default)]
     pub flags: Value,
+}
+
+/// A background image's place on its scene: its top-left corner (scene pixels, may be negative
+/// to crop) and its scale per image pixel on each axis.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct BackgroundFit {
+    pub x: f64,
+    pub y: f64,
+    pub sx: f64,
+    pub sy: f64,
 }
 
 /// A light source on a scene. Radii are in the scene's distance units.
@@ -454,6 +468,7 @@ impl Scene {
             width: cols * grid.size,
             height: rows * grid.size,
             background: None,
+            background_fit: None,
             background_color: default_bg_color(),
             grid,
             tokens: BTreeMap::new(),

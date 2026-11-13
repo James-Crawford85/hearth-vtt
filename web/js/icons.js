@@ -14,6 +14,8 @@ const P = {
   'box-select': '<path d="M4 4h3M10 4h4M17 4h3v3M20 10v4M20 17v3h-3M14 20h-4M7 20H4v-3M4 14v-4M4 7V4"/><path d="M10 10l7 5-3 .4 1.5 3-1.4.6-1.5-3-2.6 1.9z"/>',
   target: '<circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="3"/><path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"/>',
   ruler: '<path d="M3 16.5L16.5 3 21 7.5 7.5 21z"/><path d="M7 12.5l2 2M10 9.5l1.5 1.5M13 6.5l2 2"/>',
+  film: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9.5h4M3 14.5h4M17 9.5h4M17 14.5h4"/>',
+  'grid-align': '<path d="M3 3h18v18H3zM9 3v18M15 3v18M3 9h18M3 15h18"/><path d="M1 1l4 4M23 23l-4-4"/>',
   unconstrained: '<path d="M12 3v18M3 12h18M12 3l-2.5 2.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/>',
   // drawing tools
   rect: '<rect x="4" y="6" width="16" height="12" rx="1"/>',

@@ -744,3 +744,6 @@ body.resizing, body.resizing * { user-select: none !important; }
 .met.check { color: var(--accent); }
 .bp-choice { display: inline-flex; gap: 4px; align-items: center; }
 .bp-chip-edit { cursor: pointer; border: 1px dashed var(--border); background: none; }
+
+/* Grid alignment panel (grid-align.js). */
+.ga-modes { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
