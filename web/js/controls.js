@@ -13,8 +13,11 @@ import { isGM } from './store.js';
 import { el, toast } from './ui.js';
 import { icon } from './icons.js';
 import { animatedMaps, setAnimatedMaps } from './media.js';
+import { texture } from './sketch-textures.js';
+import { propDef, propThumb } from './sketch-props.js';
 
 const SOON = 'Coming soon';
+const swatchUrls = new Map(); // material → thumbnail
 
 function groups(api) {
   const board = api.board;
@@ -39,6 +42,16 @@ function groups(api) {
           label: 'Unconstrained movement: move tokens through walls, off the grid',
           get: () => board.unconstrained,
           set: (on) => { board.unconstrained = on; toast(on ? 'Unconstrained movement on: walls and grid ignored.' : 'Unconstrained movement off.'); },
+        },
+        {
+          id: 'see-as', kind: 'toggle', icon: 'eye', gmOnly: true,
+          label: 'See as token: with tokens selected, see only what they see, as their player does',
+          get: () => board.seeAs,
+          set: (on) => {
+            board.seeAs = on;
+            board.invalidate();
+            toast(on ? 'See as token on: select a token to see what it sees.' : 'See as token off.');
+          },
         },
       ],
     },
@@ -95,6 +108,38 @@ function groups(api) {
             for (const w of walls) api.op({ op: 'wall_delete', scene_id: sceneId(), id: w.id });
           },
         },
+      ],
+    },
+    {
+      id: 'sketch', icon: 'sketch', label: 'Sketch a map', gmOnly: true,
+      tools: [
+        { id: 'sketch-select', kind: 'board', icon: 'select', label: 'Select: click a prop, door, window, wall or round room. Drag to move it, use its handles to resize and turn it, Delete removes it. Hold Ctrl to move, turn and resize without snapping', mode: 'sketch-select' },
+        { id: 'sketch-room', kind: 'board', icon: 'sketch-room', label: 'Room: drag a rectangle of floor with walls round it (Shift erases)', mode: 'sketch-room' },
+        { id: 'sketch-round', kind: 'board', icon: 'sketch-round', label: 'Round room: drag from the centre out (Alt: a round floor without walls; Shift-click one to remove it; hold Ctrl for no snapping)', mode: 'sketch-round' },
+        { id: 'sketch-floor', kind: 'board', icon: 'sketch-floor', label: 'Floor: drag a rectangle of floor without walls, for porches, yards and paths (Shift erases)', mode: 'sketch-floor' },
+        { id: 'sketch-brush', kind: 'board', icon: 'sketch-brush', label: 'Brush: paint floor without walls, or change a room\'s floor (Shift erases; [ and ] change the size)', mode: 'sketch-brush' },
+        { id: 'sketch-erase', kind: 'board', icon: 'sketch-erase', label: 'Erase floor, round rooms and light sources ([ and ] change the size)', mode: 'sketch-erase' },
+        { sep: 'Walls' },
+        { id: 'sketch-wall', kind: 'board', icon: 'sketch-wall', label: 'Wall: drag along grid lines, or corner to corner for a diagonal. Shift-drag takes walls away (a room\'s too); Shift-click removes a diagonal. Hold Ctrl to put the ends anywhere', mode: 'sketch-wall' },
+        { id: 'sketch-railing', kind: 'board', icon: 'sketch-railing', label: 'Railing: like a wall, but you see over it (walkways, balconies). Shift-drag takes railings away', mode: 'sketch-railing' },
+        { id: 'sketch-door', kind: 'board', icon: 'door', label: 'Door: click a grid edge (Shift: a secret door); click again to remove', mode: 'sketch-door' },
+        { id: 'sketch-window', kind: 'board', icon: 'window', label: 'Window: click a grid edge (blocks movement, not sight); click again to remove', mode: 'sketch-window' },
+        { id: 'sketch-copy-walls', kind: 'action', icon: 'sketch-copy-walls', label: 'Copy walls from the level below (a hall two storeys tall): its walls, doors and windows become walls on this level', run: () => api.sketch?.copyWallsBelow() },
+        { id: 'sketch-roof', kind: 'board', icon: 'sketch-roof', label: 'Roof: drag a rectangle over a building; the palette picks what it is made of. Players outside see it, a player inside does not. Shift-click removes one', mode: 'sketch-roof' },
+        {
+          id: 'sketch-roofs-shown', kind: 'toggle', icon: 'eye', label: 'Show roofs (faintly, for you)',
+          get: () => board.showRoofs,
+          set: (on) => { board.showRoofs = on; board.invalidate(); },
+        },
+        { sep: 'Floor' },
+        { kind: 'swatches' },
+        { id: 'sketch-upload', kind: 'action', icon: 'upload', label: 'Add your own texture (an image that repeats)', run: () => api.sketch?.uploadTexture() },
+        { sep: 'Props' },
+        { id: 'sketch-place', kind: 'board', icon: 'sketch-place', label: 'Place props: light sources, furniture and nature (opens the props palette). Hold Ctrl to place without snapping', mode: 'sketch-place' },
+        { kind: 'props' },
+        { sep: '' },
+        { id: 'sketch-settings', kind: 'action', icon: 'settings', label: 'Sketch settings: what goes around the floor, walls on or off', run: () => api.sketch?.settings() },
+        { id: 'sketch-clear', kind: 'action', icon: 'clear-all', danger: true, label: 'Erase the sketched map on this scene', run: () => api.sketch?.clear() },
       ],
     },
     {
@@ -169,7 +214,7 @@ export class Controls {
     this.api = api;
     this.groups = groups(api);
     this.group = 'token';
-    this.mode = { token: 'select', drawing: 'draw-rect', walls: 'wall-draw', lighting: 'light-draw', sounds: 'sound-select' }; // last board mode per group
+    this.mode = { token: 'select', drawing: 'draw-rect', walls: 'wall-draw', sketch: 'sketch-room', lighting: 'light-draw', sounds: 'sound-select' }; // last board mode per group
     this.wallType = 'wall';
     let collapsed = false;
     try { collapsed = localStorage.getItem('hearth.controls.collapsed') === '1'; } catch { /* storage blocked */ }
@@ -274,6 +319,8 @@ export class Controls {
     const items = [el('div.ctl-title', { text: g.label })];
     for (const t of g.tools) {
       if (t.sep !== undefined) { items.push(el('div.ctl-sep', { text: t.sep })); continue; }
+      if (t.kind === 'swatches') { items.push(...this.swatches()); continue; }
+      if (t.kind === 'props') { items.push(...this.propSwatches()); continue; }
       if (t.gmOnly && !gm) continue;
       const active = (t.kind === 'board' && board.tool === t.mode)
         || (t.kind === 'type' && board.tool === 'wall-draw' && this.wallType === t.wallType)
@@ -290,10 +337,38 @@ export class Controls {
     this.toolCol.replaceChildren(...items);
   }
 
+  /** The sketch palette: one button per floor material, showing its texture. */
+  swatches() {
+    const sk = this.api.sketch;
+    if (!sk) return [];
+    return sk.materials().map((m) => {
+      const tex = texture(m.id);
+      const src = tex ? (swatchUrls.get(m.id) ?? swatchUrls.set(m.id, tex.toDataURL()).get(m.id)) : m.id;
+      const active = (sk.chosen?.() ?? sk.material) === m.id;
+      return el('button', {
+        class: active ? 'ctl swatch active' : 'ctl swatch', title: m.label, 'aria-label': m.label, 'aria-pressed': String(active),
+        style: `background-image: url("${src}")`,
+        on: { click: () => { sk.choose(m.id); this.render(); } },
+      });
+    });
+  }
+
+  /** The prop the Place tool puts down: click to choose another. */
+  propSwatches() {
+    const sk = this.api.sketch;
+    if (!sk) return [];
+    const p = propDef(sk.prop);
+    return [el('button', {
+      class: 'ctl swatch prop', title: `${p.label}: click to choose another prop`, 'aria-label': `Prop: ${p.label}`,
+      style: `background-image: url("${propThumb(p.id)}")`,
+      on: { click: () => { sk.chooseProp(sk.prop); sk.openPropPalette(); } },
+    })];
+  }
+
   /** Call when the user's role changes. */
   refresh() {
     const t = this.api.board.tool;
-    if (!isGM() && (t.startsWith('wall') || t.startsWith('light') || t.startsWith('sound'))) this.api.board.setTool('select');
+    if (!isGM() && (t.startsWith('wall') || t.startsWith('light') || t.startsWith('sound') || t.startsWith('sketch'))) this.api.board.setTool('select');
     this.render();
   }
 }

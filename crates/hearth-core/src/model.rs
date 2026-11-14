@@ -163,6 +163,9 @@ pub struct Scene {
     /// Shapes, freehand lines and text drawn on the map (under tokens).
     #[serde(default)]
     pub drawings: BTreeMap<Id, Drawing>,
+    /// A map the GM sketched on the scene: painted floor squares (drawn over the background).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sketch: Option<Sketch>,
     #[serde(default)]
     pub vision: Vision,
     /// Light sources placed on the map.
@@ -175,8 +178,59 @@ pub struct Scene {
     /// lit areas and what their own sight (darkvision) reaches.
     #[serde(default)]
     pub darkness: f64,
+    /// Levels besides the ground level (floors above, cellars below). Tokens, walls, lights and
+    /// drawings say which level they're on; the background map is the ground's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub levels: Vec<Level>,
+    /// The ground level's name (none: "Ground").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ground_name: Option<String>,
+    /// The sketches of the levels besides the ground (whose sketch is `sketch`), by level.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub level_sketches: BTreeMap<Id, Sketch>,
+    /// Ways between levels (stairs, ladders…): stand in one to go to another level.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub links: BTreeMap<Id, Link>,
     #[serde(default)]
     pub flags: Value,
+}
+
+/// A level of a scene: a floor above the ground (`elevation` > 0) or below it (< 0).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Level {
+    pub id: Id,
+    pub name: String,
+    pub elevation: f64,
+}
+
+/// A way from one level to another: a token whose middle is inside `poly` (scene px) on
+/// `level` can go to level `to`, at `at` if given (else where it stands).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Link {
+    pub id: Id,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub level: Id,
+    pub poly: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub to: Id,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[f64; 2]>,
+}
+
+impl Link {
+    pub fn contains(&self, p: [f64; 2]) -> bool {
+        let n = self.poly.len();
+        let mut inside = false;
+        let mut j = n.wrapping_sub(1);
+        for i in 0..n {
+            let (a, b) = (self.poly[i], self.poly[j]);
+            if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0] {
+                inside = !inside;
+            }
+            j = i;
+        }
+        inside
+    }
 }
 
 /// A background image's place on its scene: its top-left corner (scene pixels, may be negative
@@ -188,6 +242,140 @@ pub struct BackgroundFit {
     pub sx: f64,
     pub sy: f64,
 }
+
+/// A sketched map: floor painted onto grid squares and round rooms, with walls along the rooms'
+/// edges, walls and openings the GM added, and light sources. Its walls and lights are ordinary
+/// walls and lights whose ids start with `sk-` (see `Op::SketchUpdate`), so vision, lighting and
+/// movement need nothing special. Positions are in grid squares, so the sketch follows the grid.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Sketch {
+    /// Room squares (walls along their edges), `"col,row"` → material: a built-in texture
+    /// (`stone`, `wood`, …) or an uploaded image's URL.
+    #[serde(default)]
+    pub cells: BTreeMap<String, String>,
+    /// Floor squares without walls (porches, paths, water), `"col,row"` → material.
+    #[serde(default)]
+    pub floor: BTreeMap<String, String>,
+    /// Grid edges the GM set, `"h:col,row"` (a square's top) or `"v:col,row"` (its left) →
+    /// `wall`, `open` (no wall), `door`, `secret_door` or `window`.
+    #[serde(default)]
+    pub edges: BTreeMap<String, String>,
+    /// Round rooms and floors.
+    #[serde(default)]
+    pub shapes: BTreeMap<Id, SketchShape>,
+    /// Walls off the grid lines (diagonals), from corner to corner in squares.
+    #[serde(default)]
+    pub lines: BTreeMap<Id, SketchLine>,
+    /// Props drawn on the map: light sources (torch, brazier, …, each with its light) and
+    /// furniture and nature (table, barrel, tree, …).
+    #[serde(default)]
+    pub props: BTreeMap<Id, SketchProp>,
+    /// Roofs over buildings, seen from outside.
+    #[serde(default)]
+    pub roofs: BTreeMap<Id, SketchRoof>,
+    /// Wall styles for single grid edges, edge key → style (overriding `wall_style`).
+    #[serde(default)]
+    pub styles: BTreeMap<String, String>,
+    /// How walls are drawn: `ink` (a line, the default) or a texture (`stone`, `brick`, …).
+    #[serde(default)]
+    pub wall_style: Option<String>,
+    /// What fills the scene around the floor (a material), or none to show the map underneath.
+    #[serde(default)]
+    pub outside: Option<String>,
+    /// Draw walls along the rooms' edges.
+    #[serde(default = "default_true")]
+    pub walls: bool,
+    /// The grid size (pixels) the walls and lights were last worked out for.
+    #[serde(default)]
+    pub size: u32,
+}
+
+impl Default for Sketch {
+    fn default() -> Self {
+        Self {
+            cells: BTreeMap::new(),
+            floor: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            shapes: BTreeMap::new(),
+            lines: BTreeMap::new(),
+            props: BTreeMap::new(),
+            roofs: BTreeMap::new(),
+            styles: BTreeMap::new(),
+            wall_style: None,
+            outside: None,
+            walls: true,
+            size: 0,
+        }
+    }
+}
+
+/// A round room (walled) or round floor, centred at `x, y` with radius `r`, in squares.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SketchShape {
+    #[serde(default = "circle")]
+    pub kind: String,
+    pub x: f64,
+    pub y: f64,
+    pub r: f64,
+    pub material: String,
+    #[serde(default = "default_true")]
+    pub walled: bool,
+    /// Its wall's style, if not the sketch's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_style: Option<String>,
+}
+
+fn circle() -> String {
+    "circle".into()
+}
+
+/// A wall from corner `a` to corner `b`, in squares.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SketchLine {
+    pub a: [f64; 2],
+    pub b: [f64; 2],
+    #[serde(default)]
+    pub kind: WallKind,
+    /// Its style, if not the sketch's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+}
+
+/// A prop drawn on the map, centred at `x, y` in squares, turned `rot` degrees and sized `scale`
+/// times its usual size: a light source (`torch`, `brazier`, `candles`, `campfire`, `lantern`,
+/// `crystal`) or furniture and nature (`table`, `barrel`, `tree`, …). `blocks`: it stands in the
+/// way (walls round it).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SketchProp {
+    pub kind: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default)]
+    pub rot: f64,
+    #[serde(default = "one")]
+    pub scale: f64,
+    #[serde(default)]
+    pub blocks: bool,
+    /// Stairs, ladders…: the level it leads to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<Id>,
+}
+
+/// A roof: a rectangle of `w` × `h` squares from `x, y`, its ridge along the longer side
+/// unless `ridge` says (`h` or `v`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SketchRoof {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub material: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ridge: Option<String>,
+}
+
+/// Walls and lights drawn from a scene's sketch have ids with this prefix.
+pub const SKETCH_WALL: &str = "sk-";
 
 /// A light source on a scene. Radii are in the scene's distance units.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -207,6 +395,9 @@ pub struct Light {
     /// Switched off.
     #[serde(default)]
     pub off: bool,
+    /// The level it is on (empty: the scene's ground level).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub level: Id,
 }
 
 /// A looping sound placed on a scene. Tokens hear it louder the closer they
@@ -354,6 +545,9 @@ pub struct Wall {
     /// Doors only: players can't open or close a locked door.
     #[serde(default)]
     pub locked: bool,
+    /// The level it is on (empty: the scene's ground level).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub level: Id,
 }
 
 impl Wall {
@@ -405,6 +599,10 @@ pub enum DrawingKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Drawing {
     pub id: Id,
+    /// The level it is on (empty: the scene's ground level).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub level: Id,
+
     #[serde(default)]
     pub kind: DrawingKind,
     /// Who drew it; players may only change their own drawings.
@@ -474,10 +672,15 @@ impl Scene {
             tokens: BTreeMap::new(),
             walls: BTreeMap::new(),
             drawings: BTreeMap::new(),
+            sketch: None,
             vision: Vision::default(),
             lights: BTreeMap::new(),
             sounds: BTreeMap::new(),
             darkness: 0.0,
+            levels: Vec::new(),
+            ground_name: None,
+            level_sketches: BTreeMap::new(),
+            links: BTreeMap::new(),
             flags: Value::Null,
         }
     }
@@ -491,7 +694,22 @@ impl Scene {
     /// Would moving in a straight line from `from` to `to` pass through a
     /// wall or closed door?
     pub fn move_blocked(&self, from: [f64; 2], to: [f64; 2]) -> bool {
-        self.walls.values().filter(|w| w.blocks_movement()).any(|w| crate::geometry::segments_cross(from, to, w.a, w.b))
+        self.move_blocked_on("", from, to)
+    }
+
+    /// Would a move on `level` cross a wall there?
+    pub fn move_blocked_on(&self, level: &str, from: [f64; 2], to: [f64; 2]) -> bool {
+        self.walls.values().filter(|w| w.level == level && w.blocks_movement()).any(|w| crate::geometry::segments_cross(from, to, w.a, w.b))
+    }
+
+    /// Is `level` one of this scene's levels (empty: the ground)?
+    pub fn has_level(&self, level: &str) -> bool {
+        level.is_empty() || self.levels.iter().any(|l| l.id == level)
+    }
+
+    /// A link on `level` at a point that leads to `to`.
+    pub fn link_to(&self, level: &str, at: [f64; 2], to: &str) -> Option<&Link> {
+        self.links.values().find(|l| l.level == level && l.to == to && l.contains(at))
     }
 }
 
@@ -525,6 +743,9 @@ pub struct Token {
     /// Light this token gives off, if any.
     #[serde(default)]
     pub light: Option<TokenLight>,
+    /// The level the token is on (empty: the scene's ground level).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub level: Id,
     #[serde(default)]
     pub flags: Value,
 }

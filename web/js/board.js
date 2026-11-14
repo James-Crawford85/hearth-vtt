@@ -31,6 +31,8 @@ import { toast, formDialog } from './ui.js';
 import { soundDialog } from './audio.js';
 import { drawDrawing, drawSelection, hitDrawing, simplify } from './drawings.js';
 import { isVideo, sizeOf, animatedMaps } from './media.js';
+import { drawSketch, sketchChanged, drawOverhang, onOverhang, roofsOf, drawRoof } from './sketch.js';
+import { levelsOf, levelOf, levelNext, onLevel, levelName } from './levels.js';
 
 export class Board {
   constructor(canvas, api) {
@@ -65,6 +67,11 @@ export class Board {
     this.shownDarkness = null;     // darkness as drawn; eases toward the scene's for day/night transitions
     this.lastFrame = 0;
     this.selectedLight = null;
+    this.gmLevel = '';             // the level the GM is looking at
+    this._level = '';              // the level shown (GM: gmLevel; players: their token's)
+    this.showRoofs = true;         // GM: roofs shown (faintly)
+    this.seeAs = false;            // GM: with tokens selected, see what they see (as their player would)
+    this._seeingKey = '';
     this.bind();
     new ResizeObserver(() => this.resize()).observe(canvas);
     this.resize();
@@ -75,6 +82,75 @@ export class Board {
   }
 
   get scene() { return store.world?.scenes[this.sceneId] ?? null; }
+
+  /** The level shown: the GM's choice, or the level of the player's token (selected, else any). */
+  get level() { return this._level; }
+
+  /**
+   * GM with "See as token" on: the selected tokens, whose sight the board shows as their
+   * player would see it. Null otherwise (also when nothing is selected).
+   */
+  get seeing() {
+    if (!this.seeAs || !isGM()) return null;
+    const s = this.scene;
+    const list = [...this.selected].map((id) => s?.tokens[id]).filter(Boolean);
+    return list.length ? list : null;
+  }
+
+  /** Is the board drawn as the GM sees it (everything), rather than as a player would? */
+  get gmView() { return isGM() && !this.seeing; }
+
+  updateLevel() {
+    const s = this.scene;
+    let lvl = '';
+    // Seeing as tokens: their sight changes with the selection.
+    const seeing = this.seeing;
+    const key = seeing ? seeing.map((t) => t.id).sort().join(',') : '';
+    if (key !== this._seeingKey) {
+      this._seeingKey = key;
+      this.visionDirty = true;
+      this.peekExplored = seeing ? this.exploredOf(seeing) : null;
+    }
+    if (s && seeing) {
+      lvl = seeing[0].level ?? '';
+      if (!levelOf(s, lvl)) lvl = '';
+    } else if (s && isGM()) {
+      lvl = levelOf(s, this.gmLevel) ? this.gmLevel : '';
+    } else if (s) {
+      const mine = Object.values(s.tokens).filter((t) => t.actor_id && ownsActor(t.actor_id));
+      const t = mine.find((x) => this.selected.has(x.id)) ?? mine.find((x) => onLevel(x, this._level)) ?? mine[0];
+      lvl = t?.level ?? '';
+      if (!levelOf(s, lvl)) lvl = '';
+    }
+    if (lvl !== this._level) {
+      this._level = lvl;
+      this.visionDirty = true;
+      this.selectedWall = this.selectedLight = this.selectedDrawing = null;
+      hooks.emit('board:level', lvl);
+    }
+    return lvl;
+  }
+
+  /** GM: look at (and build on) a level. */
+  setLevel(id) {
+    this.gmLevel = id ?? '';
+    for (const sid of [...this.selected]) if (!onLevel(this.scene?.tokens[sid], this.gmLevel)) this.selected.delete(sid);
+    this.updateLevel();
+    this.invalidate();
+  }
+
+  /** Player: look at a level by selecting one of their tokens there. */
+  focusLevel(id) {
+    const s = this.scene;
+    const t = Object.values(s?.tokens ?? {}).find((x) => x.actor_id && ownsActor(x.actor_id) && onLevel(x, id));
+    if (!t) return;
+    this.selected = new Set([t.id]);
+    this.updateLevel();
+    this.invalidate();
+  }
+
+  /** Is this wall, light, drawing or token on the level shown? */
+  here(x) { return onLevel(x, this._level); }
   get grid() { return this.scene?.grid?.size ?? 70; }
   invalidate() { this.dirty = true; }
 
@@ -89,6 +165,7 @@ export class Board {
   view(sceneId, { fit = true } = {}) {
     if (this.sceneId === sceneId && !fit) return;
     this.flushExplored();
+    if (this.sceneId !== sceneId) this.gmLevel = '';
     this.sceneId = sceneId;
     this.selected.clear();
     this.selectedWall = null;
@@ -158,9 +235,10 @@ export class Board {
     return v.readyState >= 2 ? v : null;
   }
 
+  /** Tokens on the level shown. */
   tokens() {
     const s = this.scene;
-    return s ? Object.values(s.tokens) : [];
+    return s ? Object.values(s.tokens).filter((t) => this.here(t)) : [];
   }
 
   tokenRect(t) {
@@ -204,7 +282,15 @@ export class Board {
 
     ctx.fillStyle = s.background_color || '#1d1f24';
     ctx.fillRect(0, 0, s.width, s.height);
-    const bg = this.background(s.background);
+    // Levels: the one shown, with those below it showing through where it has no floor. The
+    // map is the ground's, so it's under everything from the ground up; from a cellar, only
+    // deeper cellars show below.
+    const cur = this.updateLevel();
+    const levels = levelsOf(s);
+    const curL = levelOf(s, cur) ?? levels[0];
+    const below = levels.filter((l) => l.elevation < curL.elevation && (curL.elevation < 0 || l.elevation >= 0));
+    if (this.visionDirty) this.computeVision();
+    const bg = curL.elevation >= 0 ? this.background(s.background) : null;
     if (bg) {
       // Placed (aligned to the grid): at its own position and scale, cut to the scene. Otherwise
       // stretched over the scene.
@@ -223,21 +309,32 @@ export class Board {
     } else if (!s.background) {
       for (const v of this.videos?.values() ?? []) if (!v.paused) v.pause();
     }
+    const limited = this.visionLimited();
+    for (const l of below) {
+      drawSketch(ctx, s, this, { level: l.id });
+      this.drawBelow(s, l.id, limited);
+    }
+    drawSketch(ctx, s, this, { level: cur, draft: this.sketchDraft });
     hooks.emit('board:drawBackground', ctx, s, this);
 
     if (s.grid?.kind !== 'none') this.drawGrid(s);
     this.drawDrawings(s);
 
-    const limited = this.visionLimited();
-    if (this.visionDirty) this.computeVision();
+    // The floor above that overhangs this one (walkways), under this level's tokens, which stay
+    // in view; it takes the level's lighting like the rest.
+    this.drawAbove(s, levelNext(s, cur, 1), limited);
     this.drawLighting(s);
+    const seeing = this.seeing;
     for (const t of this.tokens()) {
+      // Seeing as tokens: hidden tokens stay hidden, as from players.
+      if (seeing && t.hidden && !seeing.includes(t)) continue;
       if (!limited || this.tokenVisible(t)) this.drawToken(t);
     }
     hooks.emit('board:drawOverlay', ctx, s, this);
     if (limited) this.drawFog(s);
     ctx.setTransform(z, 0, 0, z, -this.cam.x * z, -this.cam.y * z);
-    if (isGM()) this.drawWalls(s);
+    this.drawRoofs(s, levels, curL);
+    if (this.gmView) this.drawWalls(s);
     if (isGM() && this.tool.startsWith('light-')) this.drawLightIcons(s);
     if (isGM() && this.tool.startsWith('sound-')) this.drawSoundIcons(s);
     this.drawDoors(s, limited);
@@ -246,6 +343,116 @@ export class Board {
     if (this.ruler) this.drawRuler();
     this.drawPings();
     this.toolHandlers[this.tool]?.draw?.(ctx, this);
+  }
+
+  /**
+   * A level below the one shown, after its sketch: its tokens (players: those in sight through
+   * an opening), then a veil, so it reads as below. Where the level above has floor, that floor
+   * covers it all.
+   */
+  drawBelow(s, level, limited) {
+    const ctx = this.ctx;
+    const gm = this.gmView;
+    for (const t of Object.values(s.tokens)) {
+      if (!onLevel(t, level) || (t.hidden && !gm)) continue;
+      if (!gm && limited && !this.sources.some((src) => this.canSee(src, this.center(t)))) continue;
+      this.drawToken(t);
+    }
+    ctx.save();
+    ctx.fillStyle = 'rgba(6, 8, 14, 0.5)';
+    ctx.beginPath();
+    ctx.rect(0, 0, s.width, s.height);
+    // A player looking down through an opening sees what's below clearly.
+    if (!gm && limited) for (const src of this.sources) src.poly.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.fill('evenodd');
+    ctx.restore();
+  }
+
+  /**
+   * The level above, seen from below: its floor without walls (walkways, balconies) overhead,
+   * and tokens standing on it that are in sight.
+   */
+  drawAbove(s, above, limited) {
+    // Only floors above the ground overhang (from a cellar, the ground is a ceiling).
+    if (!above || above.elevation <= 0) return;
+    const gm = this.gmView;
+    const drawn = drawOverhang(this.ctx, s, this, above.id, { alpha: gm ? 0.45 : 0.9 });
+    if (!drawn) return;
+    for (const t of Object.values(s.tokens)) {
+      if (!onLevel(t, above.id) || (t.hidden && !gm) || !onOverhang(s, above.id, this.center(t))) continue;
+      if (!gm && limited && !this.sources.some((src) => this.canSee(src, this.center(t)))) continue;
+      this.drawToken(t);
+    }
+  }
+
+  /**
+   * Roofs over buildings, above everything: seen from outside, gone for a player whose token
+   * is under one (they're inside). The GM sees them faintly, or not at all with roofs hidden.
+   */
+  drawRoofs(s, levels, curL) {
+    if (curL.elevation < 0) return;
+    const gm = this.gmView;
+    if (gm && !this.showRoofs) return;
+    const roofs = roofsOf(s, levels.filter((l) => l.elevation >= 0));
+    if (!roofs.length) return;
+    const g = this.grid;
+    const mine = gm ? [] : this.seeing ?? Object.values(s.tokens).filter((t) => t.actor_id && ownsActor(t.actor_id));
+    const inside = (r, pt) => pt.x >= r.x * g && pt.x <= (r.x + r.w) * g && pt.y >= r.y * g && pt.y <= (r.y + r.h) * g;
+    const limited = this.visionLimited();
+    // A player sees in under a roof where their sight reaches inside (an open door, a window,
+    // a porch), with vision on or off: the roofs go on a layer of their own, with that cut out.
+    const cut = !gm && this.roofSight?.length > 0;
+    let ctx = this.ctx;
+    const shown = [];
+    if (cut) {
+      const { canvas } = this;
+      this.roofCanvas ??= document.createElement('canvas');
+      const rc = this.roofCanvas;
+      if (rc.width !== canvas.width || rc.height !== canvas.height) { rc.width = canvas.width; rc.height = canvas.height; }
+      ctx = rc.getContext('2d');
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.clearRect(0, 0, rc.width, rc.height);
+      ctx.setTransform(this.ctx.getTransform());
+    }
+    for (const { roof, level } of roofs) {
+      const roofElev = levelOf(s, level)?.elevation ?? 0;
+      if (mine.some((t) => (levelOf(s, t.level)?.elevation ?? 0) <= roofElev && inside(roof, this.center(t)))) continue;
+      if (!gm && limited) {
+        // Seen if some of its edge is in sight.
+        const pts = [];
+        for (let i = 0; i <= 8; i++) {
+          const fx = roof.x + (roof.w * i) / 8, fy = roof.y + (roof.h * i) / 8;
+          pts.push({ x: fx * g, y: (roof.y - 0.2) * g }, { x: fx * g, y: (roof.y + roof.h + 0.2) * g }, { x: (roof.x - 0.2) * g, y: fy * g }, { x: (roof.x + roof.w + 0.2) * g, y: fy * g });
+        }
+        if (!pts.some((pt) => this.sources.some((src) => this.canSee(src, pt)))) continue;
+      }
+      drawRoof(ctx, roof, g, this, gm ? 0.4 : 1);
+      shown.push(roof);
+    }
+    if (!cut || !shown.length) return;
+    // Cut what's in sight, inside each roof only (a little in from its edge, so the eaves seen
+    // from outside stay whole).
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    const inset = g * 0.12;
+    for (const r of shown) ctx.rect(r.x * g + inset, r.y * g + inset, r.w * g - inset * 2, r.h * g - inset * 2);
+    ctx.clip();
+    for (const src of this.roofSight) {
+      ctx.save();
+      if (Number.isFinite(src.radius)) { ctx.beginPath(); ctx.arc(src.origin.x, src.origin.y, src.radius, 0, Math.PI * 2); ctx.clip(); }
+      ctx.beginPath();
+      src.poly.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.restore();
+    this.ctx.save();
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx.drawImage(this.roofCanvas, 0, 0);
+    this.ctx.restore();
   }
 
   /**
@@ -259,13 +466,14 @@ export class Board {
 
   /** Is this user's view of the current scene limited by line of sight? */
   visionLimited() {
-    return !isGM() && !!this.scene?.vision?.enabled;
+    return (!isGM() || !!this.seeing) && !!this.scene?.vision?.enabled;
   }
 
   /** Walls that affect sight, with terrain walls marked `limited`. */
   sightSegments() {
     const out = [];
     for (const w of Object.values(this.scene?.walls ?? {})) {
+      if (!this.here(w)) continue;
       const { sight } = wallRules(w);
       if (sight !== 'pass') out.push({ a: { x: w.a[0], y: w.a[1] }, b: { x: w.b[0], y: w.b[1] }, limited: sight === 'limited' });
     }
@@ -275,7 +483,7 @@ export class Board {
   /** Walls that stop tokens moving through them. */
   moveSegments() {
     return Object.values(this.scene?.walls ?? {})
-      .filter((w) => wallRules(w).move)
+      .filter((w) => this.here(w) && wallRules(w).move)
       .map((w) => ({ a: { x: w.a[0], y: w.a[1] }, b: { x: w.b[0], y: w.b[1] } }));
   }
 
@@ -293,7 +501,7 @@ export class Board {
     // Light: placed lights that are on, and tokens carrying light.
     this.lightSources = [];
     for (const l of Object.values(s.lights ?? {})) {
-      if (l.off) continue;
+      if (l.off || !this.here(l)) continue;
       const origin = { x: l.x, y: l.y };
       this.lightSources.push(this.lightSource(origin, poly(origin), l));
     }
@@ -302,18 +510,27 @@ export class Board {
       const origin = this.center(t);
       this.lightSources.push(this.lightSource(origin, poly(origin), t.light));
     }
-    if (!this.visionLimited()) { this.sources = []; return; }
-    const range = Number(s.vision.range) || 0;
+    // Line of sight from this player's tokens (or those the GM sees as). With vision off it
+    // limits nothing but what they see in under roofs (roofSight).
+    this.sources = [];
+    this.roofSight = [];
+    if (this.gmView) return;
+    const limited = this.visionLimited();
+    const range = limited ? Number(s.vision.range) || 0 : 0;
     const radius = range > 0 ? this.toPx(range) : Infinity;
-    this.sources = this.tokens()
-      .filter((t) => t.actor_id && ownsActor(t.actor_id) && !t.hidden)
+    const seeing = this.seeing;
+    this.roofSight = this.tokens()
+      .filter((t) => seeing ? seeing.includes(t) : t.actor_id && ownsActor(t.actor_id) && !t.hidden)
       .map((t) => {
         const origin = this.center(t);
         // A token always sees its own square, even in the dark.
         const own = Math.max(t.w ?? 1, t.h ?? 1) * this.grid * 0.75;
         return { origin, poly: poly(origin), radius, sight: Math.max(own, this.toPx(t.sight || 0)) };
       });
-    if (s.vision.fog) this.markExplored();
+    if (!limited) return;
+    this.sources = this.roofSight;
+    // The GM seeing as a token doesn't explore for anyone.
+    if (s.vision.fog && !seeing) this.markExplored();
   }
 
   /** Scene distance units (e.g. feet) to pixels. */
@@ -391,7 +608,7 @@ export class Board {
       f.clearRect(0, 0, lightCanvas.width, lightCanvas.height);
       f.setTransform(z, 0, 0, z, -this.cam.x * z, -this.cam.y * z);
       // The GM keeps a little more of the map visible so they can work.
-      f.fillStyle = `rgba(4, 6, 18, ${dark * (isGM() ? 0.7 : 0.92)})`;
+      f.fillStyle = `rgba(4, 6, 18, ${dark * (this.gmView ? 0.7 : 0.92)})`;
       f.fillRect(0, 0, s.width, s.height);
       f.globalCompositeOperation = 'destination-out';
       for (const l of this.lightSources) shape(f, l, (a) => `rgba(0, 0, 0, ${a})`);
@@ -400,14 +617,16 @@ export class Board {
       ctx.drawImage(lightCanvas, 0, 0);
       ctx.restore();
     }
-    // Coloured lights tint what they reach.
+    // Coloured lights tint what they reach: faintly by day (a torch doesn't colour sunlight),
+    // fully by night.
     const tinted = this.lightSources.filter((l) => l.color);
     if (tinted.length) {
       ctx.save();
       ctx.globalCompositeOperation = 'screen';
+      const strength = 0.35 * (0.2 + 0.8 * dark);
       for (const l of tinted) {
         const rgb = hexRgb(l.color);
-        if (rgb) shape(ctx, l, (a) => `rgba(${rgb}, ${a * 0.35})`);
+        if (rgb) shape(ctx, l, (a) => `rgba(${rgb}, ${a * strength})`);
       }
       ctx.restore();
     }
@@ -420,6 +639,7 @@ export class Board {
     const r = 16 / this.cam.z;
     let best = null, bestD = r;
     for (const l of Object.values(this.scene?.lights ?? {})) {
+      if (!this.here(l)) continue;
       const d = Math.hypot(l.x - w.x, l.y - w.y);
       if (d <= bestD) { best = l; bestD = d; }
     }
@@ -431,6 +651,7 @@ export class Board {
     const z = this.cam.z;
     const d = this.drag;
     for (const l of Object.values(s.lights ?? {})) {
+      if (!this.here(l)) continue;
       const moving = d?.kind === 'light-move' && d.id === l.id;
       const x = moving ? d.pos.x : l.x, y = moving ? d.pos.y : l.y;
       const sel = l.id === this.selectedLight;
@@ -595,6 +816,7 @@ export class Board {
         { name: 'dim', label: `…and dim light (${units})`, type: 'number', value: t.light?.dim ?? 0, min: 0, step: 'any' },
         { name: 'tinted', label: 'Coloured light', type: 'checkbox', value: !!t.light?.color },
         { name: 'lcolor', label: 'Light colour', type: 'color', value: t.light?.color || '#ffb347' },
+        ...(levelsOf(this.scene).length > 1 ? [{ name: 'level', label: 'Level', type: 'select', value: t.level ?? '', options: [...levelsOf(this.scene)].reverse().map((l) => [l.id, l.name]) }] : []),
       ],
     });
     if (!v || !this.scene?.tokens?.[t.id]) return;
@@ -609,11 +831,13 @@ export class Board {
       hidden: v.hidden,
       sight: Math.max(0, v.sight || 0),
       light: dim > 0 ? { bright, dim, color: v.tinted ? v.lcolor : null } : null,
+      ...(v.level !== undefined && v.level !== (t.level ?? '') ? { level: v.level || null } : {}),
     }, (why) => toast(why, 'error'));
   }
 
   tokenVisible(t) {
-    if (t.actor_id && ownsActor(t.actor_id)) return true;
+    const seeing = this.seeing;
+    if (seeing ? seeing.includes(t) : t.actor_id && ownsActor(t.actor_id)) return true;
     const c = this.center(t);
     return this.sources.some((src) => this.canSee(src, c));
   }
@@ -635,7 +859,7 @@ export class Board {
     f.fillRect(0, 0, fogCanvas.width, fogCanvas.height);
     f.setTransform(z, 0, 0, z, -this.cam.x * z, -this.cam.y * z);
     f.globalCompositeOperation = 'destination-out';
-    const ex = this.explored;
+    const ex = this.seeing ? this.peekExplored : this.explored;
     if (s.vision.fog && ex?.sceneId === this.sceneId) {
       f.globalAlpha = 0.55; // explored but not in sight: dim
       f.imageSmoothingEnabled = true;
@@ -697,8 +921,36 @@ export class Board {
     this.paintExplored();
   }
 
-  paintExplored() {
-    const ex = this.explored;
+  /**
+   * GM seeing as tokens: what the tokens' players have explored (all of them together), read
+   * only. Null when the scene keeps no fog or none of them has explored it.
+   */
+  exploredOf(tokens) {
+    const s = this.scene;
+    if (!s?.vision?.fog) return null;
+    const owners = new Set(tokens.flatMap((t) => store.world.actors?.[t.actor_id]?.owners ?? []));
+    const cell = (s.grid?.size ?? 70) / 2;
+    const cols = Math.ceil(s.width / cell), rows = Math.ceil(s.height / cell);
+    const bytes = Math.ceil((cols * rows) / 8);
+    const bits = new Uint8Array(bytes);
+    let any = false;
+    for (const id of owners) {
+      const saved = store.world.fog?.[s.id]?.[id];
+      if (!saved || saved.cols !== cols || saved.rows !== rows) continue;
+      const b = base64ToBits(saved.data, bytes);
+      for (let i = 0; i < bytes; i++) bits[i] |= b[i];
+      any = true;
+    }
+    if (!any) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = cols;
+    canvas.height = rows;
+    const ex = { sceneId: s.id, cols, rows, cell, bits, canvas };
+    this.paintExplored(ex);
+    return ex;
+  }
+
+  paintExplored(ex = this.explored) {
     const c = ex.canvas.getContext('2d');
     const img = c.createImageData(ex.cols, ex.rows);
     for (let i = 0; i < ex.cols * ex.rows; i++) {
@@ -745,6 +997,8 @@ export class Board {
     const editing = this.tool.startsWith('wall');
     const z = this.cam.z;
     for (const w of Object.values(s.walls ?? {})) {
+      // A sketch's walls are its outline; show them only while editing walls.
+      if (!this.here(w) || (!editing && w.id.startsWith('sk-'))) continue;
       const style = wallStyle(w);
       ctx.save();
       ctx.lineCap = 'round';
@@ -778,7 +1032,7 @@ export class Board {
   /** Can this user see and use the door's icon? Secret doors are GM-only. */
   doorUsable(w) {
     if (w.kind === 'door') return true;
-    return w.kind === 'secret_door' && isGM();
+    return w.kind === 'secret_door' && this.gmView;
   }
 
   /** Doors get a clickable icon at their middle. Players see only doors in sight. */
@@ -786,7 +1040,7 @@ export class Board {
     const { ctx } = this;
     const r = 11 / this.cam.z;
     for (const w of Object.values(s.walls ?? {})) {
-      if (!this.doorUsable(w)) continue;
+      if (!this.here(w) || !this.doorUsable(w)) continue;
       const m = { x: (w.a[0] + w.b[0]) / 2, y: (w.a[1] + w.b[1]) / 2 };
       if (limited && !this.doorVisible(m)) continue;
       ctx.save();
@@ -824,7 +1078,7 @@ export class Board {
     const r = 13 / this.cam.z;
     const limited = this.visionLimited();
     return Object.values(s?.walls ?? {}).find((wall) => {
-      if (!this.doorUsable(wall)) return false;
+      if (!this.here(wall) || !this.doorUsable(wall)) return false;
       const m = { x: (wall.a[0] + wall.b[0]) / 2, y: (wall.a[1] + wall.b[1]) / 2 };
       return Math.hypot(m.x - w.x, m.y - w.y) <= r && (!limited || this.doorVisible(m));
     }) ?? null;
@@ -834,6 +1088,7 @@ export class Board {
     const tol = 7 / this.cam.z;
     let best = null, bestD = tol;
     for (const wall of Object.values(this.scene?.walls ?? {})) {
+      if (!this.here(wall)) continue;
       const [ax, ay] = wall.a, [bx, by] = wall.b;
       const dx = bx - ax, dy = by - ay;
       const t = Math.max(0, Math.min(1, ((w.x - ax) * dx + (w.y - ay) * dy) / (dx * dx + dy * dy || 1)));
@@ -848,6 +1103,7 @@ export class Board {
     if (free) return { x: Math.round(w.x), y: Math.round(w.y) };
     const tol = 12 / this.cam.z;
     for (const wall of Object.values(this.scene?.walls ?? {})) {
+      if (!this.here(wall)) continue;
       for (const p of [wall.a, wall.b]) {
         if (Math.hypot(p[0] - w.x, p[1] - w.y) <= tol) return { x: p[0], y: p[1] };
       }
@@ -878,7 +1134,7 @@ export class Board {
   canEditDrawing(d) { return !!d && (isGM() || d.author === store.user?.id); }
 
   drawDrawings(s) {
-    const ds = Object.values(s.drawings ?? {});
+    const ds = Object.values(s.drawings ?? {}).filter((x) => this.here(x));
     if (!ds.length) return;
     const d = this.drag;
     const shift = (x) => (d?.kind === 'drawing' && d.id === x.id ? [d.dx, d.dy] : [0, 0]);
@@ -927,7 +1183,7 @@ export class Board {
       id: '', kind, x: Math.round(x), y: Math.round(y), w: 0, h: 0, points: [],
       stroke: st.stroke ?? store.user?.color ?? '#e0a040',
       stroke_width: st.stroke_width, fill: st.fill, fill_alpha: st.fill_alpha,
-      text: '', font_size: st.font_size, ...extra,
+      text: '', font_size: st.font_size, ...(this._level ? { level: this._level } : {}), ...extra,
     };
   }
 
@@ -938,7 +1194,7 @@ export class Board {
   /** The topmost drawing under a point that this user may edit. */
   drawingAt(w) {
     const tol = 6 / this.cam.z;
-    const ds = Object.values(this.scene?.drawings ?? {}).filter((d) => this.canEditDrawing(d));
+    const ds = Object.values(this.scene?.drawings ?? {}).filter((d) => this.here(d) && this.canEditDrawing(d));
     for (let i = ds.length - 1; i >= 0; i--) if (hitDrawing(ds[i], w, tol)) return ds[i];
     return null;
   }
@@ -1034,11 +1290,26 @@ export class Board {
       if (this.moveBlocked(t, pos)) { blocked++; continue; }
       if (!hooks.call('board:tokenMove', t, pos)) continue;
       const prev = { x: t.x, y: t.y };
+      const before = this.center(t);
       Object.assign(t, pos); // optimistic; rolled back if the server rejects
       this.api.update.token(this.sceneId, t.id, pos, () => { Object.assign(t, prev); this.invalidate(); });
+      this.takeLink(t, before);
     }
     if (blocked) toast(blocked === 1 ? 'A wall is in the way.' : `${blocked} tokens were blocked by walls.`);
     this.visionDirty = true;
+  }
+
+  /** A token that just stepped onto stairs (a link) goes to the level they lead to. */
+  takeLink(t, from) {
+    const s = this.scene;
+    const here = this.center(t);
+    const inside = (l, pt) => { let c = false; for (let i = 0, j = l.poly.length - 1; i < l.poly.length; j = i++) { const a = l.poly[i], b = l.poly[j]; if ((a[1] > pt.y) !== (b[1] > pt.y) && pt.x < ((b[0] - a[0]) * (pt.y - a[1])) / (b[1] - a[1]) + a[0]) c = !c; } return c; };
+    const link = Object.values(s?.links ?? {}).find((l) => onLevel(l, t.level) && levelOf(s, l.to) && inside(l, here) && !inside(l, from));
+    if (!link) return;
+    const patch = { level: link.to || null };
+    if (link.at) Object.assign(patch, { x: Math.round(link.at[0] - ((t.w ?? 1) * this.grid) / 2), y: Math.round(link.at[1] - ((t.h ?? 1) * this.grid) / 2) });
+    this.api.update.token(this.sceneId, t.id, patch, (why) => toast(why, 'error'));
+    toast(`${t.name} goes ${(levelOf(s, link.to)?.elevation ?? 0) > (levelOf(s, t.level)?.elevation ?? 0) ? 'up' : 'down'} to ${levelName(s, link.to)}.`);
   }
 
   // ------------------------------------------------------------------ targets
@@ -1262,7 +1533,7 @@ export class Board {
       c.setPointerCapture(e.pointerId);
       const w = this.toWorld(e.offsetX, e.offsetY);
       // Door icons: click to open/close; GM right-click to lock/unlock.
-      const door = (e.button === 0 || e.button === 2) ? this.doorAt(w) : null;
+      const door = (e.button === 0 || e.button === 2) && !this.tool.startsWith('sketch-') ? this.doorAt(w) : null;
       if (door) {
         if (e.button === 2) {
           if (isGM()) this.api.op({ op: 'wall_update', scene_id: this.sceneId, id: door.id, patch: { locked: !door.locked } });
@@ -1487,14 +1758,14 @@ export class Board {
         const dim = px > this.grid / 3 ? Math.round(px * per * 2) / 2 : (this.scene.grid.distance || 5) * 8;
         this.api.op({
           op: 'light_create', scene_id: this.sceneId,
-          light: { id: '', x: Math.round(d.a.x), y: Math.round(d.a.y), bright: dim / 2, dim, color: null, off: false },
+          light: { id: '', x: Math.round(d.a.x), y: Math.round(d.a.y), bright: dim / 2, dim, color: null, off: false, ...(this._level ? { level: this._level } : {}) },
         }, (why) => toast(why, 'error'));
       }
       if (d?.kind === 'wall' && Math.hypot(d.b.x - d.a.x, d.b.y - d.a.y) > 2) {
         this.api.op({
           op: 'wall_create',
           scene_id: this.sceneId,
-          wall: { id: '', a: [d.a.x, d.a.y], b: [d.b.x, d.b.y], kind: this.wallType },
+          wall: { id: '', a: [d.a.x, d.a.y], b: [d.b.x, d.b.y], kind: this.wallType, ...(this._level ? { level: this._level } : {}) },
         });
       }
       if (d?.kind === 'token') this.finishTokenDrag(d);
@@ -1647,12 +1918,15 @@ export class Board {
   }
 
   onOp(op) {
+    if (op.op === 'sketch_update' || op.op === 'scene_update') sketchChanged();
+    if (op.op === 'token_update' && 'level' in (op.patch ?? {})) { this.visionDirty = true; if (!onLevel(this.scene?.tokens?.[op.id], this._level)) this.selected.delete(op.id); }
     if (op.op === 'token_delete') this.selected.delete(op.id);
+    if ((op.op === 'fog_explore' || op.op === 'fog_reset') && this.seeing) this._seeingKey = null;
     if (op.op === 'wall_delete' && op.id === this.selectedWall) this.selectedWall = null;
     if (op.op === 'drawing_delete' && op.id === this.selectedDrawing) this.selectedDrawing = null;
     if (op.op === 'scene_delete' && op.id === this.sceneId) this.view(store.world.active_scene);
     // Anything that can change what a token sees.
-    if (/^(token_|wall_|light_|actor_update|scene_update)/.test(op.op)) this.visionDirty = true;
+    if (/^(token_|wall_|light_|actor_update|scene_update|sketch_update)/.test(op.op)) this.visionDirty = true;
     if (op.op === 'light_delete' && op.id === this.selectedLight) this.selectedLight = null;
     if (op.op === 'sound_delete' && op.id === this.selectedSound) this.selectedSound = null;
     // The scene's size or grid changed, or the GM reset the fog: reload explored areas.

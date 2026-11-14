@@ -44,7 +44,7 @@ mod wall_rules {
     use crate::model::*;
 
     fn wall(kind: WallKind, open: bool) -> Wall {
-        Wall { id: "w".into(), a: [0.0, 0.0], b: [0.0, 10.0], kind, open, locked: false }
+        Wall { id: "w".into(), a: [0.0, 0.0], b: [0.0, 10.0], kind, open, locked: false, level: String::new() }
     }
 
     #[test]

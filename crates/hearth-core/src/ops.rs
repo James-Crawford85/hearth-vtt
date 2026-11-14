@@ -47,6 +47,25 @@ pub enum Op {
     DrawingUpdate { scene_id: Id, id: Id, patch: Value },
     DrawingDelete { scene_id: Id, id: Id },
 
+    /// The GM's sketched map: `patch` merges into `scene.sketch` (a square set to null is
+    /// erased). `walls`, when given, replaces the walls drawn from the sketch (ids starting
+    /// `sk-`; others are ignored). A door that already exists keeps whether it's open and locked.
+    /// `lights`, likewise, replaces the sketch's light sources; one that exists keeps `off`;
+    /// and `links` its ways to other levels. `level`: which level's sketch (empty: the ground's);
+    /// the walls, lights and links replaced are that level's, and the new ones are put on it.
+    SketchUpdate {
+        scene_id: Id,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        level: Id,
+        patch: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        walls: Option<std::collections::BTreeMap<Id, Wall>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lights: Option<std::collections::BTreeMap<Id, Light>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        links: Option<std::collections::BTreeMap<Id, Link>>,
+    },
+
     /// Forget what everyone has explored on a scene.
     FogReset { scene_id: Id },
     /// Server-only: store one player's merged explored map.
@@ -175,7 +194,7 @@ impl World {
                     self.active_scene = Some(scene.id.clone());
                 }
             }
-            Op::SceneUpdate { id, patch } => patch_entity(scene_mut(self, id)?, patch, &["tokens", "walls", "drawings", "lights", "sounds"])?,
+            Op::SceneUpdate { id, patch } => patch_entity(scene_mut(self, id)?, patch, &["tokens", "walls", "drawings", "lights", "sounds", "level_sketches", "links"])?,
             Op::SceneDelete { id } => {
                 self.scenes.remove(id).ok_or_else(|| OpError::NotFound("scene", id.clone()))?;
                 if self.active_scene.as_deref() == Some(id) {
@@ -255,6 +274,61 @@ impl World {
             }
             Op::DrawingDelete { scene_id, id } => {
                 scene_mut(self, scene_id)?.drawings.remove(id).ok_or_else(|| OpError::NotFound("drawing", id.clone()))?;
+            }
+            Op::SketchUpdate { scene_id, level, patch, walls, lights, links } => {
+                let s = scene_mut(self, scene_id)?;
+                if !s.has_level(level) {
+                    return Err(OpError::NotFound("level", level.clone()));
+                }
+                let mut sketch = if level.is_empty() { s.sketch.clone() } else { s.level_sketches.get(level).cloned() }.unwrap_or_default();
+                patch_entity(&mut sketch, patch, &[])?;
+                if level.is_empty() {
+                    s.sketch = Some(sketch);
+                } else {
+                    s.level_sketches.insert(level.clone(), sketch);
+                }
+                let mine = |id: &str, on: &str| id.starts_with(SKETCH_WALL) && on == level;
+                if let Some(walls) = walls {
+                    let old: std::collections::BTreeMap<Id, Wall> = s.walls.iter().filter(|(id, w)| mine(id, &w.level)).map(|(id, w)| (id.clone(), w.clone())).collect();
+                    s.walls.retain(|id, w| !mine(id, &w.level));
+                    for (id, w) in walls {
+                        // An id can't be another level's wall.
+                        if !id.starts_with(SKETCH_WALL) || w.a == w.b || s.walls.contains_key(id) {
+                            continue;
+                        }
+                        let mut w = Wall { id: id.clone(), level: level.clone(), ..w.clone() };
+                        if let Some(prev) = old.get(id).filter(|p| p.is_door() && w.is_door()) {
+                            w.open = prev.open;
+                            w.locked = prev.locked;
+                        }
+                        s.walls.insert(id.clone(), w);
+                    }
+                }
+                if let Some(lights) = lights {
+                    let old: std::collections::BTreeMap<Id, bool> = s.lights.iter().filter(|(id, l)| mine(id, &l.level)).map(|(id, l)| (id.clone(), l.off)).collect();
+                    s.lights.retain(|id, l| !mine(id, &l.level));
+                    for (id, l) in lights {
+                        if !id.starts_with(SKETCH_WALL) || s.lights.contains_key(id) {
+                            continue;
+                        }
+                        let mut l = Light { id: id.clone(), level: level.clone(), ..l.clone() };
+                        l.bright = l.bright.max(0.0);
+                        l.dim = l.dim.max(l.bright);
+                        if let Some(off) = old.get(id) {
+                            l.off = *off;
+                        }
+                        s.lights.insert(id.clone(), l);
+                    }
+                }
+                if let Some(links) = links {
+                    s.links.retain(|id, l| !mine(id, &l.level));
+                    for (id, l) in links {
+                        if !id.starts_with(SKETCH_WALL) || s.links.contains_key(id) || l.poly.len() < 3 {
+                            continue;
+                        }
+                        s.links.insert(id.clone(), Link { id: id.clone(), level: level.clone(), ..l.clone() });
+                    }
+                }
             }
             Op::FogReset { scene_id } => {
                 scene_mut(self, scene_id)?;
@@ -493,6 +567,7 @@ mod tests {
             show_name: true,
             sight: 0.0,
             light: None,
+            level: String::new(),
             flags: Value::Null,
         };
         w.apply(&Op::TokenCreate { scene_id: sid.clone(), token }).unwrap();
@@ -774,5 +849,113 @@ mod collection_tests {
         assert!(v.collections["c"].entries.is_empty());
         w.collections.get_mut("c").unwrap().access = Access::None;
         assert!(w.view_for(&p).collections.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sketch_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn walls(v: serde_json::Value) -> Option<std::collections::BTreeMap<Id, Wall>> {
+        Some(serde_json::from_value(v).unwrap())
+    }
+
+    #[test]
+    fn sketch_paints_erases_and_replaces_only_its_own_walls() {
+        let mut w = World::new("T", "freeform");
+        let sid = w.active_scene.clone().unwrap();
+        let mine: Wall = serde_json::from_value(json!({"id": "w1", "a": [0, 0], "b": [0, 70]})).unwrap();
+        w.apply(&Op::WallCreate { scene_id: sid.clone(), wall: mine }).unwrap();
+        w.apply(&Op::SketchUpdate {
+            scene_id: sid.clone(),
+            patch: json!({"cells": {"0,0": "stone", "1,0": "wood"}, "outside": "rock", "size": 70}),
+            walls: walls(json!({
+                "sk-a": {"id": "sk-a", "a": [0, 0], "b": [140, 0]},
+                "sk-d-v:1,0": {"id": "x", "a": [70, 0], "b": [70, 70], "kind": "door"},
+                "stray": {"id": "stray", "a": [0, 0], "b": [5, 5]}
+            })),
+            lights: None,
+            links: None,
+            level: String::new(),
+        })
+        .unwrap();
+        let s = &w.scenes[&sid];
+        let sk = s.sketch.as_ref().unwrap();
+        assert_eq!(sk.cells.len(), 2);
+        assert!(sk.walls, "walls on by default");
+        assert_eq!(sk.outside.as_deref(), Some("rock"));
+        assert!(s.walls.contains_key("w1") && s.walls.contains_key("sk-a") && !s.walls.contains_key("stray"));
+        assert_eq!(s.walls["sk-d-v:1,0"].id, "sk-d-v:1,0", "the key is the id");
+
+        // A player opens the door; redrawing the walls keeps it open.
+        w.apply(&Op::WallUpdate { scene_id: sid.clone(), id: "sk-d-v:1,0".into(), patch: json!({"open": true}) }).unwrap();
+        w.apply(&Op::SketchUpdate {
+            scene_id: sid.clone(),
+            patch: json!({"cells": {"1,0": null}}),
+            walls: walls(json!({"sk-d-v:1,0": {"id": "sk-d-v:1,0", "a": [70, 0], "b": [70, 70], "kind": "door"}})),
+            lights: None,
+            links: None,
+            level: String::new(),
+        })
+        .unwrap();
+        let s = &w.scenes[&sid];
+        assert_eq!(s.sketch.as_ref().unwrap().cells.len(), 1);
+        assert!(s.walls["sk-d-v:1,0"].open);
+        assert!(!s.walls.contains_key("sk-a") && s.walls.contains_key("w1"));
+
+        // Without walls, only the sketch changes.
+        w.apply(&Op::SketchUpdate { scene_id: sid.clone(), patch: json!({"cells": null}), walls: None, lights: None, links: None, level: String::new() }).unwrap();
+        let s = &w.scenes[&sid];
+        assert!(s.sketch.as_ref().unwrap().cells.is_empty());
+        assert_eq!(s.walls.len(), 2);
+    }
+
+    #[test]
+    fn sketch_lights_replace_their_own_and_keep_off() {
+        let mut w = World::new("T", "freeform");
+        let sid = w.active_scene.clone().unwrap();
+        let lamp: Light = serde_json::from_value(json!({"id": "l1", "x": 0, "y": 0, "bright": 10, "dim": 20})).unwrap();
+        w.apply(&Op::LightCreate { scene_id: sid.clone(), light: lamp }).unwrap();
+        let torch = || {
+            Some(serde_json::from_value(json!({"sk-p-t": {"id": "x", "x": 35, "y": 35, "bright": 20, "dim": 10, "color": "#ff9a3c"}, "other": {"id": "other", "x": 0, "y": 0}})).unwrap())
+        };
+        let patch = json!({"props": {"t": {"kind": "torch", "x": 0.5, "y": 0.5}}, "shapes": {"c": {"x": 3, "y": 3, "r": 2, "material": "water", "walled": false}}, "edges": {"v:1,0": "window"}, "lines": {"d": {"a": [0, 0], "b": [2, 2]}}});
+        w.apply(&Op::SketchUpdate { scene_id: sid.clone(), patch, walls: None, lights: torch(), links: None, level: String::new() }).unwrap();
+        let s = &w.scenes[&sid];
+        let sk = s.sketch.as_ref().unwrap();
+        assert_eq!((sk.props.len(), sk.shapes.len(), sk.edges.len(), sk.lines.len()), (1, 1, 1, 1));
+        assert!(!sk.shapes["c"].walled && sk.lines["d"].kind == WallKind::Wall);
+        let t = &sk.props["t"];
+        assert!(t.scale == 1.0 && t.rot == 0.0 && !t.blocks, "a prop is upright, its usual size and in no one's way at first");
+        assert!(sk.wall_style.is_none() && sk.styles.is_empty());
+        assert!(s.lights.contains_key("l1") && !s.lights.contains_key("other"));
+        assert_eq!(s.lights["sk-p-t"].dim, 20.0, "dim is at least bright");
+        // The GM puts the torch out; redrawing keeps it out. Removing the prop removes its light.
+        w.apply(&Op::LightUpdate { scene_id: sid.clone(), id: "sk-p-t".into(), patch: json!({"off": true}) }).unwrap();
+        w.apply(&Op::SketchUpdate { scene_id: sid.clone(), patch: json!({}), walls: None, lights: torch(), links: None, level: String::new() }).unwrap();
+        assert!(w.scenes[&sid].lights["sk-p-t"].off);
+        w.apply(&Op::SketchUpdate { scene_id: sid.clone(), patch: json!({"props": {"t": null}}), walls: None, lights: Some(Default::default()), links: None, level: String::new() }).unwrap();
+        assert_eq!(w.scenes[&sid].lights.len(), 1);
+    }
+
+    #[test]
+    fn scenes_without_a_sketch_serialize_as_before() {
+        let mut w = World::new("T", "freeform");
+        let sid = w.active_scene.clone().unwrap();
+        // Walls, lights and tokens on the ground, as every scene had them before levels.
+        let wall: Wall = serde_json::from_value(json!({"id": "w", "a": [0, 0], "b": [0, 70]})).unwrap();
+        let light: Light = serde_json::from_value(json!({"id": "l", "x": 0, "y": 0, "bright": 5, "dim": 10})).unwrap();
+        let token: Token = serde_json::from_value(json!({"id": "t", "name": "T", "x": 0, "y": 0})).unwrap();
+        w.apply(&Op::WallCreate { scene_id: sid.clone(), wall }).unwrap();
+        w.apply(&Op::LightCreate { scene_id: sid.clone(), light }).unwrap();
+        w.apply(&Op::TokenCreate { scene_id: sid.clone(), token }).unwrap();
+        let v = serde_json::to_value(&w.scenes[&sid]).unwrap();
+        for key in ["sketch", "levels", "ground_name", "level_sketches", "links"] {
+            assert!(v.get(key).is_none(), "{key} isn't written for a scene without it");
+        }
+        for (map, id) in [("walls", "w"), ("lights", "l"), ("tokens", "t")] {
+            assert!(v[map][id].get("level").is_none(), "{map} on the ground have no level");
+        }
     }
 }

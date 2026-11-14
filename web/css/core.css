@@ -137,6 +137,31 @@ h1, h2, h3, h4 { font-family: var(--font-display); margin: .6em 0 .3em; }
 .ctl-title { font: 600 10px var(--font); letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
   writing-mode: vertical-rl; transform: rotate(180deg); align-self: center; padding: 4px 0; display: none; }
 .ctl-sep { height: 1px; background: var(--border); margin: 3px 4px; font-size: 0; }
+.control-tools { max-height: 100%; overflow-y: auto; scrollbar-width: none; }
+.ctl.swatch { height: 26px; background-size: 48px; background-position: center; border-color: var(--border); }
+.ctl.swatch:hover { border-color: var(--text); background-size: 48px; }
+.level-bar { position: fixed; bottom: 66px; left: calc(var(--controls-w, 0px) + 8px); z-index: 5; display: flex; align-items: center; gap: 6px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 5px 10px; box-shadow: var(--shadow); font-size: 13px; }
+.level-bar[hidden] { display: none; }
+.level-bar button { min-width: 28px; padding: 3px 8px; }
+.level-bar select { padding: 3px 6px; }
+.sketch-bar { position: fixed; top: 48px; z-index: 5;
+  left: calc(var(--controls-w, 0px) + (100vw - var(--controls-w, 0px) - var(--sidebar-w)) / 2); transform: translateX(-50%);
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: center; max-width: min(720px, calc(100vw - var(--controls-w, 0px) - var(--sidebar-w) - 16px));
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 5px 10px; box-shadow: var(--shadow); font-size: 13px; }
+.sketch-bar[hidden] { display: none; }
+.sketch-bar button { min-width: 28px; padding: 3px 8px; }
+.sketch-bar button.danger { color: var(--danger); }
+.sketch-bar select { padding: 3px 6px; }
+.sketch-bar label.check { display: inline-flex; align-items: center; gap: 4px; margin: 0; }
+.prop-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.prop-pick { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 2px; font-size: 11px; line-height: 1.2;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
+.prop-pick img { width: 44px; height: 44px; }
+.prop-pick.active { border-color: var(--accent); background: var(--panel-3); }
+.ctl.swatch.prop { height: 28px; background-size: contain; background-repeat: no-repeat; background-color: #2a2622; }
+.ctl.swatch.prop:hover { background-size: contain; }
+.ctl.swatch.active { border: 2px solid var(--accent); box-shadow: 0 0 0 1px var(--panel) inset; }
 
 /* ---- right: panel + icon rail */
 .sidebar { position: fixed; right: 0; top: 0; bottom: 0; width: var(--sidebar-w); display: flex; z-index: 6; }

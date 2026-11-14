@@ -461,7 +461,7 @@ impl AppState {
                 let owned = token.actor_id.as_deref().is_some_and(|a| world.owns_actor(user, a));
                 let movement_only = patch
                     .as_object()
-                    .is_some_and(|p| p.keys().all(|k| matches!(k.as_str(), "x" | "y" | "rotation")));
+                    .is_some_and(|p| p.keys().all(|k| matches!(k.as_str(), "x" | "y" | "rotation" | "level")));
                 if !(owned && movement_only && !token.hidden) {
                     return deny();
                 }
@@ -474,8 +474,26 @@ impl AppState {
                 if let Some(y) = patch.get("y").and_then(|v| v.as_f64()) {
                     moved.y = y;
                 }
-                if scene.move_blocked(scene.token_center(token), scene.token_center(&moved)) {
-                    return Err("A wall is in the way".into());
+                let from = scene.token_center(token);
+                let to_pos = scene.token_center(&moved);
+                let to_level = patch.get("level").map(|l| l.as_str().unwrap_or_default().to_string()).filter(|l| *l != token.level);
+                match to_level {
+                    // On its level: walls there are in the way.
+                    None => {
+                        if scene.move_blocked_on(&token.level, from, to_pos) {
+                            return Err("A wall is in the way".into());
+                        }
+                    }
+                    // Another level: only by way of a link (stairs, a ladder…) where the token
+                    // stands, arriving where the link leads (or staying put).
+                    Some(to) => {
+                        let link = scene.link_to(&token.level, from, &to).ok_or("There's no way to that level from here")?;
+                        let arrive = link.at.unwrap_or(from);
+                        let g = scene.grid.size as f64;
+                        if !scene.has_level(&to) || (to_pos[0] - arrive[0]).hypot(to_pos[1] - arrive[1]) > g {
+                            return Err("There's no way to that level from here".into());
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -718,6 +736,18 @@ impl AppState {
                 }
                 if drawing.text.chars().count() > 2000 {
                     return Err("That text is too long".into());
+                }
+            }
+            Op::SketchUpdate { patch, walls, lights, .. } => {
+                let count = |k: &str| patch.get(k).and_then(|c| c.as_object()).map_or(0, |c| c.len());
+                if ["cells", "floor", "edges"].iter().any(|k| count(k) > 100_000) || ["shapes", "lines", "props"].iter().any(|k| count(k) > 5_000) {
+                    return Err("That sketch is too big".into());
+                }
+                if walls.as_ref().is_some_and(|w| w.len() > 50_000) {
+                    return Err("That sketch has too many walls".into());
+                }
+                if lights.as_ref().is_some_and(|l| l.len() > 5_000) {
+                    return Err("That sketch has too many lights".into());
                 }
             }
             Op::DrawingUpdate { patch, .. } => {
@@ -1954,5 +1984,64 @@ mod library_tests {
         w.apply(&Op::MacroDelete { id: "m".into() }).unwrap();
         assert!(w.hotbars["ann"].is_empty());
         let _ = TableResult { text: String::new(), weight: 1 };
+    }
+}
+
+#[cfg(test)]
+mod level_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A scene with an upper floor, stairs up at (2, 2)–(3, 4) on the ground, a wall upstairs at
+    /// x = 5, and ann's token at (1, 1).
+    fn setup() -> (World, User, Id) {
+        let mut w = World::new("T", "freeform");
+        let ann = User { id: "ann".into(), name: "ann".into(), role: Role::Player, color: "#fff".into() };
+        w.users.insert(ann.id.clone(), ann.clone());
+        let sid = w.active_scene.clone().unwrap();
+        w.apply(&Op::SceneUpdate { id: sid.clone(), patch: json!({"levels": [{"id": "up", "name": "Upper floor", "elevation": 1}]}) }).unwrap();
+        let actor: Actor = serde_json::from_value(json!({"id": "a1", "name": "Ann", "kind": "character", "owners": ["ann"]})).unwrap();
+        w.apply(&Op::ActorCreate { actor }).unwrap();
+        let token: hearth_core::Token = serde_json::from_value(json!({"id": "t1", "name": "Ann", "actor_id": "a1", "x": 70, "y": 70})).unwrap();
+        w.apply(&Op::TokenCreate { scene_id: sid.clone(), token }).unwrap();
+        let links = serde_json::from_value(json!({"sk-l-s": {"id": "sk-l-s", "poly": [[140, 140], [210, 140], [210, 280], [140, 280]], "to": "up"}})).unwrap();
+        let walls = serde_json::from_value(json!({"sk-e-0": {"id": "sk-e-0", "a": [350, 0], "b": [350, 700]}})).unwrap();
+        w.apply(&Op::SketchUpdate { scene_id: sid.clone(), level: String::new(), patch: json!({}), walls: None, lights: None, links: Some(links) }).unwrap();
+        w.apply(&Op::SketchUpdate { scene_id: sid.clone(), level: "up".into(), patch: json!({"floor": {"0,0": "wood"}}), walls: Some(walls), lights: None, links: None }).unwrap();
+        (w, ann, sid)
+    }
+
+    #[test]
+    fn sketch_levels_keep_their_own_walls_and_sketch() {
+        let (w, _, sid) = setup();
+        let s = &w.scenes[&sid];
+        assert_eq!(s.walls["sk-e-0"].level, "up", "the wall is put on the level its sketch is");
+        assert_eq!(s.links["sk-l-s"].level, "", "the stairs are on the ground");
+        assert!(s.sketch.as_ref().is_some_and(|k| k.floor.is_empty()) && s.level_sketches["up"].floor.len() == 1);
+        // A scene patch can't overwrite the levels' sketches or links.
+        let mut w2 = w.clone();
+        w2.apply(&Op::SceneUpdate { id: sid.clone(), patch: json!({"level_sketches": {}, "links": {}}) }).unwrap();
+        assert_eq!(w2.scenes[&sid].level_sketches.len(), 1);
+        assert_eq!(w2.scenes[&sid].links.len(), 1);
+        // A sketch for a level that doesn't exist is refused.
+        assert!(w2.apply(&Op::SketchUpdate { scene_id: sid, level: "nope".into(), patch: json!({}), walls: None, lights: None, links: None }).is_err());
+    }
+
+    #[test]
+    fn players_change_level_only_by_way_of_a_link() {
+        let (mut w, ann, sid) = setup();
+        let ok = |w: &World, patch: serde_json::Value| AppState::permitted(w, &ann, &Op::TokenUpdate { scene_id: sid.clone(), id: "t1".into(), patch });
+        assert!(ok(&w, json!({"level": "up"})).is_err(), "not standing on the stairs");
+        // Onto the stairs (ground walls only; the upstairs wall at x = 350 isn't in the way).
+        assert!(ok(&w, json!({"x": 140, "y": 175})).is_ok());
+        w.apply(&Op::TokenUpdate { scene_id: sid.clone(), id: "t1".into(), patch: json!({"x": 140, "y": 175}) }).unwrap();
+        assert!(ok(&w, json!({"level": "nowhere"})).is_err(), "the stairs don't lead there");
+        assert!(ok(&w, json!({"level": "up", "x": 700, "y": 700})).is_err(), "no arriving somewhere else");
+        assert!(ok(&w, json!({"level": "up"})).is_ok());
+        w.apply(&Op::TokenUpdate { scene_id: sid.clone(), id: "t1".into(), patch: json!({"level": "up"}) }).unwrap();
+        // Upstairs, the wall at x = 350 is in the way; there are no stairs back down here.
+        assert!(ok(&w, json!({"x": 420})).is_err());
+        assert!(ok(&w, json!({"x": 210})).is_ok());
+        assert!(ok(&w, json!({"level": null})).is_err());
     }
 }

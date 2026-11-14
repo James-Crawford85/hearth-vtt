@@ -53,7 +53,7 @@ export function applyOp(op) {
   switch (op.op) {
     case 'world_update': patchEntity(w, op.patch, ['system', 'scenes', 'actors', 'users', 'chat', 'active_scene']); break;
     case 'scene_create': w.scenes[op.scene.id] = op.scene; if (!w.active_scene) w.active_scene = op.scene.id; break;
-    case 'scene_update': if (scene(op.id)) patchEntity(scene(op.id), op.patch, ['tokens', 'walls', 'drawings', 'lights', 'sounds']); break;
+    case 'scene_update': if (scene(op.id)) patchEntity(scene(op.id), op.patch, ['tokens', 'walls', 'drawings', 'lights', 'sounds', 'level_sketches', 'links']); break;
     case 'scene_delete':
       delete w.scenes[op.id];
       if (w.active_scene === op.id) w.active_scene = Object.keys(w.scenes)[0] ?? null;
@@ -147,6 +147,43 @@ export function applyOp(op) {
       break;
     }
     case 'drawing_delete': if (scene(op.scene_id)?.drawings) delete scene(op.scene_id).drawings[op.id]; break;
+    case 'sketch_update': {
+      const s = scene(op.scene_id);
+      const level = op.level ?? '';
+      if (!s || (level && !(s.levels ?? []).some((l) => l.id === level))) break;
+      const blank = { cells: {}, outside: null, walls: true, size: 0 };
+      if (level) { s.level_sketches ??= {}; s.level_sketches[level] = mergePatch(s.level_sketches[level] ?? blank, op.patch); s.level_sketches[level].cells ??= {}; } else { s.sketch = mergePatch(s.sketch ?? blank, op.patch); s.sketch.cells ??= {}; }
+      // The level's own sketch-made walls, lights and links are replaced (others are left alone).
+      const mine = (id, x) => id.startsWith('sk-') && (x.level ?? '') === level;
+      const tag = (x) => (level ? { ...x, level } : (({ level: _, ...rest }) => rest)(x));
+      if (op.walls) {
+        const walls = (s.walls ??= {});
+        const old = {};
+        for (const [id, x] of Object.entries(walls)) if (mine(id, x)) { old[id] = x; delete walls[id]; }
+        for (const [id, w] of Object.entries(op.walls)) {
+          if (!id.startsWith('sk-') || walls[id]) continue;
+          const prev = old[id];
+          const door = (x) => x?.kind === 'door' || x?.kind === 'secret_door';
+          walls[id] = tag({ ...w, id, open: door(prev) && door(w) ? !!prev.open : !!w.open, locked: door(prev) && door(w) ? !!prev.locked : !!w.locked });
+        }
+      }
+      if (op.lights) {
+        const lights = (s.lights ??= {});
+        const off = {};
+        for (const [id, x] of Object.entries(lights)) if (mine(id, x)) { off[id] = !!x.off; delete lights[id]; }
+        for (const [id, l] of Object.entries(op.lights)) {
+          if (!id.startsWith('sk-') || lights[id]) continue;
+          const bright = Math.max(0, l.bright ?? 0);
+          lights[id] = tag({ ...l, id, bright, dim: Math.max(l.dim ?? 0, bright), off: id in off ? off[id] : !!l.off });
+        }
+      }
+      if (op.links) {
+        const links = (s.links ??= {});
+        for (const [id, x] of Object.entries(links)) if (mine(id, x)) delete links[id];
+        for (const [id, l] of Object.entries(op.links)) if (id.startsWith('sk-') && !links[id] && l.poly?.length >= 3) links[id] = tag({ ...l, id });
+      }
+      break;
+    }
     case 'fog_reset': if (w.fog) delete w.fog[op.scene_id]; break;
     case 'fog_explore': ((w.fog ??= {})[op.scene_id] ??= {})[op.user_id] = op.fog; break;
     case 'combat_create': w.combat = op.combat; break;

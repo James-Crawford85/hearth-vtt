@@ -40,7 +40,8 @@ export function createApi(conn) {
     create: {
       actor: (kind, name, data = {}) => op({ op: 'actor_create', actor: { id: '', name, kind, data, owners: [], items: [] } }),
       item: (actorId, kind, name, data = {}) => op({ op: 'item_create', actor_id: actorId, item: { id: '', name, kind, data } }),
-      token: (sceneId, token) => op({ op: 'token_create', scene_id: sceneId, token: { id: '', x: 0, y: 0, ...token } }),
+      // A new token goes on the level the board shows (unless it says otherwise).
+      token: (sceneId, token) => op({ op: 'token_create', scene_id: sceneId, token: { id: '', x: 0, y: 0, ...(api.board?.level && sceneId === api.board.sceneId ? { level: api.board.level } : {}), ...token } }),
     },
 
     /** The system's declared rules: formulas, tables, resources, actions, conditions. */

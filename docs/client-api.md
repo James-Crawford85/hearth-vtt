@@ -126,7 +126,7 @@ hearth.op({ op: 'fog_reset', scene_id })
 
 ### Lighting
 
-`scene.darkness` runs from 0 (day) to 1 (night); the board fades between values over a couple of seconds. Lights live on scenes: `scene.lights[id] = { x, y, bright, dim, color, off }`, with radii in the scene's distance units (e.g. feet) and `color` `null` for plain light. Tokens can carry light (`token.light = { bright, dim, color }`, or `null`) and see in the dark to `token.sight` (darkvision). Light is blocked by the same walls as sight.
+`scene.darkness` runs from 0 (day) to 1 (night); the board fades between values over a couple of seconds. A coloured light tints what it reaches, faintly by day and fully by night. Lights live on scenes: `scene.lights[id] = { x, y, bright, dim, color, off }`, with radii in the scene's distance units (e.g. feet) and `color` `null` for plain light. Tokens can carry light (`token.light = { bright, dim, color }`, or `null`) and see in the dark to `token.sight` (darkvision). Light is blocked by the same walls as sight.
 
 At darkness 0.5 or more, players' tokens see only what is in line of sight *and* either lit or within the token's own `sight` (a token always sees its own square). Below 0.5 they see by daylight. Lights, darkness and token light are GM-only.
 
@@ -142,6 +142,8 @@ hearth.update.token(sceneId, tokenId, { sight: 60, light: { bright: 20, dim: 40,
 
 On the board, `hearth.board.visionLimited()` says whether the current user's view is limited, `hearth.board.sources` holds their line-of-sight polygons, and `hearth.board.tokenVisible(token)` says whether a token is in sight. The server refuses player moves that cross a wall or closed door.
 
+**See as token (GM).** The eye toggle in Token controls (`hearth.board.seeAs = true`) makes the board show what the selected tokens see, as their player would: their sight, darkness and level, with hidden tokens, secret doors and the GM's wall lines left out, and the fog their players have explored (as of when the GM last loaded the world: exploring isn't sent to the GM as it happens). Select another token to look through it; select none to see everything again. It only changes the GM's own screen, and nothing the GM sees this way counts as explored. `hearth.board.seeing` is the tokens being looked through (else null), and `hearth.board.gmView` is false while it's on.
+
 ## Drawings
 
 Drawings live on scenes: `scene.drawings[id] = { kind, author, x, y, w, h, points, stroke, stroke_width, fill, fill_alpha, text, font_size }`, in scene pixels. `kind` is `rect`, `ellipse`, `polygon`, `freehand` or `text`. Rectangles and ellipses use `x, y, w, h`; polygons and freehand lines use `points` (`[[x, y], …]`, relative to `x, y`); text has its top-left corner at `x, y`. `fill` is a colour or `null`.
@@ -153,6 +155,81 @@ hearth.op({ op: 'drawing_delete', scene_id, id })
 ```
 
 Everyone can draw. The server sets `author` to whoever created the drawing; players can change or delete only their own drawings, the GM can change any. Drawings sit under tokens, so fog and line of sight hide them like the map.
+
+## Sketched maps
+
+The GM's **Sketch a map** tools paint a map straight onto a scene's grid, for a quick map at the table:
+
+- **Select**: click a prop, door, window, wall or round room. Drag it to move it (doors and windows to another grid edge); its handles resize it and turn it (props) or move a diagonal's ends. Delete removes it, R / Shift+R turn a prop, + and − resize, arrow keys nudge. A bar above the map shows its options: size, turning, whether a prop blocks, a light source on or off, a wall's style, a door's kind. Removing a stretch of a room's wall opens it.
+- **Room**: drag a rectangle of floor with walls round it. A one-square-wide room makes a corridor.
+- **Round room**: drag from the centre out (half-square steps). Alt makes a round floor without walls, such as a pond; Shift-click one to remove it.
+- **Floor**: drag a rectangle of floor without walls, for porches, yards and paths.
+- **Brush**: paint floor without walls square by square (`[` and `]` change its size). On a room it changes the floor and keeps the walls, so water or a rug can go inside a room.
+- **Erase**: removes floor, round rooms and props under the brush.
+- **Wall**: drag along grid lines to add a wall, or corner to corner at an angle for a diagonal. Shift-drag along grid lines takes walls away, a room's own included, to open a side; Shift-click removes a diagonal.
+- **Railing**: like Wall, but you see over it (walkways, balconies): it blocks movement, not sight. Shift-drag takes railings away.
+- **Door** and **Window**: click a grid edge (Shift for a secret door); click again to remove. Windows block movement but not sight.
+- **Copy walls from below** (on an upper level): the level below's walls, doors and windows become walls here, for a hall or tower two storeys tall. Round rooms' walls aren't copied.
+- **Roof**: drag a rectangle over a building and pick thatch, wooden shingles, slate or clay tiles in the palette. Players outside see the roof, except where their token's sight reaches in under it (through an open door or a window); a player whose token is under it doesn't (they're inside). The GM sees roofs faintly, and can hide them. Select a roof to move or resize it, change its material or turn its ridge.
+- **Place props** (a palette opens): light sources (torch, brazier, campfire, candles, lantern, glowing crystal), each with its own light, and furniture and nature (tables, chairs, benches, beds, bookshelves, barrels, crates, chests, rugs, stairs, pillars, statues, a well, rocks, trees, bushes, rubble). Click to place; light sources next to a wall go on the wall. Some props can stand in the way: rocks, pillars and statues block movement and sight at first; tables, beds and barrels can be set to block movement. Props are drawn in code (`web/js/sketch-props.js`), so they cost nothing to download. Stairs, ladders and trapdoors can lead to another level: select one and pick **Leads to**.
+
+Hold **Ctrl** (Cmd on a Mac) to stop snapping, even partway through a drag: round rooms, props, wall ends, and moving, turning and resizing with Select go exactly where the pointer is (a wall whose ends are off the grid is free-standing, like a diagonal). Shift erases with Room, Floor and Brush, Ctrl+Z undoes, and a palette picks the floor: nine built-in textures (stone, wood, tiles, dirt, grass, sand, water, rock, brick) or an uploaded image that repeats. **Sketch settings** chooses what fills the scene around the floor (a texture, or nothing so a map shows through) whether rooms get walls, and how walls look: an ink line, or stone blocks, brick, wood, cave rock or hedge (any wall, round room or diagonal can have its own style).
+
+A scene's sketch, with positions in grid squares so it follows the grid:
+
+```js
+scene.sketch = {
+  cells:  { '3,4': 'stone' },                 // room squares: walls along the rooms' edges
+  floor:  { '3,5': 'wood' },                  // floor without walls
+  edges:  { 'h:3,5': 'door', 'v:7,2': 'open' }, // a square's top (h) or left (v) edge: wall, open, door, secret_door, window
+  shapes: { id: { kind: 'circle', x: 12, y: 4, r: 3, material: 'stone', walled: true, wall_style: 'rock' } },
+  lines:  { id: { a: [8, 8], b: [11, 11], kind: 'wall', style: 'brick' } },   // walls off the grid lines, corner to corner
+  props:  { id: { kind: 'table', x: 4, y: 10.5, rot: 90, scale: 1.25, blocks: false } },   // degrees; times its usual size
+                                              // stairs, ladders, trapdoors: to: a level id ('' the ground) to lead there
+  styles: { 'v:8,9': 'brick' },               // one edge's wall style
+  wall_style: 'stone',                        // every other wall's (none: an ink line)
+  roofs:  { id: { x: 2, y: 8, w: 6, h: 5, material: 'thatch', ridge: 'h' } },   // squares; ridge along h or v (default: the longer side)
+  outside: 'rock', walls: true, size: 70,     // size: the grid size the walls were worked out for
+}
+```
+
+A material is a built-in id or an image URL. The sketch is drawn over the scene's map and under the grid: floors, rugs and furniture, the walls (an ink line, or a band of texture edged in ink) with their shadow, doors and windows in their frames, then tree tops and light sources. The built-in textures are painted in code (`web/js/sketch-textures.js`), so they cost nothing to download.
+
+Its walls and lights are ordinary walls and lights whose ids start with `sk-` (a prop that stands in the way gets walls round it), so vision, lighting, door icons and movement treat them like any others. Room walls follow the outline of all the rooms together: where a corridor meets a round room, both open into each other. `sketchWalls(sketch, gridSize)` and `sketchLights(sketch, gridSize, distance)` in `web/js/sketch.js` work them out, and one `sketch_update` op (GM only) sends a change with the new walls and lights:
+
+```js
+hearth.op({
+  op: 'sketch_update', scene_id,
+  patch: { cells: { '3,4': 'stone', '5,4': null }, size: 70 },   // null removes an entry; cells: null empties them all
+  walls: { 'sk-w-0': { id: 'sk-w-0', a: [210, 280], b: [280, 280], kind: 'wall' } },   // optional
+  lights: { 'sk-p-t1': { id: 'sk-p-t1', x: 245, y: 84, bright: 20, dim: 40, color: '#ff9a3c' } },   // optional
+})
+```
+
+Each level has its own sketch (see Levels below): `level` on the op says which, and its walls, lights and links get ids ending `@level`. `links` (from the props that lead somewhere) work like `walls`.
+
+`walls` and `lights`, when given, replace every `sk-` wall or light on that level (others are left alone). A door that already exists keeps whether it's open or locked, and a light keeps whether it's switched off. When the grid's size changes, the walls and lights are worked out again the next time the GM picks a sketch tool.
+
+## Levels
+
+A scene can have levels besides its ground: floors above it and cellars below. Everything on a scene is on one level: tokens, walls, lights and drawings carry `level` (a level id; missing means the ground), and each level has its own sketch. The background map is the ground's.
+
+```js
+scene.levels = [{ id: 'up', name: 'Upper floor', elevation: 1 }]   // > 0 above the ground, < 0 below
+scene.ground_name = 'Courtyard'                                       // optional; else "Ground"
+scene.level_sketches = { up: { … } }                                  // the ground's is scene.sketch
+scene.links = { id: { level: '', poly: [[x, y], …], to: 'up', at: null } }   // scene px; at: where it arrives (else where it stands)
+hearth.update.scene(sceneId, { levels: [...] })                       // add, rename, remove (the GM's Levels window does this)
+hearth.update.token(sceneId, tokenId, { level: 'up' })                // GM: anywhere; players: only through a link (below)
+```
+
+**What you see.** The board shows one level: the GM picks it in the level bar (bottom left; **Levels…** adds, renames and removes them), a player sees the level of their token (the selected one, else any), and a player with tokens on several levels picks between them. `hearth.board.level` is the level shown; `hearth.board.setLevel(id)` (GM) changes it. New tokens, walls, lights and drawings go on the level shown. Walls, lights and vision work on one level at a time: a torch upstairs doesn't light the cellar.
+
+**Looking down.** Where a level has no floor, the levels below show through, dimmed. A player's token looking down through an opening (a walkway round a hall) sees the level below clearly wherever its sight reaches, and the tokens down there. From above the ground, cellars don't show (the ground is in the way); from a cellar, only deeper cellars do.
+
+**Looking up.** The level above's floor without walls (walkways and balconies, painted with Floor or Brush) overhangs the level below: it's drawn over the map there, under the tokens, and tokens standing on it are seen from below when they're in sight. Rooms upstairs (painted with Room) are ceilings and don't show from below.
+
+**Stairs.** A token that ends a move inside a link (a stair, ladder or trapdoor that leads somewhere) goes to the level it leads to, and its owner's view follows. The server only lets players change level from inside a link that leads there, arriving where it leads (or where they stand); walls are checked on the token's own level.
 
 ## Journal
 
