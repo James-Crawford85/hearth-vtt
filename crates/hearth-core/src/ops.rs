@@ -104,6 +104,9 @@ pub enum Op {
     MacroCreate { r#macro: Macro },
     MacroUpdate { id: Id, patch: Value },
     MacroDelete { id: Id },
+    /// Add a texture made in the texture creator, or replace one.
+    TextureSet { texture: crate::model::TextureRecipe },
+    TextureDelete { id: Id },
     /// Put a macro in (or, with none, clear) a slot of a user's hotbar.
     HotbarSet { user_id: Id, slot: u8, macro_id: Option<Id> },
 
@@ -415,6 +418,12 @@ impl World {
             Op::MacroUpdate { id, patch } => {
                 let x = self.macros.get_mut(id).ok_or_else(|| OpError::NotFound("macro", id.clone()))?;
                 patch_entity(x, patch, &["id", "author"])?
+            }
+            Op::TextureSet { texture } => {
+                self.textures.insert(texture.id.clone(), texture.clone());
+            }
+            Op::TextureDelete { id } => {
+                self.textures.remove(id).ok_or_else(|| OpError::NotFound("texture", id.clone()))?;
             }
             Op::MacroDelete { id } => {
                 self.macros.remove(id).ok_or_else(|| OpError::NotFound("macro", id.clone()))?;
@@ -862,6 +871,42 @@ mod sketch_tests {
     }
 
     #[test]
+    fn props_keep_their_part_colours_and_plain_props_save_as_before() {
+        let mut w = World::new("T", "freeform");
+        let sid = w.active_scene.clone().unwrap();
+        let patch = json!({"props": {
+            "a": {"kind": "table", "x": 1.0, "y": 1.0, "colors": {"wood": "#336699"}},
+            "b": {"kind": "rock", "x": 3.0, "y": 3.0, "colors": {"stone": "tex:moss"}},
+            "c": {"kind": "chair", "x": 5.0, "y": 5.0},
+        }});
+        w.apply(&Op::SketchUpdate { scene_id: sid.clone(), patch, walls: None, lights: None, links: None, level: String::new() }).unwrap();
+        let sk = w.scenes[&sid].sketch.clone().unwrap();
+        assert_eq!(sk.props["a"].colors["wood"], "#336699");
+        assert_eq!(sk.props["b"].colors["stone"], "tex:moss");
+        assert!(sk.props["c"].colors.is_empty());
+        let json = serde_json::to_value(&sk.props["c"]).unwrap();
+        assert!(json.get("colors").is_none());
+    }
+
+    #[test]
+    fn textures_are_set_replaced_and_deleted_and_old_worlds_unchanged() {
+        let mut w = World::new("T", "freeform");
+        assert!(!serde_json::to_string(&w).unwrap().contains("\"textures\""));
+        let t: crate::model::TextureRecipe = serde_json::from_value(json!({"id": "t1", "name": "Mossy", "recipe": {"base": {"src": "stone"}}})).unwrap();
+        w.apply(&Op::TextureSet { texture: t.clone() }).unwrap();
+        let mut t2 = t.clone();
+        t2.name = "Mossy stone".into();
+        w.apply(&Op::TextureSet { texture: t2 }).unwrap();
+        assert_eq!(w.textures["t1"].name, "Mossy stone");
+        assert_eq!(w.textures["t1"].recipe["base"]["src"], "stone");
+        let back: World = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+        assert_eq!(back.textures.len(), 1);
+        w.apply(&Op::TextureDelete { id: "t1".into() }).unwrap();
+        assert!(w.textures.is_empty());
+        assert!(w.apply(&Op::TextureDelete { id: "t1".into() }).is_err());
+    }
+
+    #[test]
     fn sketch_paints_erases_and_replaces_only_its_own_walls() {
         let mut w = World::new("T", "freeform");
         let sid = w.active_scene.clone().unwrap();
@@ -909,6 +954,27 @@ mod sketch_tests {
         let s = &w.scenes[&sid];
         assert!(s.sketch.as_ref().unwrap().cells.is_empty());
         assert_eq!(s.walls.len(), 2);
+    }
+
+    #[test]
+    fn lights_animate_and_props_keep_their_own_light_and_old_lights_save_as_before() {
+        let mut w = World::new("T", "freeform");
+        let sid = w.active_scene.clone().unwrap();
+        let l: Light = serde_json::from_value(json!({"id": "l1", "x": 0, "y": 0, "bright": 10, "dim": 20})).unwrap();
+        assert!(l.tint.is_none() && l.anim.is_none());
+        let v = serde_json::to_value(&l).unwrap();
+        assert!(v.get("tint").is_none() && v.get("anim").is_none(), "a plain light is written as before");
+        w.apply(&Op::LightCreate { scene_id: sid.clone(), light: l }).unwrap();
+        w.apply(&Op::LightUpdate { scene_id: sid.clone(), id: "l1".into(), patch: json!({"tint": 0.8, "anim": {"kind": "swirl"}}) }).unwrap();
+        let a = w.scenes[&sid].lights["l1"].anim.clone().unwrap();
+        assert_eq!((a.kind.as_str(), a.speed, a.strength), ("swirl", 1.0, 0.5));
+        w.apply(&Op::LightUpdate { scene_id: sid.clone(), id: "l1".into(), patch: json!({"anim": null}) }).unwrap();
+        assert!(w.scenes[&sid].lights["l1"].anim.is_none());
+        // A torch with its own light; one without has none written.
+        let p: SketchProp = serde_json::from_value(json!({"kind": "torch", "x": 1, "y": 1, "light": {"bright": 15, "dim": 30, "anim": {"kind": "torch", "speed": 2}}})).unwrap();
+        assert_eq!(p.light.as_ref().unwrap().anim.as_ref().unwrap().speed, 2.0);
+        let plain: SketchProp = serde_json::from_value(json!({"kind": "torch", "x": 1, "y": 1})).unwrap();
+        assert!(serde_json::to_value(&plain).unwrap().get("light").is_none());
     }
 
     #[test]

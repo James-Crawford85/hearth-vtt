@@ -91,6 +91,21 @@ pub struct World {
     /// Free-form world settings, namespaced by package id.
     #[serde(default)]
     pub settings: Value,
+    /// Textures made in the texture creator (used on sketched maps as `tex:<id>`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub textures: BTreeMap<Id, TextureRecipe>,
+}
+
+/// A texture made in the texture creator: a recipe (textures, masks, colour changes) that every
+/// client draws into the same repeating tile. The recipe is the client's to read; the server
+/// only keeps it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct TextureRecipe {
+    pub id: Id,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub recipe: Value,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -359,6 +374,14 @@ pub struct SketchProp {
     /// Stairs, ladders…: the level it leads to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<Id>,
+    /// Its parts' looks, by part id: a colour (`#rrggbb`) or a texture (a built-in, an uploaded
+    /// picture or `tex:<id>`). Parts not listed keep their own look.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub colors: BTreeMap<String, String>,
+    /// A light source's own light, in the scene's distance units, instead of its usual one (its
+    /// colour comes from its `glow` part).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<TokenLight>,
 }
 
 /// A roof: a rectangle of `w` × `h` squares from `x, y`, its ridge along the longer side
@@ -392,6 +415,12 @@ pub struct Light {
     /// Tint colour, or none for plain light.
     #[serde(default)]
     pub color: Option<String>,
+    /// How strongly the colour tints what it lights, 0–1 (none: 0.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint: Option<f64>,
+    /// How it moves: a flicker, a pulse, swirling energy…
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anim: Option<LightAnim>,
     /// Switched off.
     #[serde(default)]
     pub off: bool,
@@ -482,6 +511,27 @@ pub struct TokenLight {
     pub dim: f64,
     #[serde(default)]
     pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anim: Option<LightAnim>,
+}
+
+/// A light's animation. `kind`: `candle`, `torch`, `campfire`, `pulse`, `swirl`, `smoke`,
+/// `vortex`, `rays`, `fairy`, `chroma`, `storm`, `ghost` (an unknown kind is still light).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LightAnim {
+    pub kind: String,
+    /// 1 is its usual pace.
+    #[serde(default = "one")]
+    pub speed: f64,
+    /// How much it moves, 0–1.
+    #[serde(default = "half")]
+    pub strength: f64,
+}
+
+fn half() -> f64 {
+    0.5
 }
 
 /// Per-scene vision rules. Everything is off by default.
@@ -1031,6 +1081,7 @@ impl World {
             collections: BTreeMap::new(),
             fog: BTreeMap::new(),
             settings: Value::Object(Default::default()),
+            textures: BTreeMap::new(),
         }
     }
 

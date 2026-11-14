@@ -29,6 +29,7 @@ const P = {
   'sketch-roof': '<path d="M3 11l9-7 9 7"/><path d="M5 10v9h14v-9"/><path d="M9 19v-5h6v5"/>',
   'sketch-brush': '<path d="M14.5 4.5l5 5-7.5 7.5-5-5z"/><path d="M7 12l-2.5 2.5c-1 1-1 3.5-1.5 5.5 2-.5 4.5-.5 5.5-1.5L11 16"/>',
   'sketch-erase': '<path d="M8.5 20H20M4.5 15.5l9-9 6 6-7.5 7.5H9z"/><path d="M10 10l6 6"/>',
+  'sketch-textures': '<rect x="2.5" y="4" width="7" height="6" rx="1.2"/><rect x="14.5" y="14" width="7" height="6" rx="1.2"/><path d="M9.5 7c4 0 1 10 5 10"/><circle cx="9.5" cy="7" r="1"/><circle cx="14.5" cy="17" r="1"/>',
   upload: '<path d="M12 15V4M7.5 8.5 12 4l4.5 4.5"/><path d="M4 15v4.5h16V15"/>',
   // drawing tools
   rect: '<rect x="4" y="6" width="16" height="12" rx="1"/>',

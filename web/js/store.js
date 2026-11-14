@@ -81,6 +81,8 @@ export function applyOp(op) {
     case 'table_create': (w.tables ??= {})[op.table.id] = op.table; break;
     case 'table_update': if (w.tables?.[op.id]) patchEntity(w.tables[op.id], op.patch, ['id']); break;
     case 'table_delete': if (w.tables) delete w.tables[op.id]; break;
+    case 'texture_set': (w.textures ??= {})[op.texture.id] = op.texture; break;
+    case 'texture_delete': if (w.textures) delete w.textures[op.id]; break;
     case 'macro_create': (w.macros ??= {})[op.macro.id] = op.macro; break;
     case 'macro_update': if (w.macros?.[op.id]) patchEntity(w.macros[op.id], op.patch, ['id', 'author']); break;
     case 'macro_delete':

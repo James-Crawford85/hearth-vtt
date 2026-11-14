@@ -126,13 +126,19 @@ hearth.op({ op: 'fog_reset', scene_id })
 
 ### Lighting
 
-`scene.darkness` runs from 0 (day) to 1 (night); the board fades between values over a couple of seconds. A coloured light tints what it reaches, faintly by day and fully by night. Lights live on scenes: `scene.lights[id] = { x, y, bright, dim, color, off }`, with radii in the scene's distance units (e.g. feet) and `color` `null` for plain light. Tokens can carry light (`token.light = { bright, dim, color }`, or `null`) and see in the dark to `token.sight` (darkvision). Light is blocked by the same walls as sight.
+`scene.darkness` runs from 0 (day) to 1 (night); the board fades between values over a couple of seconds. Lights live on scenes: `scene.lights[id] = { x, y, bright, dim, color, tint?, anim?, off }`, with radii in the scene's distance units (e.g. feet) and `color` `null` for plain light. Tokens can carry light (`token.light = { bright, dim, color, tint?, anim? }`, or `null`) and see in the dark to `token.sight` (darkvision). Light is blocked by the same walls as sight.
+
+A coloured light tints what it reaches, less by day and fully by night; `tint` (0–1, 0.5 when left out) is how strongly. `anim` makes it move: `{ kind, speed, strength }`, `speed` 1 being its usual pace (0.1–5) and `strength` how much it moves (0–1, 0.5 when left out). The kinds are `candle` (candle flicker), `torch`, `campfire` (flicker with embers), `pulse`, `swirl` (swirling energy), `smoke` (glowing smoke), `vortex`, `rays` (radiant rays), `fairy` (fairy lights), `chroma` (shifting colours), `storm` (lightning flashes) and `ghost` (ghostly waver). An animation with no colour glows in a colour of its own. Every client animates lights itself; nothing is sent while they move.
+
+**The light editor.** Double-click a light (or right-click it with Select lights) to edit it: sliders for bright and dim from 0 to 50 (a box beside each takes any other number), the colour and its strength, the animation with its speed and strength, and on or off. The map shows each change as it's made; Save keeps it and Cancel puts it back. A token's settings have the same editor under Carries light, and a light source drawn on the map (a torch, a crystal…) has a Light… button in Select. A light source keeps its light on the prop (`props[id].light = { bright, dim, tint?, anim? }`, in distance units), so drawing the map again keeps it; its colour is its glow part.
 
 At darkness 0.5 or more, players' tokens see only what is in line of sight *and* either lit or within the token's own `sight` (a token always sees its own square). Below 0.5 they see by daylight. Lights, darkness and token light are GM-only.
 
 ```js
 hearth.op({ op: 'light_create', scene_id, light: { id: '', x: 350, y: 350, bright: 20, dim: 40, color: null, off: false } })
 hearth.op({ op: 'light_update', scene_id, id, patch: { off: true } })
+hearth.op({ op: 'light_update', scene_id, id, patch: { color: '#7fb0ff', tint: 0.8, anim: { kind: 'swirl', speed: 1.5, strength: 0.7 } } })
+hearth.op({ op: 'light_update', scene_id, id, patch: { anim: null } })   // still again
 hearth.op({ op: 'light_delete', scene_id, id })
 hearth.update.scene(sceneId, { darkness: 1 })
 hearth.update.token(sceneId, tokenId, { sight: 60, light: { bright: 20, dim: 40, color: '#ffb347' } })
@@ -170,10 +176,51 @@ The GM's **Sketch a map** tools paint a map straight onto a scene's grid, for a 
 - **Railing**: like Wall, but you see over it (walkways, balconies): it blocks movement, not sight. Shift-drag takes railings away.
 - **Door** and **Window**: click a grid edge (Shift for a secret door); click again to remove. Windows block movement but not sight.
 - **Copy walls from below** (on an upper level): the level below's walls, doors and windows become walls here, for a hall or tower two storeys tall. Round rooms' walls aren't copied.
-- **Roof**: drag a rectangle over a building and pick thatch, wooden shingles, slate or clay tiles in the palette. Players outside see the roof, except where their token's sight reaches in under it (through an open door or a window); a player whose token is under it doesn't (they're inside). The GM sees roofs faintly, and can hide them. Select a roof to move or resize it, change its material or turn its ridge.
-- **Place props** (a palette opens): light sources (torch, brazier, campfire, candles, lantern, glowing crystal), each with its own light, and furniture and nature (tables, chairs, benches, beds, bookshelves, barrels, crates, chests, rugs, stairs, pillars, statues, a well, rocks, trees, bushes, rubble). Click to place; light sources next to a wall go on the wall. Some props can stand in the way: rocks, pillars and statues block movement and sight at first; tables, beds and barrels can be set to block movement. Props are drawn in code (`web/js/sketch-props.js`), so they cost nothing to download. Stairs, ladders and trapdoors can lead to another level: select one and pick **Leads to**.
+- **Roof**: drag a rectangle over a building and pick thatch, wooden shingles, slate or clay tiles in the bar at the top. Players outside see the roof, except where their token's sight reaches in under it (through an open door or a window); a player whose token is under it doesn't (they're inside). The GM sees roofs faintly, and can hide them (**Show roofs** in the Roof tool's bar). Select a roof to move or resize it, change its material or turn its ridge.
+- **Place props**, chosen in the **Map props** tab of the sidebar (it opens with the tool): light sources (torch, brazier, campfire, candles, lantern, glowing crystal), each with its own light, and furniture and nature (tables, chairs, benches, beds, bookshelves, barrels, crates, chests, rugs, stairs, pillars, statues, a well, rocks, trees, bushes, rubble). Click one, then click the map, or drag one from the sidebar onto the map; light sources next to a wall go on the wall. Some props can stand in the way: rocks, pillars and statues block movement and sight at first; tables, beds and barrels can be set to block movement. Props are drawn in code (`web/js/sketch-props.js`), so they cost nothing to download. Each has parts that can be recoloured: select it and open **Colours** in the bar, then give a part another colour or a texture (a built-in, an uploaded picture or one made in the texture creator); its shading follows. A light source's **Light** part is the colour of the light it casts too. **Shift+wheel** over a prop (or on the selected one) makes it bigger or smaller (10% a notch; Ctrl+Shift: 2%), **Alt+wheel** turns it 10° a notch and **Shift+Alt+wheel** 1°; with Place props, the same sets the size and turn of the next prop, and a right-click stops placing and goes to Select. Stairs, ladders and trapdoors can lead to another level: select one and pick **Leads to**.
 
-Hold **Ctrl** (Cmd on a Mac) to stop snapping, even partway through a drag: round rooms, props, wall ends, and moving, turning and resizing with Select go exactly where the pointer is (a wall whose ends are off the grid is free-standing, like a diagonal). Shift erases with Room, Floor and Brush, Ctrl+Z undoes, and a palette picks the floor: nine built-in textures (stone, wood, tiles, dirt, grass, sand, water, rock, brick) or an uploaded image that repeats. **Sketch settings** chooses what fills the scene around the floor (a texture, or nothing so a map shows through) whether rooms get walls, and how walls look: an ink line, or stone blocks, brick, wood, cave rock or hedge (any wall, round room or diagonal can have its own style).
+Hold **Ctrl** (Cmd on a Mac) to stop snapping, even partway through a drag: round rooms, props, wall ends, and moving, turning and resizing with Select go exactly where the pointer is (a wall whose ends are off the grid is free-standing, like a diagonal). Shift erases with Room, Floor and Brush, Ctrl+Z undoes.
+
+**The tool bar.** While a sketch tool is on, a bar at the top of the board shows what it uses, and a click on a texture opens a picker. Room and Round room: the floor and the walls; Floor and Brush: the floor (and the brush's size); Wall: the walls; Roof: the roof, and Show roofs; Place props: the prop. Floors: nine built-in textures (stone, wood, tiles, dirt, grass, sand, water, rock, brick), or **Your own…**, an uploaded image that repeats. Walls: **Default** (the sketch's own, from Sketch settings) or a style of their own, which new walls, rooms and round rooms get. With Select, the bar shows what's selected instead.
+
+**The texture creator.** **Textures** in the Sketch menu (the nodes icon, no tool needed), or **New texture…** and ✎ in any texture picker (floor, walls, roof), opens a node editor, like a blueprint. The **Texture** list at the top of its side panel switches between the world's textures (or starts a new one), asking first if there are unsaved changes. Changes show on the map as you make them, on your screen only (`setDraft` in `texture-recipes.js`); **Save** sends them to everyone and keeps the editor open, **Save as new** makes a copy and goes on with that, and closing without saving puts the map back as it was. Each node makes or changes a picture and shows it; drag from a node's output (right) to another node's input (left) to wire them, and the **Output** node is the texture. Right-click the grid (or **Add node**) to add a node there; drag a node by its title; drag a wired input away to unwire it; drag the grid to pan and use the wheel to zoom; ✕ or Delete removes a node. Wires that would make a loop are refused. Drag the Output node's corner to see the texture bigger (the editor keeps its size as `p.view`; it doesn't change the texture).
+
+| Node | Inputs | Settings |
+|---|---|---|
+| Texture | | a built-in, or **Upload…** a picture of your own (free photo-scanned textures work well); how many squares one copy covers (½ to 8; 2 to start, about right for a 2 m photo-scanned surface) |
+| Colour | | a colour |
+| Cloud noise | | patch size, detail, pattern (**New pattern**) |
+| Levels | mask | cover (how much is white), softness of the edges |
+| Invert | in | |
+| Scale | in | smaller: 1 to 8 copies across (each 1/n the size, still seamless); turn 90°, 180° or 270° |
+| Adjust colour | in | hue, colour, brightness |
+| Blend | under, over, mask | mode (normal, multiply, overlay, screen, soft light, darken, lighten), amount |
+| Relief | colour, height map, normal map | strength, light from (top left by default, as walls' shadows fall), light height, dark cracks, normal map style (OpenGL or DirectX) |
+| Height mask | mask, height map | fills low places first (moss, water, dirt in cracks) or high places first (snow, dust on tops), how closely it follows the height |
+| Output | texture | repeats every 8 or 16 squares; map-wide light and dark (how strong, how big the patches are) |
+
+Masks are grey pictures: white is where Blend's top picture shows.
+
+**Repetition, zoomed out.** A picture's resolution is detail, not area: a photo-scanned texture shows about 2 m of ground however many pixels it has, so at its true size it repeats every couple of squares, and everything in a made texture repeats with its tile. Two settings on Output help when you look at a whole map: **Repeats every 16 × 16 squares** doubles the tile (its noise patches and all; it takes four times the memory), and **Map-wide light and dark** lays very large soft patches (16 to 64 squares across) over the floor as it's painted on the map, so they never repeat with the tile and a field of the same texture stops looking like a grid. Bigger Cloud noise patches feeding the masks help too.
+
+**Height maps.** Photo-scanned texture sets (Megascans and the like) come as several pictures of the same surface: its colour (albedo), a height map (grey, white is high) and a normal map. Upload each into its own Texture node at the same size, so they line up. **Relief** lights the colour from the height map (or the normal map, if one is wired: it wins), so stones get lit tops, shaded sides and dark cracks; it works on any picture, so a built-in's own brightness can serve as a rough height map too. **Height mask** bends a mask by the height, so a second texture blended through it gathers in the low places, or on the high ones, the way moss and snow do; a Levels after it sharpens its edge. An ambient occlusion map, where a set has one, goes on with Blend in Multiply. A typical texture: two Textures into a Blend, with Cloud noise → Levels as its mask, then a second Cloud noise blended over it all in Overlay at a low amount to hide the repeat. One copy covers 8 × 8 squares (noise lines up at the edges, so there are no seams), so it repeats far less often than its sources; the preview shows four copies side by side. A changed texture updates on every map that uses it, for everyone.
+
+Only the recipe is stored, in the world, and every client draws the tile from it (`web/js/texture-recipes.js`, whose `NODE_TYPES` lists the nodes). On a map it's the material `tex:<id>`:
+
+```js
+world.textures = { id: { id, name: 'Mossy flagstones', recipe: { v: 2, nodes: {
+  a:   { type: 'texture', x: 10, y: 10,  p: { src: 'stone', squares: 2 }, in: {} },   // src: a built-in, or an uploaded picture's url
+  b:   { type: 'texture', x: 10, y: 230, p: { src: 'grass', squares: 2 }, in: {} },
+  n:   { type: 'noise',   x: 10, y: 450, p: { size: 2, detail: 3, seed: 1 }, in: {} },
+  l:   { type: 'levels',  x: 170, y: 450, p: { cover: 50, soft: 40 }, in: { in: 'n' } },
+  mix: { type: 'blend',   x: 330, y: 200, p: { mode: 'source-over', amount: 100 }, in: { a: 'a', b: 'b', mask: 'l' } },
+  out: { type: 'output',  x: 490, y: 200, p: {}, in: { in: 'mix' } },
+} } } }
+hearth.op({ op: 'texture_set', texture: { id, name, recipe } })   // GM: add or replace
+hearth.op({ op: 'texture_delete', id })
+```
+
+`in` names, for each input, the node that feeds it (x, y are where the node sits in the editor). Anything missing takes its default, so later versions can add to a recipe without breaking older ones. **Sketch settings** chooses what fills the scene around the floor (a texture, or nothing so a map shows through) whether rooms get walls, and how walls look: an ink line, or stone blocks, brick, wood, cave rock or hedge (any wall, round room or diagonal can have its own style).
 
 A scene's sketch, with positions in grid squares so it follows the grid:
 
@@ -184,7 +231,8 @@ scene.sketch = {
   edges:  { 'h:3,5': 'door', 'v:7,2': 'open' }, // a square's top (h) or left (v) edge: wall, open, door, secret_door, window
   shapes: { id: { kind: 'circle', x: 12, y: 4, r: 3, material: 'stone', walled: true, wall_style: 'rock' } },
   lines:  { id: { a: [8, 8], b: [11, 11], kind: 'wall', style: 'brick' } },   // walls off the grid lines, corner to corner
-  props:  { id: { kind: 'table', x: 4, y: 10.5, rot: 90, scale: 1.25, blocks: false } },   // degrees; times its usual size
+  props:  { id: { kind: 'table', x: 4, y: 10.5, rot: 90, scale: 1.25, blocks: false,     // degrees; times its usual size
+                  colors: { wood: '#5a3a22' } } },   // parts: a colour, or a texture ('stone', an upload's url, 'tex:<id>')
                                               // stairs, ladders, trapdoors: to: a level id ('' the ground) to lead there
   styles: { 'v:8,9': 'brick' },               // one edge's wall style
   wall_style: 'stone',                        // every other wall's (none: an ink line)

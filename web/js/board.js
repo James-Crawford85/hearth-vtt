@@ -27,7 +27,8 @@
 import { hooks } from './hooks.js';
 import { store, isGM, ownsActor } from './store.js';
 import { segmentsCross, visibilityPolygon, sees, pointInPolygon, wallRules, bitsToBase64, base64ToBits } from './vision.js';
-import { toast, formDialog } from './ui.js';
+import { toast, formDialog, el } from './ui.js';
+import { lightDialog, animState, drawAnimOverlay, animColor, isAnimated, seedOf, hexRgb, DEFAULT_TINT } from './light-fx.js';
 import { soundDialog } from './audio.js';
 import { drawDrawing, drawSelection, hitDrawing, simplify } from './drawings.js';
 import { isVideo, sizeOf, animatedMaps } from './media.js';
@@ -500,15 +501,19 @@ export class Board {
     const poly = (origin) => visibilityPolygon(origin, segs, s.width, s.height);
     // Light: placed lights that are on, and tokens carrying light.
     this.lightSources = [];
-    for (const l of Object.values(s.lights ?? {})) {
+    // A light being edited shows as it is set in its window, before it's saved.
+    const draft = this.lightDraft;
+    for (let l of Object.values(s.lights ?? {})) {
+      if (draft?.light === l.id) l = { ...l, ...draft.look, ...('on' in draft.look ? { off: !draft.look.on } : {}) };
       if (l.off || !this.here(l)) continue;
       const origin = { x: l.x, y: l.y };
-      this.lightSources.push(this.lightSource(origin, poly(origin), l));
+      this.lightSources.push(this.lightSource(origin, poly(origin), l, l.id));
     }
     for (const t of this.tokens()) {
-      if (!t.light || !(t.light.dim > 0 || t.light.bright > 0)) continue;
+      const light = draft?.token === t.id ? draft.look : t.light;
+      if (!light || !(light.dim > 0 || light.bright > 0)) continue;
       const origin = this.center(t);
-      this.lightSources.push(this.lightSource(origin, poly(origin), t.light));
+      this.lightSources.push(this.lightSource(origin, poly(origin), light, t.id));
     }
     // Line of sight from this player's tokens (or those the GM sees as). With vision off it
     // limits nothing but what they see in under roofs (roofSight).
@@ -539,9 +544,19 @@ export class Board {
     return (Number(d) || 0) / (s?.grid?.distance || 5) * (s?.grid?.size ?? 70);
   }
 
-  lightSource(origin, poly, l) {
+  lightSource(origin, poly, l, id) {
     const dim = this.toPx(Math.max(l.dim || 0, l.bright || 0));
-    return { origin, poly, bright: Math.min(this.toPx(l.bright || 0), dim), dim, color: l.color || null };
+    return {
+      origin, poly, bright: Math.min(this.toPx(l.bright || 0), dim), dim, color: l.color || null,
+      tint: Number.isFinite(l.tint) ? Math.max(0, Math.min(1, l.tint)) : DEFAULT_TINT, anim: l.anim ?? null, seed: seedOf(id),
+    };
+  }
+
+  /** Show a light (a placed light's id, or a token's) as `look` until it's saved; null: as it is. */
+  previewLight(which, look) {
+    this.lightDraft = look ? { ...which, look } : null;
+    this.visionDirty = true;
+    this.dirty = true;
   }
 
   /** Is it dark enough that only lit areas (and darkvision) can be seen? */
@@ -579,21 +594,34 @@ export class Board {
     const { ctx, canvas, lightCanvas } = this;
     const dpr = devicePixelRatio || 1;
     const z = this.cam.z * dpr;
-    const shape = (c, l, alpha) => {
-      c.save();
+    // Animated lights: how each looks this frame (radius, brightness, colour).
+    const t = now / 1000;
+    const fx = new Map();
+    for (const l of this.lightSources) {
+      const a = animState(l, t);
+      if (a) { fx.set(l, a); this.animating = true; }
+    }
+    const clipTo = (c, l) => {
       c.beginPath();
       l.poly.forEach((p, i) => (i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y)));
       c.closePath();
       c.clip();
-      const g = c.createRadialGradient(l.origin.x, l.origin.y, 0, l.origin.x, l.origin.y, l.dim);
+    };
+    const shape = (c, l, alpha) => {
+      const a = fx.get(l);
+      const R = l.dim * (a?.r ?? 1), m = a?.a ?? 1;
+      const x = l.origin.x + (a?.dx ?? 0) * l.dim, y = l.origin.y + (a?.dy ?? 0) * l.dim;
+      c.save();
+      clipTo(c, l);
+      const g = c.createRadialGradient(x, y, 0, x, y, R);
       const b = l.dim > 0 ? l.bright / l.dim : 1;
-      g.addColorStop(0, alpha(1));
-      g.addColorStop(Math.min(0.999, b), alpha(1));
-      g.addColorStop(Math.min(1, b + (1 - b) * 0.5), alpha(0.55));
+      g.addColorStop(0, alpha(m));
+      g.addColorStop(Math.min(0.999, b), alpha(m));
+      g.addColorStop(Math.min(1, b + (1 - b) * 0.5), alpha(0.55 * m));
       g.addColorStop(1, alpha(0));
       c.fillStyle = g;
       c.beginPath();
-      c.arc(l.origin.x, l.origin.y, l.dim, 0, Math.PI * 2);
+      c.arc(x, y, R, 0, Math.PI * 2);
       c.fill();
       c.restore();
     };
@@ -617,17 +645,31 @@ export class Board {
       ctx.drawImage(lightCanvas, 0, 0);
       ctx.restore();
     }
-    // Coloured lights tint what they reach: faintly by day (a torch doesn't colour sunlight),
-    // fully by night.
-    const tinted = this.lightSources.filter((l) => l.color);
+    // Coloured lights tint what they reach: less by day (a torch doesn't colour sunlight much),
+    // fully by night, as strongly as each light's colour strength says. The colour goes over
+    // what's lit (as a colour), then a glow of it is added (as light).
+    const tinted = this.lightSources.filter((l) => l.color || fx.get(l)?.rgb);
     if (tinted.length) {
+      const day = 0.3 + 0.7 * dark;
       ctx.save();
-      ctx.globalCompositeOperation = 'screen';
-      const strength = 0.35 * (0.2 + 0.8 * dark);
       for (const l of tinted) {
-        const rgb = hexRgb(l.color);
-        if (rgb) shape(ctx, l, (a) => `rgba(${rgb}, ${a * strength})`);
+        const rgb = fx.get(l)?.rgb ?? hexRgb(l.color);
+        if (!rgb || !(l.tint > 0)) continue;
+        ctx.globalCompositeOperation = 'color';
+        shape(ctx, l, (a) => `rgba(${rgb}, ${a * l.tint * 0.7 * day})`);
+        ctx.globalCompositeOperation = 'screen';
+        shape(ctx, l, (a) => `rgba(${rgb}, ${a * l.tint * 0.6 * day})`);
       }
+      ctx.restore();
+    }
+    // Swirls, smoke, rays, embers…: drawn as light over what each animated light reaches.
+    for (const [l, a] of fx) {
+      const rgb = a.rgb ?? hexRgb(animColor(l));
+      if (!rgb) continue;
+      ctx.save();
+      clipTo(ctx, l);
+      ctx.globalCompositeOperation = 'screen';
+      drawAnimOverlay(ctx, l, t, rgb, 0.35 + 0.4 * dark);
       ctx.restore();
     }
   }
@@ -702,22 +744,20 @@ export class Board {
   /** Light settings (double-click a light, or right-click with Select lights). */
   async configureLight(l) {
     const units = this.scene?.grid?.units ?? 'ft';
-    const v = await formDialog({
-      title: 'Light',
-      fields: [
-        { name: 'bright', label: `Bright light radius (${units})`, type: 'number', value: l.bright, min: 0, step: 'any' },
-        { name: 'dim', label: `Dim light radius (${units})`, type: 'number', value: l.dim, min: 0, step: 'any' },
-        { name: 'tinted', label: 'Coloured light', type: 'checkbox', value: !!l.color },
-        { name: 'color', label: 'Colour', type: 'color', value: l.color || '#ffb347' },
-        { name: 'on', label: 'On', type: 'checkbox', value: !l.off },
-      ],
+    // A light source drawn on the map keeps its light on the prop (drawing the map again
+    // rebuilds its light from there); its colour is its glow.
+    const prop = l.id.startsWith('sk-p-') ? this.api.sketch?.propOfLight?.(l.id) : null;
+    const v = await lightDialog({
+      title: prop ? `Light: ${prop.label}` : 'Light',
+      look: l, units, on: !l.off, coloured: !!prop,
+      preview: (look) => this.previewLight({ light: l.id }, look),
     });
     if (!v || !this.scene?.lights?.[l.id]) return;
-    const bright = Math.max(0, v.bright || 0);
-    this.api.op({
-      op: 'light_update', scene_id: this.sceneId, id: l.id,
-      patch: { bright, dim: Math.max(bright, v.dim || 0), color: v.tinted ? v.color : null, off: !v.on },
-    }, (why) => toast(why, 'error'));
+    const { on, ...look } = v;
+    if (prop) this.api.sketch.setPropLight(prop.id, look);
+    const patch = prop ? {} : { ...look, tint: look.tint ?? null, anim: look.anim ?? null };
+    if (on === l.off) patch.off = !on;
+    if (Object.keys(patch).length) this.api.op({ op: 'light_update', scene_id: this.sceneId, id: l.id, patch }, (why) => toast(why, 'error'));
   }
 
   // ------------------------------------------------------------------ ambient sounds (GM)
@@ -812,15 +852,11 @@ export class Board {
         { name: 'img', label: 'Image URL', value: t.img ?? '' },
         { name: 'hidden', label: 'Hidden from players', type: 'checkbox', value: !!t.hidden },
         { name: 'sight', label: `Sees in the dark to (${units}, darkvision)`, type: 'number', value: t.sight ?? 0, min: 0, step: 'any' },
-        { name: 'bright', label: `Carries bright light (${units})`, type: 'number', value: t.light?.bright ?? 0, min: 0, step: 'any' },
-        { name: 'dim', label: `…and dim light (${units})`, type: 'number', value: t.light?.dim ?? 0, min: 0, step: 'any' },
-        { name: 'tinted', label: 'Coloured light', type: 'checkbox', value: !!t.light?.color },
-        { name: 'lcolor', label: 'Light colour', type: 'color', value: t.light?.color || '#ffb347' },
+        { name: 'light', label: 'Carries light', type: 'custom', ...this.tokenLightField(t, units) },
         ...(levelsOf(this.scene).length > 1 ? [{ name: 'level', label: 'Level', type: 'select', value: t.level ?? '', options: [...levelsOf(this.scene)].reverse().map((l) => [l.id, l.name]) }] : []),
       ],
     });
     if (!v || !this.scene?.tokens?.[t.id]) return;
-    const bright = Math.max(0, v.bright || 0), dim = Math.max(bright, v.dim || 0);
     const size = Math.max(0.5, v.size || 1);
     this.api.update.token(this.sceneId, t.id, {
       name: v.name.trim() || t.name,
@@ -830,9 +866,35 @@ export class Board {
       img: v.img.trim() || null,
       hidden: v.hidden,
       sight: Math.max(0, v.sight || 0),
-      light: dim > 0 ? { bright, dim, color: v.tinted ? v.lcolor : null } : null,
+      light: v.light,
       ...(v.level !== undefined && v.level !== (t.level ?? '') ? { level: v.level || null } : {}),
     }, (why) => toast(why, 'error'));
+  }
+
+  /** The light a token carries, in its settings: what it is, and a button to change it. */
+  tokenLightField(t, units) {
+    let light = t.light && t.light.dim > 0 ? t.light : null;
+    const text = el('span.muted');
+    const show = () => {
+      text.textContent = light ? `${light.bright} / ${light.dim} ${units}${light.anim ? ', animated' : ''}` : 'None';
+      none.hidden = !light;
+    };
+    const edit = el('button', { type: 'button', text: 'Edit…', on: { click: async () => {
+      const v = await lightDialog({
+        title: `Light: ${t.name}`, units,
+        look: light ?? { bright: (this.scene?.grid?.distance || 5) * 4, dim: (this.scene?.grid?.distance || 5) * 8, color: null },
+        preview: (look) => this.previewLight({ token: t.id }, look),
+      });
+      if (v) { light = v.dim > 0 ? v : null; show(); this.previewLight({ token: t.id }, light ?? { bright: 0, dim: 0 }); }
+    } } });
+    const none = el('button', { type: 'button', text: 'None', title: 'Carries no light', on: { click: () => { light = null; show(); this.previewLight({ token: t.id }, { bright: 0, dim: 0 }); } } });
+    show();
+    return {
+      render: () => el('div.light-row.light-summary', {}, text, edit, none),
+      read: () => light,
+      // Closing the token's settings ends the preview, saved or not.
+      closed: () => this.previewLight(null, null),
+    };
   }
 
   tokenVisible(t) {
@@ -1520,6 +1582,8 @@ export class Board {
 
     c.addEventListener('wheel', (e) => {
       e.preventDefault();
+      // A tool can use the wheel itself (the sketch tools: Shift+wheel sizes and turns props).
+      if (this.toolHandlers[this.tool]?.wheel?.(this.toWorld(e.offsetX, e.offsetY), e)) return;
       const before = this.toWorld(e.offsetX, e.offsetY);
       this.cam.z = Math.max(0.1, Math.min(4, this.cam.z * Math.exp(-e.deltaY * 0.0015)));
       const after = this.toWorld(e.offsetX, e.offsetY);
@@ -1732,6 +1796,8 @@ export class Board {
       const th = this.toolHandlers[this.tool];
       if (th && !d) { th.up?.(this.toWorld(e.offsetX, e.offsetY), e); return; }
       if (d?.kind === 'pan' && d.button === 2 && isGM() && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 4) {
+        // A tool can take a right-click (not a right-drag, which pans) for itself.
+        if (this.toolHandlers[this.tool]?.rightClick?.(d.w, e)) return;
         const l = this.tool.startsWith('light-') ? this.lightAt(d.w) : null;
         const snd = this.tool.startsWith('sound-') ? this.soundAt(d.w) : null;
         const t = l || snd ? null : this.pickToken(d.w);
@@ -1959,12 +2025,4 @@ function rectFrom(a, b) {
   return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
 }
 
-/** '#rrggbb' or '#rgb' → 'r, g, b' (or null). */
-function hexRgb(hex) {
-  const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex ?? '');
-  if (!m) return null;
-  let h = m[1];
-  if (h.length === 3) h = [...h].map((c) => c + c).join('');
-  const n = parseInt(h, 16);
-  return `${n >> 16}, ${(n >> 8) & 255}, ${n & 255}`;
-}
+

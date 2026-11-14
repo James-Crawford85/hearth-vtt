@@ -12,21 +12,26 @@
 //   sketch-door    click a grid edge: a door (Shift: secret door); again to remove
 //   sketch-window  click a grid edge: a window; again to remove
 //   sketch-place   click to place the chosen prop: a light source (next to a wall it's mounted on
-//                  the wall) or furniture and nature
+//                  the wall) or furniture and nature. Props are chosen in the Map props tab of the
+//                  sidebar, and can be dragged from there onto the map.
+// While a sketch tool is on, a bar at the top shows its options: the floor, wall and roof
+// textures it uses, the brush size; with Select, what's selected.
 //   sketch-select  click a prop, door, window, wall or round room: drag to move it, handles to
 //                  resize and turn it, Delete removes it; a bar shows its options
 // Hold Ctrl (Cmd on a Mac) to stop snapping: round rooms, walls, props and moving, turning and
 // resizing in Select go exactly where the pointer is (a wall off the grid lines is free-standing).
 // Ctrl+Z undoes, Esc goes back to Select. Each change is one op carrying the sketch's walls and
 // lights, worked out again.
-import { toast, formDialog, openWindow, el } from './ui.js';
+import { toast, formDialog, el } from './ui.js';
 import { isGM, store } from './store.js';
 import { hooks } from './hooks.js';
 import { MATERIALS, WALL_STYLES, ROOF_MATERIALS, texture } from './sketch-textures.js';
 import { cellKey, cellOf, withPatch, sketchWalls, plainWalls, sketchLights, sketchLinks, edgeSegment, edgeNear, edgesAlong } from './sketch.js';
 import { sketchOf, skId, levelsOf, levelName } from './levels.js';
-import { LIGHTS, FURNITURE, propDef, isLight, drawPropAt, propThumb, propHit, propOutline } from './sketch-props.js';
+import { LIGHTS, FURNITURE, propDef, isLight, isHex, propLightColor, drawPropAt, propThumb, propHit, propOutline } from './sketch-props.js';
 import { drawRoof } from './sketch.js';
+import { recipes } from './texture-recipes.js';
+import { openTextureCreator } from './texture-creator.js';
 
 const HOVER = 'rgba(255, 190, 40, 0.95)';
 const ERASE = 'rgba(255, 90, 70, 0.95)';
@@ -39,6 +44,7 @@ export function registerSketch(api) {
   const board = api.board;
   const st = {
     material: 'stone',
+    wallStyle: null, // walls drawn from now on: a WALL_STYLES id, or null for the sketch's own
     prop: 'torch',
     brush: 1,
     undo: [],     // [{ sceneId, patch }]: the change that puts things back
@@ -58,6 +64,19 @@ export function registerSketch(api) {
 
   // ---------------------------------------------------------------- changes
 
+  const plain = (v) => v != null && typeof v === 'object' && !Array.isArray(v);
+  /**
+   * A merge patch that turns `from` into `to`: a copy of `to`, with null for each key `from`
+   * has and `to` doesn't (inside plain objects too).
+   */
+  function replacing(from, to) {
+    if (!plain(from) || !plain(to)) return structuredClone(to);
+    const out = {};
+    for (const [key, v] of Object.entries(to)) out[key] = plain(v) && plain(from[key]) ? replacing(from[key], v) : structuredClone(v);
+    for (const key of Object.keys(from)) if (!(key in to)) out[key] = null;
+    return out;
+  }
+
   /** Send a change to the sketch (maps of entries, null erasing one), with its walls and lights. */
   function commit(patch, { record = true } = {}) {
     const s = scene();
@@ -73,9 +92,11 @@ export function registerSketch(api) {
       for (const [id, x] of Object.entries(v ?? {})) {
         const was = before[k][id] ?? null;
         if (same(was, x)) continue;
-        (clean[k] ??= {})[id] = x ?? null;
+        // Changes merge into what's there, so whatever an entry no longer has is sent as null
+        // (a prop's colours taken off), both ways.
+        (clean[k] ??= {})[id] = x == null ? null : replacing(was, x);
         // A copy: the store updates entries in place, which would change the undo too.
-        (inverse[k] ??= {})[id] = was === null ? null : structuredClone(was);
+        (inverse[k] ??= {})[id] = was === null ? null : replacing(x, was);
         changed = true;
       }
     }
@@ -191,7 +212,9 @@ export function registerSketch(api) {
       if (!st.drag) { board.invalidate(); return; }
       st.drag.b = cellAt(w);
       const keys_ = rectCells(st.drag.a, st.drag.b);
-      setDraft(st.drag.erase ? paint.erase(keys_) : paint[kind](keys_, st.material));
+      const patch = st.drag.erase ? paint.erase(keys_) : paint[kind](keys_, st.material);
+      if (kind === 'room' && !st.drag.erase && st.wallStyle) patch.styles = { ...patch.styles, ...cellEdgeStyles(keys_) };
+      setDraft(patch);
     },
     up() {
       if (!st.drag) return;
@@ -212,6 +235,15 @@ export function registerSketch(api) {
       }
     },
   });
+  /** The chosen wall texture on every side of these squares (only their outside ones are walls). */
+  function cellEdgeStyles(keys_) {
+    const out = {};
+    for (const k of keys_) {
+      const [c, r] = cellOf(k);
+      for (const e of [`h:${c},${r}`, `h:${c},${r + 1}`, `v:${c},${r}`, `v:${c + 1},${r}`]) out[e] = st.wallStyle;
+    }
+    return out;
+  }
   board.registerTool('sketch-room', rectTool('room'));
   board.registerTool('sketch-floor', rectTool('floor'));
 
@@ -273,7 +305,7 @@ export function registerSketch(api) {
       const r = Math.hypot(w.x / g() - d.c.x, w.y / g() - d.c.y);
       d.r = free(e) ? Math.max(0.1, fine(r)) : Math.max(0.5, half(r));
       d.walled = !e.altKey;
-      setDraft({ shapes: { [d.id]: { kind: 'circle', x: d.c.x, y: d.c.y, r: d.r, material: st.material, walled: d.walled } } });
+      setDraft({ shapes: { [d.id]: { kind: 'circle', x: d.c.x, y: d.c.y, r: d.r, material: st.material, walled: d.walled, ...(d.walled && st.wallStyle ? { wall_style: st.wallStyle } : {}) } } });
     },
     up() {
       const d = st.drag;
@@ -341,9 +373,10 @@ export function registerSketch(api) {
         const own = (e) => sk.walls !== false && roomEdge(e, sk);
         const edges = {};
         for (const e of along) edges[e] = d.remove ? (own(e) ? 'open' : null) : (own(e) ? null : 'wall');
-        commit({ edges });
+        const styles = !d.remove && st.wallStyle ? Object.fromEntries(along.map((e) => [e, st.wallStyle])) : null;
+        commit(styles ? { edges, styles } : { edges });
       } else if (!d.remove) {
-        commit({ lines: { [newId()]: { a: d.a, b: d.b, kind: 'wall' } } });
+        commit({ lines: { [newId()]: { a: d.a, b: d.b, kind: 'wall', ...(st.wallStyle ? { style: st.wallStyle } : {}) } } });
       }
     },
     draw(ctx) {
@@ -488,43 +521,98 @@ export function registerSketch(api) {
   board.registerTool('sketch-place', base({
     cursor: 'crosshair',
     enter() { api.sketchRefit(); openPropPalette(); },
-    down(w, e) {
-      const def = propDef(st.prop);
-      const id = newId();
-      commit({ props: { [id]: { kind: st.prop, ...propSpot(w, free(e)), rot: 0, scale: 1, blocks: !!def.blocks } } });
-      const s = scene();
-      if (def.light && (s.darkness ?? 0) < 0.5 && !st.toldDark) {
-        st.toldDark = true;
-        toast('Light sources light the map once it\'s dark: Lighting → Day / night, or raise the darkness in the scene settings.');
-      }
+    down(w, e) { placeProp(w, free(e)); },
+    // Shift+wheel: the next prop's size (Ctrl: finer); Alt+wheel: its turn (Shift+Alt: finer).
+    // Right-click: stop placing, and select props instead.
+    rightClick() { board.setTool('sketch-select'); return true; },
+    wheel(w, e) {
+      if (!e.shiftKey && !e.altKey) return false;
+      const up = (e.deltaY || e.deltaX) < 0;
+      if (e.altKey) st.placeRot = turnBy(st.placeRot ?? 0, up, e.shiftKey);
+      else st.placeScale = sizeBy(st.placeScale ?? 1, up, free(e));
+      track(w, e);
+      board.invalidate();
+      renderBar();
+      return true;
     },
     move(w, e) { track(w, e); board.invalidate(); },
     draw(ctx) {
       if (!st.hover) return;
       ctx.save();
       ctx.globalAlpha = 0.6;
-      drawPropAt(ctx, { kind: st.prop, ...propSpot(st.hover, st.mods.free) }, g(), { seed: 'preview' });
+      drawPropAt(ctx, { kind: st.prop, ...propSpot(st.hover, st.mods.free), rot: st.placeRot ?? 0, scale: st.placeScale ?? 1 }, g(), { seed: 'preview' });
       ctx.restore();
     },
   }));
 
-  /** The props palette: light sources, then furniture and nature. */
-  function openPropPalette() {
-    const win = openWindow({ id: 'sketch-props', title: 'Props', width: 330 });
+  /** A size after one wheel notch: 10% (Ctrl: 2%), between a quarter and 8 times. */
+  function sizeBy(v, up, fine) {
+    const f = fine ? 1.02 : 1.1;
+    const next = up ? v * f : v / f;
+    return Math.max(0.25, Math.min(8, Math.round(next * 100) / 100));
+  }
+  /** A turn after one wheel notch: 10° (fine: 1°). */
+  function turnBy(v, up, fine) {
+    const step = fine ? 1 : 10;
+    const next = fine ? v + (up ? -step : step) : Math.round((v + (up ? -step : step)) / step) * step;
+    return ((next % 360) + 360) % 360;
+  }
+
+  /** Put the chosen prop down at a point (exact: where it is, without snapping). */
+  function placeProp(w, exact) {
+    const def = propDef(st.prop);
+    commit({ props: { [newId()]: { kind: st.prop, ...propSpot(w, exact), rot: st.placeRot ?? 0, scale: st.placeScale ?? 1, blocks: !!def.blocks } } });
+    const s = scene();
+    if (def.light && (s.darkness ?? 0) < 0.5 && !st.toldDark) {
+      st.toldDark = true;
+      toast('Light sources light the map once it\'s dark: Lighting → Day / night, or raise the darkness in the scene settings.');
+    }
+  }
+
+  /** The Map props tab in the sidebar: light sources, then furniture and nature. */
+  function renderPropsPanel(panel) {
     const section = (title, list) => [
-      el('div.small.muted', { text: title, style: 'margin: 6px 0 4px' }),
+      el('div.small.muted', { text: title, style: 'margin: 8px 0 4px' }),
       el('div.prop-grid', {}, ...list.map((p) => el('button', {
-        class: st.prop === p.id ? 'prop-pick active' : 'prop-pick', title: p.label, type: 'button',
-        on: { click: () => { st.chooseProp(p.id); openPropPalette(); } },
-      }, el('img', { src: propThumb(p.id), alt: '' }), el('span', { text: p.label })))),
+        class: st.prop === p.id && board.tool === 'sketch-place' ? 'prop-pick active' : 'prop-pick', title: `${p.label}: click, then click the map; or drag it onto the map`, type: 'button',
+        draggable: 'true',
+        on: {
+          click: () => st.chooseProp(p.id),
+          dragstart: (e) => { e.dataTransfer.setData('application/x-hearth-prop', p.id); e.dataTransfer.effectAllowed = 'copy'; },
+        },
+      }, el('img', { src: propThumb(p.id), alt: '', draggable: 'false' }), el('span', { text: p.label })))),
     ];
-    win.body.replaceChildren(
-      el('p.small.muted', { text: 'Click the map to place; light sources next to a wall go on the wall. Hold Ctrl (Cmd on a Mac) to place it exactly, without snapping. Move, turn and resize props with the Select tool.' }),
+    panel.replaceChildren(
+      el('p.small.muted', { text: 'Click a prop, then click the map to place it, or drag it onto the map. Light sources next to a wall go on the wall. Hold Ctrl (Cmd on a Mac) to place it exactly, without snapping. Move, turn and resize props with Sketch → Select.' }),
       ...section('Light sources (each brings its light)', LIGHTS),
       ...section('Furniture and nature', FURNITURE),
     );
   }
+  hooks.on('ready', () => {
+    if (st.tabAdded || !api.sidebar) return;
+    st.tabAdded = true;
+    api.sidebar.addTab({ id: 'props', label: 'Map props', icon: 'sketch-place', gmOnly: true, render: renderPropsPanel });
+  });
+  /** Show the props in the sidebar. */
+  function openPropPalette() {
+    if (!api.sidebar?.tabs.has('props')) return;
+    if (api.sidebar.current !== 'props' || api.sidebar.collapsed) api.sidebar.select('props', { toggle: false });
+    else api.sidebar.refresh('props');
+  }
   st.openPropPalette = openPropPalette;
+
+  // Drag a prop from the sidebar onto the map.
+  board.canvas.addEventListener('dragover', (e) => {
+    if (isGM() && e.dataTransfer.types.includes('application/x-hearth-prop')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+  });
+  board.canvas.addEventListener('drop', (e) => {
+    const kind = e.dataTransfer.getData('application/x-hearth-prop');
+    if (!kind || !isGM() || !scene()) return;
+    e.preventDefault();
+    st.prop = kind;
+    placeProp(board.toWorld(e.offsetX, e.offsetY), free(e));
+    if (board.tool !== 'sketch-place') board.setTool('sketch-place'); else openPropPalette();
+  });
 
   // ---------------------------------------------------------------- select: move, resize, turn, remove
 
@@ -626,6 +714,29 @@ export function registerSketch(api) {
   board.registerTool('sketch-select', base({
     cursor: 'default',
     enter() { api.sketchRefit(); renderBar(); },
+    // Shift+wheel: the size of the prop under the pointer (or the selected one; Ctrl: finer);
+    // Alt+wheel: its turn, 10° (Shift+Alt: 1°). Shown at once, sent once the wheel stops.
+    wheel(w, e) {
+      if (!e.shiftKey && !e.altKey) return false;
+      const sk = current();
+      // The prop under the pointer (the smallest, if they overlap), else the selected one.
+      const under = Object.entries(sk.props).filter(([, p]) => propHit(p, g(), w)).sort((a, b) => (a[1].scale ?? 1) * propDef(a[1].kind).w - (b[1].scale ?? 1) * propDef(b[1].kind).w)[0];
+      const id = st.wheel?.id && sk.props[st.wheel.id] ? st.wheel.id : under?.[0] ?? (st.sel?.type === 'prop' && sk.props[st.sel.id] ? st.sel.id : null);
+      if (!id) return true;
+      if (st.sel?.id !== id) select({ type: 'prop', id });
+      const wh = st.wheel?.id === id ? st.wheel : (st.wheel = { id, copy: structuredClone(sk.props[id]), timer: null });
+      const up = (e.deltaY || e.deltaX) < 0;
+      if (e.altKey) wh.copy.rot = turnBy(wh.copy.rot ?? 0, up, e.shiftKey);
+      else wh.copy.scale = sizeBy(wh.copy.scale ?? 1, up, free(e));
+      setDraft({ props: { [id]: wh.copy } });
+      clearTimeout(wh.timer);
+      wh.timer = setTimeout(() => {
+        st.wheel = null;
+        setDraft(null);
+        commit({ props: { [id]: wh.copy } });
+      }, 350);
+      return true;
+    },
     leave() { st.hover = null; st.drag = null; setDraft(null); renderBar(); },
     down(w) {
       const sk = current();
@@ -769,15 +880,16 @@ export function registerSketch(api) {
 
   function renderBar() {
     const sk = current();
-    const show = board.tool === 'sketch-select' && isGM() && !!scene();
+    const show = board.tool.startsWith('sketch-') && isGM() && !!scene();
     bar.hidden = !show;
-    if (!show) return;
+    if (!show) { st.pick = null; return; }
+    if (board.tool !== 'sketch-select') { bar.replaceChildren(...toolOptions(sk)); return; }
     if (st.sel && !itemOf(st.sel, sk)) st.sel = null;
     const sel = st.sel;
     const btn = (text, title, fn, cls = '') => el('button', { type: 'button', class: cls, title, text, on: { click: fn } });
     const styleSelect = (value, set) => el('select', { title: 'How the wall is drawn', on: { change: (e) => set(e.target.value || null) } },
       el('option', { value: '', text: `Style: default (${WALL_STYLES.find((x) => x.id === (sk.wall_style || 'ink'))?.label})`, selected: !value }),
-      ...WALL_STYLES.map((x) => el('option', { value: x.id, text: x.label, selected: value === x.id })));
+      ...[...WALL_STYLES, ...made()].map((x) => el('option', { value: x.id, text: x.label, selected: value === x.id })));
     const del = btn('Delete', 'Remove it (Delete)', removeSelected, 'danger');
     let items;
     if (!sel) {
@@ -800,6 +912,7 @@ export function registerSketch(api) {
         const lid = skId(`sk-p-${sel.id}`, board.level);
         const light = scene().lights?.[lid];
         items.push(el('label.check', {}, el('input', { type: 'checkbox', checked: !light?.off, on: { change: (e) => api.op({ op: 'light_update', scene_id: scene().id, id: lid, patch: { off: !e.target.checked } }) } }), ' Lit'));
+        if (light) items.push(btn('Light…', 'Its light: how far it reaches, its colour and how it moves', () => board.configureLight(light)));
       }
       if (def.link) {
         // Stairs, ladders: the level they lead to.
@@ -807,6 +920,11 @@ export function registerSketch(api) {
         items.push(el('select', { title: 'Where it leads: a token that steps onto it goes to that level', on: { change: (e) => editSelected((x) => { x.to = e.target.value === '-' ? null : e.target.value; }) } },
           el('option', { value: '-', text: others.length ? 'Leads nowhere' : 'Leads nowhere (add levels first)', selected: p.to == null }),
           ...[...others].reverse().map((l) => el('option', { value: l.id, text: `Leads to ${l.name}`, selected: p.to === l.id }))));
+      }
+      if (def.parts?.length) {
+        const open = st.partsOpen === sel.id;
+        items.push(btn(open ? 'Colours ▴' : 'Colours ▾', 'Recolour its parts, or give them a texture', () => { st.partsOpen = open ? null : sel.id; renderBar(); }, open ? 'open' : ''));
+        if (open) items.push(partsPanel(sel.id, p, def));
       }
       items.push(del);
     } else if (sel.type === 'shape') {
@@ -835,7 +953,7 @@ export function registerSketch(api) {
       items = [
         el('b', { text: `Roof, ${r.w} × ${r.h}` }),
         el('select', { title: 'What it\'s made of', on: { change: (e) => editSelected((x) => { x.material = e.target.value; }) } },
-          ...ROOF_MATERIALS.map((m) => el('option', { value: m.id, text: m.label, selected: r.material === m.id }))),
+          ...[...ROOF_MATERIALS, ...made()].map((m) => el('option', { value: m.id, text: m.label, selected: r.material === m.id }))),
         btn('Turn the ridge', 'The ridge runs the other way', () => editSelected((x) => { x.ridge = (x.ridge ?? (x.w >= x.h ? 'h' : 'v')) === 'h' ? 'v' : 'h'; })),
         del,
       ];
@@ -852,6 +970,185 @@ export function registerSketch(api) {
   }
   st.renderBar = renderBar;
 
+  /** The light source on this level whose light this is: { id, label }. */
+  st.propOfLight = (lid) => {
+    for (const [id, p] of Object.entries(current().props)) if (skId(`sk-p-${id}`, board.level) === lid) return { id, label: propDef(p.kind).label };
+    return null;
+  };
+  /** Give a light source its own light (radii, colour strength, animation); its colour is its glow. */
+  st.setPropLight = (id, look) => {
+    const p = current().props[id];
+    if (!p) return;
+    const copy = structuredClone(p);
+    copy.light = { bright: look.bright, dim: look.dim, ...(look.tint != null ? { tint: look.tint } : {}), ...(look.anim ? { anim: look.anim } : {}) };
+    if (look.color && look.color !== propLightColor(p)) copy.colors = { ...(copy.colors ?? {}), glow: look.color };
+    commit({ props: { [id]: copy } });
+  };
+
+  /** A prop's parts: a colour each, or a texture, and back to its own look. */
+  function partsPanel(id, p, def) {
+    const textures = [...floorChoices(), ...WALL_STYLES.filter((w) => texture(w.id) && !MATERIALS.some((m) => m.id === w.id)), ...ROOF_MATERIALS];
+    const set = (partId, value, live = false) => {
+      const copy = structuredClone(current().props[id] ?? p);
+      const colors = { ...(copy.colors ?? {}) };
+      if (value == null) delete colors[partId]; else colors[partId] = value;
+      if (Object.keys(colors).length) copy.colors = colors; else delete copy.colors;
+      if (live) { setDraft({ props: { [id]: copy } }); return; }
+      setDraft(null);
+      commit({ props: { [id]: copy } });
+    };
+    const rows = def.parts.map((pt) => {
+      const v = p.colors?.[pt.id];
+      const hex = isHex(v) ? v : pt.color;
+      const tex = v && !isHex(v) ? v : '';
+      return el('div.part-row', {},
+        el('span', { text: pt.label }),
+        el('input', { type: 'color', value: hex, title: `${pt.label}: its colour`, on: { input: (e) => set(pt.id, e.target.value, true), change: (e) => set(pt.id, e.target.value) } }),
+        pt.id === 'glow' ? el('span.muted.small', { text: 'its light too' }) : el('select', { title: `${pt.label}: or a texture`, on: { change: (e) => set(pt.id, e.target.value || hex) } },
+          el('option', { value: '', text: 'Plain colour', selected: !tex }),
+          ...textures.map((m) => el('option', { value: m.id, text: m.label, selected: m.id === tex }))),
+        el('button', { type: 'button', text: '↺', title: 'Back to its own look', disabled: !v, on: { click: () => set(pt.id, null) } }));
+    });
+    return el('div.opt-pop.parts-pop', {}, el('div.small.muted', { text: `${def.label}: its parts` }), ...rows,
+      Object.keys(p.colors ?? {}).length ? el('button', { type: 'button', text: 'All back to its own look', on: { click: () => { const copy = structuredClone(p); delete copy.colors; commit({ props: { [id]: copy } }); } } }) : null);
+  }
+
+  // ---------------------------------------------------------------- tool options
+
+  const swatches = new Map();
+  /** A picture of a texture for its button: built-ins drawn once, uploads as they are. */
+  function swatchUrl(id) {
+    if (!id) return null;
+    if (!swatches.has(id) || (!swatches.get(id) && id.startsWith('tex:'))) {
+      const t = texture(id);
+      let url = /^(\/|https?:|data:)/.test(id) ? id : null;
+      if (t) {
+        // Two squares' worth, so every swatch shows its texture at the same scale.
+        const c = document.createElement('canvas');
+        c.width = c.height = 256;
+        c.getContext('2d').drawImage(t, 0, 0, 256, 256, 0, 0, 256, 256);
+        url = c.toDataURL();
+      }
+      swatches.set(id, url);
+    }
+    return swatches.get(id);
+  }
+  /** Textures made in the texture creator, as choices. */
+  const made = () => recipes().map((t) => ({ id: `tex:${t.id}`, label: t.name, made: t.id }));
+  const floorChoices = () => {
+    const uploaded = new Set();
+    for (const sc of Object.values(store.world?.scenes ?? {})) {
+      for (const sk of [sc.sketch, ...Object.values(sc.level_sketches ?? {})]) {
+        if (!sk) continue;
+        for (const m of [...Object.values(sk.cells ?? {}), ...Object.values(sk.floor ?? {}), ...Object.values(sk.shapes ?? {}).map((x) => x.material), sk.outside]) {
+          if (m && !texture(m) && !m.startsWith('tex:')) uploaded.add(m);
+        }
+      }
+    }
+    for (const m of st.extra ?? []) uploaded.add(m.id);
+    return [...MATERIALS, ...made(), ...[...uploaded].map((url) => ({ id: url, label: st.extra?.find((m) => m.id === url)?.label ?? url.split('/').pop() }))];
+  };
+  /** What each picker offers, what's chosen, and how to choose. */
+  const PICKERS = {
+    floor: { title: 'Floor', list: floorChoices, get: () => st.material, set: (id) => { st.material = id; } },
+    walls: {
+      title: 'Walls',
+      list: () => { const own = current().wall_style || 'ink'; return [{ id: null, swatch: own, label: `Default (${WALL_STYLES.find((x) => x.id === own)?.label ?? made().find((x) => x.id === own)?.label ?? own})` }, ...WALL_STYLES, ...made()]; },
+      get: () => st.wallStyle, set: (id) => { st.wallStyle = id; },
+    },
+    roof: { title: 'Roof', list: () => [...ROOF_MATERIALS, ...made()], get: () => st.roof, set: (id) => { st.roof = id; } },
+  };
+  // Which tools offer which pickers.
+  const OPTIONS = {
+    'sketch-room': ['floor', 'walls'],
+    'sketch-round': ['floor', 'walls'],
+    'sketch-floor': ['floor'],
+    'sketch-brush': ['floor', 'brush'],
+    'sketch-erase': ['brush'],
+    'sketch-wall': ['walls'],
+    'sketch-roof': ['roof', 'roofs-shown'],
+    'sketch-place': ['prop'],
+  };
+  const HINTS = {
+    'sketch-room': 'Shift erases',
+    'sketch-round': 'Alt: no walls · Shift-click removes',
+    'sketch-floor': 'No walls · Shift erases',
+    'sketch-brush': 'Shift erases · [ ] size',
+    'sketch-erase': '[ ] size',
+    'sketch-wall': 'Shift-drag removes · Ctrl: no snapping',
+    'sketch-railing': 'Railing: blocks movement, not sight · Shift-drag removes',
+    'sketch-door': 'Door: click a grid edge · Shift: secret door · click again to remove',
+    'sketch-window': 'Window: click a grid edge · click again to remove',
+    'sketch-roof': 'Shift-click removes',
+    'sketch-place': 'Shift+wheel: size · Alt+wheel: turn (Shift+Alt: 1°) · Ctrl: no snapping · right-click: done',
+  };
+
+  function toolOptions() {
+    const tool = board.tool;
+    const items = [];
+    for (const opt of OPTIONS[tool] ?? []) {
+      if (PICKERS[opt]) {
+        const pk = PICKERS[opt];
+        const cur = pk.list().find((m) => m.id === pk.get()) ?? { id: pk.get(), label: String(pk.get()) };
+        const url = swatchUrl(cur.swatch ?? cur.id);
+        items.push(el('button.opt-pick', {
+          type: 'button', title: `${pk.title}: ${cur.label} (click to choose another)`, 'aria-expanded': String(st.pick === opt),
+          class: st.pick === opt ? 'opt-pick open' : 'opt-pick',
+          on: { click: () => { st.pick = st.pick === opt ? null : opt; renderBar(); } },
+        }, el('span.opt-swatch', { class: url ? 'opt-swatch' : 'opt-swatch ink', style: url ? `background-image: url("${url}")` : '' }),
+        el('span', { text: `${pk.title}: ${cur.label}` }), el('span.muted', { text: '▾' })));
+      } else if (opt === 'brush') {
+        const size = (d) => { st.brush = Math.max(1, Math.min(9, st.brush + d)); board.invalidate(); renderBar(); };
+        items.push(el('span.muted', { text: 'Size' }),
+          el('button', { type: 'button', text: '−', title: 'Smaller ([)', on: { click: () => size(-1) } }),
+          el('span', { text: `${st.brush} × ${st.brush}` }),
+          el('button', { type: 'button', text: '+', title: 'Bigger (])', on: { click: () => size(1) } }));
+      } else if (opt === 'roofs-shown') {
+        items.push(el('label.check', { title: 'Roofs show faintly for you; untick to hide them while you work' },
+          el('input', { type: 'checkbox', checked: board.showRoofs, on: { change: (e) => { board.showRoofs = e.target.checked; board.invalidate(); } } }), ' Show roofs'));
+      } else if (opt === 'prop') {
+        const def = propDef(st.prop);
+        items.push(el('button.opt-pick', { type: 'button', title: 'Choose another prop in the Map props tab', on: { click: () => openPropPalette() } },
+          el('span.opt-swatch', { style: `background-image: url("${propThumb(def.id)}"); background-size: contain; background-repeat: no-repeat` }),
+          el('span', { text: `Prop: ${def.label}` }), el('span.muted', { text: '▸' })));
+        if ((st.placeScale ?? 1) !== 1 || (st.placeRot ?? 0) !== 0) {
+          items.push(el('span.muted', { text: `${Math.round((st.placeScale ?? 1) * 100)}% · ${st.placeRot ?? 0}°` }),
+            el('button', { type: 'button', text: '↺', title: 'Back to its usual size, unturned', on: { click: () => { st.placeScale = 1; st.placeRot = 0; renderBar(); board.invalidate(); } } }));
+        }
+      }
+    }
+    if (HINTS[tool]) items.push(el('span.muted.small', { text: HINTS[tool] }));
+    if (st.pick && (OPTIONS[tool] ?? []).includes(st.pick)) items.push(pickerPop(st.pick));
+    else st.pick = null;
+    return items;
+  }
+
+  /** The open picker: a grid of textures under the bar. */
+  function pickerPop(opt) {
+    const pk = PICKERS[opt];
+    const choose = (id) => { pk.set(id); st.pick = null; renderBar(); board.invalidate(); };
+    const tiles = pk.list().map((m) => {
+      const url = swatchUrl(m.swatch ?? m.id);
+      const on = m.id === pk.get();
+      return el('button.opt-tile', { type: 'button', title: m.made ? `${m.label} (made in the texture creator)` : m.label, class: on ? 'opt-tile active' : 'opt-tile', on: { click: () => choose(m.id) } },
+        el('span.opt-swatch', { class: url ? 'opt-swatch' : 'opt-swatch ink', style: url ? `background-image: url("${url}")` : '' }),
+        el('span', { text: m.label }),
+        m.made ? el('span.opt-edit', {
+          role: 'button', tabindex: '0', title: `Change ${m.label} in the texture creator`, text: '✎',
+          on: { click: (e) => { e.stopPropagation(); st.pick = null; renderBar(); openTextureCreator(api, { id: m.made }); } },
+        }) : null);
+    });
+    tiles.push(el('button.opt-tile', { type: 'button', title: 'Make a texture of your own: mix textures and pictures, change their colours, hide the repeat', on: { click: () => { st.pick = null; renderBar(); openTextureCreator(api, { onSaved: (id) => choose(`tex:${id}`) }); } } },
+      el('span.opt-swatch.upload', { text: '✦' }), el('span', { text: 'New texture…' })));
+    if (opt === 'floor') tiles.push(el('button.opt-tile', { type: 'button', title: 'Add your own texture: an image that repeats', on: { click: () => { st.pick = null; st.uploadTexture(); } } },
+      el('span.opt-swatch.upload', { text: '+' }), el('span', { text: 'Upload a picture…' })));
+    return el('div.opt-pop', { role: 'listbox', 'aria-label': pk.title }, ...tiles);
+  }
+  // A texture made in the creator changed, or a picture arrived: new swatches, redraw.
+  hooks.on('textures:changed', () => { swatches.clear(); renderBar(); board.invalidate(); });
+  // A click elsewhere closes the picker.
+  addEventListener('pointerdown', (e) => { if (st.pick && !bar.contains(e.target)) { st.pick = null; renderBar(); } }, true);
+
   // ---------------------------------------------------------------- keys, refit
 
   function keys(e) {
@@ -860,6 +1157,7 @@ export function registerSketch(api) {
       st.brush = Math.max(1, Math.min(9, st.brush + (e.key === ']' ? 1 : -1)));
       toast(`Brush: ${st.brush} × ${st.brush} squares`);
       board.invalidate();
+      renderBar();
       return true;
     }
     if (e.key === 'Escape') { board.setTool('select'); return true; }
@@ -881,19 +1179,9 @@ export function registerSketch(api) {
   // ---------------------------------------------------------------- palette and settings
 
   /** Materials for the palette: the built-ins, then uploaded textures used on any scene. */
-  st.materials = () => {
-    if (board.tool === 'sketch-roof') return ROOF_MATERIALS;
-    const uploaded = new Set();
-    for (const s of Object.values(store.world?.scenes ?? {})) {
-      const sk = s.sketch;
-      if (!sk) continue;
-      for (const m of [...Object.values(sk.cells ?? {}), ...Object.values(sk.floor ?? {}), ...Object.values(sk.shapes ?? {}).map((x) => x.material), sk.outside]) {
-        if (m && !texture(m)) uploaded.add(m);
-      }
-    }
-    for (const m of st.extra ?? []) uploaded.add(m.id);
-    return [...MATERIALS, ...[...uploaded].map((url) => ({ id: url, label: st.extra?.find((m) => m.id === url)?.label ?? url.split('/').pop() }))];
-  };
+  st.materials = floorChoices;
+  /** The texture creator, on the world's first texture (or a new one if there are none). */
+  st.openTextures = () => openTextureCreator(api, { id: recipes()[0]?.id ?? null });
   st.props = () => [...LIGHTS, ...FURNITURE];
 
   st.roof = 'shingles';
@@ -907,7 +1195,8 @@ export function registerSketch(api) {
   st.chooseProp = (id) => {
     st.prop = id;
     if (board.tool !== 'sketch-place') board.setTool('sketch-place');
-    api.controls?.render();
+    api.sidebar?.refresh('props');
+    renderBar();
   };
 
   st.uploadTexture = () => {
@@ -918,8 +1207,8 @@ export function registerSketch(api) {
       try {
         const url = await api.upload(f);
         st.extra = [...(st.extra ?? []), { id: url, label: f.name }];
-        st.choose(url);
-        api.controls?.render();
+        st.material = url;
+        renderBar();
         toast(`${f.name} is ready: paint with it (it repeats every four squares).`);
       } catch (err) { toast(`Upload failed: ${err.message ?? err}`, 'error'); }
     };

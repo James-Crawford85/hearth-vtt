@@ -138,8 +138,6 @@ h1, h2, h3, h4 { font-family: var(--font-display); margin: .6em 0 .3em; }
   writing-mode: vertical-rl; transform: rotate(180deg); align-self: center; padding: 4px 0; display: none; }
 .ctl-sep { height: 1px; background: var(--border); margin: 3px 4px; font-size: 0; }
 .control-tools { max-height: 100%; overflow-y: auto; scrollbar-width: none; }
-.ctl.swatch { height: 26px; background-size: 48px; background-position: center; border-color: var(--border); }
-.ctl.swatch:hover { border-color: var(--text); background-size: 48px; }
 .level-bar { position: fixed; bottom: 66px; left: calc(var(--controls-w, 0px) + 8px); z-index: 5; display: flex; align-items: center; gap: 6px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 5px 10px; box-shadow: var(--shadow); font-size: 13px; }
 .level-bar[hidden] { display: none; }
@@ -159,9 +157,73 @@ h1, h2, h3, h4 { font-family: var(--font-display); margin: .6em 0 .3em; }
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
 .prop-pick img { width: 44px; height: 44px; }
 .prop-pick.active { border-color: var(--accent); background: var(--panel-3); }
-.ctl.swatch.prop { height: 28px; background-size: contain; background-repeat: no-repeat; background-color: #2a2622; }
-.ctl.swatch.prop:hover { background-size: contain; }
-.ctl.swatch.active { border: 2px solid var(--accent); box-shadow: 0 0 0 1px var(--panel) inset; }
+.opt-pick { display: inline-flex; align-items: center; gap: 6px; }
+.opt-pick.open { border-color: var(--accent); }
+.opt-swatch { display: inline-block; width: 22px; height: 22px; border-radius: 5px; border: 1px solid var(--border); flex: none;
+  background-color: #2a2622; background-size: 44px 44px; background-position: center; }
+.opt-swatch.ink { background: repeating-linear-gradient(0deg, transparent 0 9px, #1a1612 9px 13px, transparent 13px 22px), #d8cfbf; }
+.opt-swatch.upload { display: inline-flex; align-items: center; justify-content: center; font-size: 16px; color: var(--muted); }
+.opt-pop { position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 6;
+  display: grid; grid-template-columns: repeat(4, 84px); gap: 6px; padding: 8px; max-height: 60vh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); }
+.sketch-bar .opt-tile { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 4px; font-size: 11px; line-height: 1.2;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); text-align: center; }
+.opt-tile .opt-swatch { width: 48px; height: 48px; background-size: 96px 96px; }
+.sketch-bar .opt-tile.active { border-color: var(--accent); background: var(--panel-3); }
+.prop-pick[draggable="true"] { cursor: grab; }
+.sketch-bar .parts-pop { display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 300px; grid-template-columns: none; }
+.part-row { display: flex; align-items: center; gap: 6px; }
+.part-row > span:first-child { width: 70px; flex: none; }
+.part-row input[type=color] { width: 34px; height: 26px; padding: 0; border: 1px solid var(--border); background: none; }
+.part-row select { flex: 1; min-width: 0; }
+.sketch-bar button.open { border-color: var(--accent); }
+.sketch-bar .opt-tile { position: relative; }
+.opt-edit { position: absolute; top: 2px; right: 4px; font-size: 12px; color: var(--muted); padding: 0 3px; border-radius: 4px; }
+.opt-edit:hover { color: var(--text); background: var(--panel-3); }
+.tex-preview { width: 320px; height: 320px; border-radius: 8px; border: 1px solid var(--border); }
+.tex-row { display: flex; flex-direction: row; align-items: center; gap: 8px; margin: 0; font-size: 13px; }
+.tex-row > span:first-child { width: 78px; flex: none; color: var(--muted); }
+.tex-row input[type=range] { flex: 1; min-width: 0; }
+.tex-row select, .tex-row input[type=text] { flex: 1; min-width: 0; }
+.tex-val { width: 62px; flex: none; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tex-actions { display: flex; gap: 8px; margin-top: 4px; }
+.tex-window .window-body { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.ng-layout { flex: 1; min-height: 0; display: flex; }
+.ng { position: relative; flex: 1; min-width: 0; overflow: hidden; outline: none; cursor: grab; touch-action: none;
+  background-color: #17161a; background-image: radial-gradient(rgba(255,255,255,0.09) 1px, transparent 1px); background-size: 20px 20px; }
+.ng:active { cursor: grabbing; }
+.ng-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.ng-wires { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.ng-wire { fill: none; stroke: #e9b44c; stroke-width: 2.5; }
+.ng-wire.live { stroke-dasharray: 6 4; }
+.ng-hint { position: absolute; left: 10px; bottom: 8px; pointer-events: none; }
+.ng-node { position: absolute; width: 190px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.45); font-size: 12px; cursor: default; padding-bottom: 8px; }
+.ng-node.selected { border-color: var(--accent); }
+.ng-node.output { border-color: #6aa6d8; }
+.ng-head { position: relative; display: flex; align-items: center; gap: 6px; padding: 6px 22px 6px 10px; font-weight: 600; font-size: 13px;
+  background: var(--panel-2); border-radius: 10px 10px 0 0; cursor: move; }
+.ng-head span { flex: 1; }
+.ng-x { padding: 0 4px; min-width: 0; font-size: 11px; background: none; border: none; color: var(--muted); }
+.ng-x:hover { color: var(--danger); }
+.ng-port { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #e9b44c; background: var(--panel); cursor: crosshair; flex: none; }
+.ng-port.wired, .ng-port.out { background: #e9b44c; }
+.ng-port.out { position: absolute; right: -7px; top: 50%; transform: translateY(-50%); }
+.ng-in { display: flex; align-items: center; gap: 6px; margin: 6px 0 0 -7px; color: var(--muted); }
+.ng-param { display: flex; flex-direction: column; gap: 2px; margin: 6px 10px 0; font-size: 11px; color: var(--muted); }
+.ng-param > span:first-child { display: flex; justify-content: space-between; }
+.ng-param input[type=range] { width: 100%; }
+.ng-param select, .ng-param button { font-size: 12px; padding: 2px 4px; }
+.ng-val { align-self: flex-end; margin-top: -16px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ng-thumb { display: block; width: 120px; height: 120px; margin: 8px auto 0; border-radius: 6px; border: 1px solid var(--border); }
+.ng-grip { position: absolute; right: 2px; bottom: 2px; width: 14px; height: 14px; cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, var(--muted) 50%, var(--muted) 60%, transparent 60%, transparent 70%, var(--muted) 70%, var(--muted) 80%, transparent 80%); }
+.ng-menu { position: absolute; z-index: 3; display: flex; flex-direction: column; min-width: 150px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); }
+.ng-menu button { text-align: left; background: none; border: none; padding: 5px 8px; border-radius: 5px; }
+.ng-menu button:hover { background: var(--panel-3); }
+.ng-side { width: 320px; flex: none; display: flex; flex-direction: column; gap: 8px; padding: 10px; border-left: 1px solid var(--border); overflow-y: auto; overflow-x: hidden; }
+.ng-side .tex-preview { width: 100%; height: auto; aspect-ratio: 1; }
 
 /* ---- right: panel + icon rail */
 .sidebar { position: fixed; right: 0; top: 0; bottom: 0; width: var(--sidebar-w); display: flex; z-index: 6; }
@@ -231,6 +293,18 @@ h1, h2, h3, h4 { font-family: var(--font-display); margin: .6em 0 .3em; }
 .window-body { padding: 12px; overflow: auto; }
 .form { display: flex; flex-direction: column; gap: 10px; }
 .form .row label { flex: 1; }
+.custom-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+/* A light's settings: a slider with a box (or its value) beside it, per row. */
+.light-row { display: grid; grid-template-columns: 110px 1fr 64px; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
+.light-row input[type=range] { width: 100%; min-width: 0; }
+.light-row input[type=number] { width: 64px; }
+.light-row input[type=color] { width: 100%; height: 28px; padding: 0; border: 1px solid var(--border); background: none; }
+.light-row .light-val { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.light-anim { display: flex; flex-direction: column; gap: 10px; padding-left: 10px; border-left: 2px solid var(--border); }
+.light-anim[hidden] { display: none; }
+.light-summary { grid-template-columns: 1fr auto auto; }
+.light-buttons { display: flex; gap: 8px; }
+.light-buttons .primary { flex: 1; }
 .owners { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
 
 /* ---------------------------------------------------------------- sheets */

@@ -19,7 +19,9 @@
 
 import { texture, TILE_SQUARES, TILE_SIZE } from './sketch-textures.js';
 import { isGM } from './store.js';
-import { propDef, isLight, propOutline, drawPropAt } from './sketch-props.js';
+import { hooks } from './hooks.js';
+import { macroOf, macroPattern } from './texture-recipes.js';
+import { propDef, isLight, propOutline, drawPropAt, propLightColor } from './sketch-props.js';
 import { skId, onLevel, sketchOf } from './levels.js';
 
 /** "col,row" → [col, row]. */
@@ -211,7 +213,14 @@ export function sketchLights(sk, g, distance = 5, level = '') {
     if (!isLight(p.kind)) continue;
     const def = propDef(p.kind);
     const lid = skId(`sk-p-${id}`, level);
-    out[lid] = { id: lid, x: Math.round(p.x * g), y: Math.round(p.y * g), bright: def.bright * distance, dim: def.dim * distance, color: def.color, off: false, ...(level ? { level } : {}) };
+    // Its own light if it has one (set in its light's settings), else its kind's.
+    const own = p.light;
+    const bright = own ? Math.max(0, Number(own.bright) || 0) : def.bright * distance;
+    const dim = own ? Math.max(bright, Number(own.dim) || 0) : def.dim * distance;
+    out[lid] = {
+      id: lid, x: Math.round(p.x * g), y: Math.round(p.y * g), bright, dim, color: propLightColor(p), off: false,
+      ...(own?.tint != null ? { tint: own.tint } : {}), ...(own?.anim ? { anim: own.anim } : {}), ...(level ? { level } : {}),
+    };
   }
   return out;
 }
@@ -301,15 +310,31 @@ function geometry(base, draft, g, level = '') {
   return out;
 }
 
-const patterns = new WeakMap(); // ctx → Map(material → { pat, span })
+let patterns = new WeakMap(); // ctx → Map(material → { pat, span })
+// A texture made in the texture creator changed (or its picture arrived): make its pattern again.
+hooks.on('textures:changed', () => { patterns = new WeakMap(); });
 
 /** A fill for a material: a repeating pattern scaled to the grid, or a flat colour while it loads. */
+/** A made texture's map-wide light and dark, over what `fill` just painted with it. */
+function vary(ctx, m, g, fill) {
+  const mv = macroOf(m);
+  if (!mv) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'overlay';
+  ctx.globalAlpha = mv.amount * 0.75;
+  ctx.fillStyle = macroPattern(ctx, g, mv.size, m);
+  fill();
+  ctx.restore();
+}
+
 function fillFor(ctx, m, g, board) {
   let pats = patterns.get(ctx);
   if (!pats) patterns.set(ctx, (pats = new Map()));
   let entry = pats.get(m);
   if (!entry) {
     const tex = texture(m);
+    // The texture creator's: drawn once its sources have loaded.
+    if (!tex && m?.startsWith?.('tex:')) return '#6b6359';
     const src = tex ?? board.image(m);
     if (!src) return '#6b6359';
     // Built-ins cover 2 × 2 squares; an uploaded texture covers 4 squares across.
@@ -342,18 +367,20 @@ export function drawSketch(ctx, s, board, { level = '', draft = null } = {}) {
   if (sk.outside) {
     ctx.fillStyle = fillFor(ctx, sk.outside, g, board);
     ctx.fillRect(0, 0, s.width, s.height);
+    vary(ctx, sk.outside, g, () => ctx.fillRect(0, 0, s.width, s.height));
   }
   // A soft edge round every floor, then the floors.
   ctx.strokeStyle = 'rgba(0,0,0,0.4)';
   ctx.lineWidth = g * 0.12;
   ctx.stroke(geo.floorEdge);
-  for (const [m, path] of geo.byMat) { ctx.fillStyle = fillFor(ctx, m, g, board); ctx.fill(path); }
-  for (const { shape, path } of geo.shapes) { ctx.fillStyle = fillFor(ctx, shape.material, g, board); ctx.fill(path); }
+  for (const [m, path] of geo.byMat) { ctx.fillStyle = fillFor(ctx, m, g, board); ctx.fill(path); vary(ctx, m, g, () => ctx.fill(path)); }
+  for (const { shape, path } of geo.shapes) { ctx.fillStyle = fillFor(ctx, shape.material, g, board); ctx.fill(path); vary(ctx, shape.material, g, () => ctx.fill(path)); }
   ctx.strokeStyle = 'rgba(20, 15, 10, 0.55)';
   ctx.lineWidth = Math.max(1, g * 0.03);
   ctx.stroke(geo.seams);
   for (const { shape, path } of geo.shapes) if (shape.walled === false) ctx.stroke(path);
-  const drawProps = (list) => { for (const [id, p] of list) drawPropAt(ctx, p, g, { seed: id, lit: !s.lights?.[skId(`sk-p-${id}`, level)]?.off }); };
+  const texFill = (c, m, u) => fillFor(c, m, u, board);
+  const drawProps = (list) => { for (const [id, p] of list) drawPropAt(ctx, p, g, { seed: id, lit: !s.lights?.[skId(`sk-p-${id}`, level)]?.off, texFill }); };
   drawProps(geo.props[0]);
   drawProps(geo.props[1]);
 
@@ -463,7 +490,7 @@ export function drawOverhang(ctx, s, board, level, { holes = [], alpha = 0.9, da
   for (const path of floors.values()) ctx.fill(path);
   for (const x of round) { ctx.beginPath(); ctx.arc(x.x * g, x.y * g, x.r * g, 0, Math.PI * 2); ctx.fill(); }
   ctx.restore();
-  for (const [m, path] of floors) { ctx.fillStyle = fillFor(ctx, m, g, board); ctx.fill(path); }
+  for (const [m, path] of floors) { ctx.fillStyle = fillFor(ctx, m, g, board); ctx.fill(path); vary(ctx, m, g, () => ctx.fill(path)); }
   for (const x of round) { ctx.fillStyle = fillFor(ctx, x.material, g, board); ctx.beginPath(); ctx.arc(x.x * g, x.y * g, x.r * g, 0, Math.PI * 2); ctx.fill(); }
   // Drawn over the level's lighting, so it takes the night's darkness itself.
   if (darkness > 0.01) {

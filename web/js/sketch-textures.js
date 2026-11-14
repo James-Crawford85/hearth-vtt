@@ -288,10 +288,17 @@ function roofRows(ctx, seed, dark, light, rowH, w, round = false) {
 }
 
 const cache = new Map();
+let more = null; // textures from elsewhere (the texture creator's), by id
 
-/** A material's tile (a canvas), or null for an unknown one. Painted once, on first use. */
+/** Let another module supply tiles for ids that aren't built in (null: not one of its). */
+export function setTextureSource(fn) { more = fn; }
+
+/**
+ * A material's tile (a canvas), or null for an unknown one. Painted once, on first use.
+ * Built-ins cover 2 × 2 squares, the texture creator's 8 × 8: 128 pixels a square either way.
+ */
 export function texture(id) {
-  if (!PAINTERS[id]) return null;
+  if (!PAINTERS[id]) return more?.(id) ?? null;
   let c = cache.get(id);
   if (!c) {
     c = canvas();

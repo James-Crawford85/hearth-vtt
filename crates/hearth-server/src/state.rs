@@ -725,6 +725,11 @@ impl AppState {
                 }
                 light.bright = light.bright.max(0.0);
                 light.dim = light.dim.max(light.bright);
+                light.tint = light.tint.map(|t| t.clamp(0.0, 1.0));
+                if let Some(a) = light.anim.as_mut() {
+                    a.speed = a.speed.clamp(0.1, 5.0);
+                    a.strength = a.strength.clamp(0.0, 1.0);
+                }
             }
             Op::DrawingCreate { drawing, .. } => {
                 if drawing.id.is_empty() {
@@ -736,6 +741,18 @@ impl AppState {
                 }
                 if drawing.text.chars().count() > 2000 {
                     return Err("That text is too long".into());
+                }
+            }
+            Op::TextureSet { texture } => {
+                if texture.id.is_empty() {
+                    texture.id = new_id();
+                }
+                texture.name = texture.name.trim().chars().take(80).collect();
+                if texture.name.is_empty() {
+                    texture.name = "New texture".into();
+                }
+                if texture.recipe.to_string().len() > 20_000 {
+                    return Err("That texture's recipe is too big".into());
                 }
             }
             Op::SketchUpdate { patch, walls, lights, .. } => {

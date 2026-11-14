@@ -153,6 +153,8 @@ export function formDialog({ title, fields, submit = 'Save' }) {
     const form = el('form.form');
     for (const f of fields) {
       let input;
+      // Anything else: the field draws itself (`render()`) and says its value (`read()`).
+      if (f.type === 'custom') { form.append(el('div.custom-field', {}, el('span', { text: f.label }), f.render())); continue; }
       if (f.type === 'select') {
         input = el('select', { name: f.name }, ...f.options.map(([v, l]) => el('option', { value: v, text: l, selected: v === f.value })));
       } else if (f.type === 'textarea') {
@@ -177,6 +179,7 @@ export function formDialog({ title, fields, submit = 'Save' }) {
       e.preventDefault();
       const out = {};
       for (const f of fields) {
+        if (f.type === 'custom') { out[f.name] = f.read(); continue; }
         const input = form.elements[f.name];
         const v = input.value;
         out[f.name] = f.type === 'number' ? Number(v) : f.type === 'checkbox' ? input.checked : v;
@@ -186,7 +189,10 @@ export function formDialog({ title, fields, submit = 'Save' }) {
       resolve(out);
     });
     let resolved = false;
-    w.onClose(() => { if (!resolved) resolve(null); });
+    w.onClose(() => {
+      for (const f of fields) f.closed?.();
+      if (!resolved) resolve(null);
+    });
     w.body.append(form);
     form.querySelector('input,select,textarea')?.focus();
   });
