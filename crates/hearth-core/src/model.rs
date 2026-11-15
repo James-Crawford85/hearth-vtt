@@ -358,7 +358,8 @@ pub struct SketchLine {
 
 /// A prop drawn on the map, centred at `x, y` in squares, turned `rot` degrees and sized `scale`
 /// times its usual size: a light source (`torch`, `brazier`, `candles`, `campfire`, `lantern`,
-/// `crystal`) or furniture and nature (`table`, `barrel`, `tree`, …). `blocks`: it stands in the
+/// `crystal`, `magic-circle`) or anything else (`table`, `counter`, `barrel`, `pit`, `tree`, `bones`, …).
+/// Kinds are the web client's; others draw as a crate. `blocks`: it stands in the
 /// way (walls round it).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SketchProp {

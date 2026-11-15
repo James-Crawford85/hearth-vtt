@@ -28,7 +28,7 @@ import { hooks } from './hooks.js';
 import { MATERIALS, WALL_STYLES, ROOF_MATERIALS, texture } from './sketch-textures.js';
 import { cellKey, cellOf, withPatch, sketchWalls, plainWalls, sketchLights, sketchLinks, edgeSegment, edgeNear, edgesAlong } from './sketch.js';
 import { sketchOf, skId, levelsOf, levelName } from './levels.js';
-import { LIGHTS, FURNITURE, propDef, isLight, isHex, propLightColor, drawPropAt, propThumb, propHit, propOutline } from './sketch-props.js';
+import { LIGHTS, FURNITURE, PROP_GROUPS, propDef, isLight, isHex, propLightColor, drawPropAt, propThumb, propHit, propOutline } from './sketch-props.js';
 import { drawRoof } from './sketch.js';
 import { recipes } from './texture-recipes.js';
 import { openTextureCreator } from './texture-creator.js';
@@ -502,7 +502,8 @@ export function registerSketch(api) {
   function propSpot(w, exact) {
     const x = w.x / g(), y = w.y / g();
     if (exact) return { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 };
-    if (isLight(st.prop)) {
+    // Small light sources go on walls; a magic circle lies on the floor like furniture.
+    if (isLight(st.prop) && propDef(st.prop).w < 1) {
       const edge = edgeNear(w, g(), 0.22);
       if (edge) {
         const [dir, rest] = edge.split(':');
@@ -569,24 +570,40 @@ export function registerSketch(api) {
     }
   }
 
-  /** The Map props tab in the sidebar: light sources, then furniture and nature. */
+  /** The Map props tab in the sidebar: a search box, then each group of props. */
   function renderPropsPanel(panel) {
-    const section = (title, list) => [
-      el('div.small.muted', { text: title, style: 'margin: 8px 0 4px' }),
-      el('div.prop-grid', {}, ...list.map((p) => el('button', {
-        class: st.prop === p.id && board.tool === 'sketch-place' ? 'prop-pick active' : 'prop-pick', title: `${p.label}: click, then click the map; or drag it onto the map`, type: 'button',
-        draggable: 'true',
-        on: {
-          click: () => st.chooseProp(p.id),
-          dragstart: (e) => { e.dataTransfer.setData('application/x-hearth-prop', p.id); e.dataTransfer.effectAllowed = 'copy'; },
-        },
-      }, el('img', { src: propThumb(p.id), alt: '', draggable: 'false' }), el('span', { text: p.label })))),
-    ];
+    const pick = (p) => el('button', {
+      class: st.prop === p.id && board.tool === 'sketch-place' ? 'prop-pick active' : 'prop-pick', title: `${p.label}: click, then click the map; or drag it onto the map`, type: 'button',
+      draggable: 'true', 'data-name': p.label.toLowerCase(),
+      on: {
+        click: () => st.chooseProp(p.id),
+        dragstart: (e) => { e.dataTransfer.setData('application/x-hearth-prop', p.id); e.dataTransfer.effectAllowed = 'copy'; },
+      },
+    }, el('img', { src: propThumb(p.id), alt: '', draggable: 'false' }), el('span', { text: p.label }));
+    const all = [...LIGHTS, ...FURNITURE];
+    const sections = PROP_GROUPS.map((gr) => {
+      const list = all.filter((p) => p.group === gr.id);
+      return el('div.prop-section', {}, el('div.small.muted', { text: gr.label, style: 'margin: 8px 0 4px' }), el('div.prop-grid', {}, ...list.map(pick)));
+    });
+    const none = el('p.small.muted', { text: 'No props match.', hidden: true });
+    const filter = (q) => {
+      q = q.trim().toLowerCase();
+      st.propSearch = q;
+      let any = false;
+      for (const sec of sections) {
+        let shown = 0;
+        for (const b of sec.querySelectorAll('.prop-pick')) { const ok = !q || b.dataset.name.includes(q); b.hidden = !ok; if (ok) shown++; }
+        sec.hidden = !shown;
+        if (shown) any = true;
+      }
+      none.hidden = any;
+    };
+    const search = el('input.prop-search', { type: 'search', placeholder: 'Find a prop…', value: st.propSearch ?? '', on: { input: (e) => filter(e.target.value) } });
     panel.replaceChildren(
-      el('p.small.muted', { text: 'Click a prop, then click the map to place it, or drag it onto the map. Light sources next to a wall go on the wall. Hold Ctrl (Cmd on a Mac) to place it exactly, without snapping. Move, turn and resize props with Sketch → Select.' }),
-      ...section('Light sources (each brings its light)', LIGHTS),
-      ...section('Furniture and nature', FURNITURE),
+      el('p.small.muted', { text: 'Click a prop, then click the map to place it, or drag it onto the map. Light sources next to a wall go on the wall. Hold Ctrl (Cmd on a Mac) to place it exactly, without snapping. Move, turn, resize and recolour props with Sketch → Select.' }),
+      search, none, ...sections,
     );
+    if (st.propSearch) filter(st.propSearch);
   }
   hooks.on('ready', () => {
     if (st.tabAdded || !api.sidebar) return;

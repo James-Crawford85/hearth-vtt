@@ -156,6 +156,8 @@ h1, h2, h3, h4 { font-family: var(--font-display); margin: .6em 0 .3em; }
 .prop-pick { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 2px; font-size: 11px; line-height: 1.2;
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
 .prop-pick img { width: 44px; height: 44px; }
+.prop-pick[hidden], .prop-section[hidden] { display: none; }
+.prop-search { width: 100%; margin: 4px 0 2px; }
 .prop-pick.active { border-color: var(--accent); background: var(--panel-3); }
 .opt-pick { display: inline-flex; align-items: center; gap: 6px; }
 .opt-pick.open { border-color: var(--accent); }

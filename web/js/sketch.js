@@ -303,7 +303,7 @@ function geometry(base, draft, g, level = '') {
   const props = [[], [], []];
   for (const [id, pr] of Object.entries(sk.props)) {
     const def = propDef(pr.kind);
-    props[def.light ? 2 : def.layer].push([id, pr]);
+    props[def.light && def.layer ? 2 : def.layer].push([id, pr]);
   }
   const out = { key, base, sk, byMat, roomRegion, floorEdge, seams, shapes, wallPath, byStyle, props, walls, railings };
   caches.set(level, out);
