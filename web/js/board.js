@@ -1494,23 +1494,34 @@ export class Board {
     ctx.translate(cx, cy);
     ctx.rotate((t.rotation || 0) * Math.PI / 180);
     const img = this.image(t.img || actor?.img);
-    ctx.beginPath();
-    ctx.arc(0, 0, rad, 0, Math.PI * 2);
-    if (img) {
-      ctx.save(); ctx.clip();
+    // A token whose art brings its own frame (actor flag token.shape = "image") is drawn whole,
+    // not cut to a circle; selected, it gets a square outline instead of the ring.
+    if (img && actor?.flags?.token?.shape === 'image') {
       ctx.drawImage(img, -r.w / 2, -r.h / 2, r.w, r.h);
-      ctx.restore();
+      if (this.selected.has(t.id)) {
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#ffd166';
+        ctx.strokeRect(-r.w / 2 + 2, -r.h / 2 + 2, r.w - 4, r.h - 4);
+      }
     } else {
-      ctx.fillStyle = t.color || '#5b8def';
-      ctx.fill();
-      ctx.fillStyle = '#fff';
-      ctx.font = `600 ${rad}px system-ui, sans-serif`;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText((t.name || '?').trim().charAt(0).toUpperCase(), 0, rad * 0.06);
+      ctx.beginPath();
+      ctx.arc(0, 0, rad, 0, Math.PI * 2);
+      if (img) {
+        ctx.save(); ctx.clip();
+        ctx.drawImage(img, -r.w / 2, -r.h / 2, r.w, r.h);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = t.color || '#5b8def';
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.font = `600 ${rad}px system-ui, sans-serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText((t.name || '?').trim().charAt(0).toUpperCase(), 0, rad * 0.06);
+      }
+      ctx.lineWidth = this.selected.has(t.id) ? 4 : 2;
+      ctx.strokeStyle = this.selected.has(t.id) ? '#ffd166' : 'rgba(0,0,0,.6)';
+      ctx.stroke();
     }
-    ctx.lineWidth = this.selected.has(t.id) ? 4 : 2;
-    ctx.strokeStyle = this.selected.has(t.id) ? '#ffd166' : 'rgba(0,0,0,.6)';
-    ctx.stroke();
     ctx.restore();
 
     if (t.show_name !== false && t.name) {
