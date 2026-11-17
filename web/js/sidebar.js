@@ -8,7 +8,7 @@ import { store, isGM, ownsActor, systemInfo, combatOrder } from './store.js';
 import { el, formDialog, openWindow, toast } from './ui.js';
 import { icon, hasIcon } from './icons.js';
 import { renderMarkdown } from './markdown.js';
-import { creationSteps, openCreationSettings } from './creation.js';
+import { creationSteps, openCreationSettings, isCharacterType } from './creation.js';
 import { forgeTypes, openForgeSettings } from './forge.js';
 import { openBooksSettings } from './books.js';
 import { coverScene } from './grid-align.js';
@@ -226,7 +226,8 @@ export class Sidebar {
 
   renderActors(panel) {
     const sys = systemInfo();
-    const types = Object.entries(sys.actor_types ?? {});
+    // Character types first, so a new actor is a player character unless the GM picks otherwise.
+    const types = Object.entries(sys.actor_types ?? {}).sort(([a], [b]) => Number(isCharacterType(b)) - Number(isCharacterType(a)));
     const actors = Object.values(store.world.actors).sort((a, b) => a.name.localeCompare(b.name));
     const list = el('ul.entity-list');
     for (const a of actors) {

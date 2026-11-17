@@ -3,6 +3,7 @@
 // Usage: node gen-srd.mjs <system folder>
 import fs from 'fs';
 import path from 'path';
+import { spellGrants } from './spell-progression.mjs';
 
 const out = process.argv[2];
 let seq = 0;
@@ -420,7 +421,7 @@ const fighter = doc('class', 'Fighter', { levels: 0, hit_die: 10, caster: 'none'
       featureDoc('Action Surge', 'Fighter 2', 'On your turn, take one additional action (not Magic). Once per Short or Long Rest.', usesN(1, 'short', '', 'Free')),
       featureDoc('Tactical Mind', 'Fighter 2', 'When you fail an ability check, spend a use of Second Wind to add 1d10 to it; if it still fails, the use is not spent.'),
     ] }),
-    grant('fighter_sub', 3, 'Fighter subclass', 'choice', { count: 1, items: [champion] }),
+    grant('fighter_sub', 3, 'Fighter subclass', 'pick', { count: 1, from: 'subclass', where: { class_name: 'Fighter' } }),
     asi('fighter_asi', 4, { every: 4, until: 16 }),
     asi('fighter_asi6', 6),
     asi('fighter_asi14', 14),
@@ -453,7 +454,7 @@ const wizard = doc('class', 'Wizard', { levels: 0, hit_die: 6, caster: 'full', p
       featureDoc('Arcane Recovery', 'Wizard 1', 'Once per day after a Short Rest, recover spell slots with a combined level up to half your Wizard level (rounded up), none above level 5.', usesN(1, 'long')),
     ] }),
     grant('wizard_2', 2, 'Wizard 2', 'items', { items: [featureDoc('Scholar', 'Wizard 2', 'Gain Expertise in one of Arcana, History, Investigation, Medicine, Nature or Religion in which you are proficient.')] }),
-    grant('wizard_sub', 3, 'Wizard subclass', 'choice', { count: 1, items: [evoker] }),
+    grant('wizard_sub', 3, 'Wizard subclass', 'pick', { count: 1, from: 'subclass', where: { class_name: 'Wizard' } }),
   ],
 });
 
@@ -480,7 +481,7 @@ const mkClass = (c) => {
       skillChoice(`${key}_skills`, 1, `Skill proficiencies (choose ${c.skills[0]}${c.skills[1] ? `: ${only.map((s) => SK[s]).join(', ')}` : ', any'})`, c.skills[0], c.skills[1]),
       ...Object.entries(c.levels).map(([lvl, list]) => grant(`${key}_${lvl}`, Number(lvl), `${c.name} ${lvl}`, 'items', { items: feats(lvl, list, c.name) })),
       ...(c.style ? [grant(`${key}_style`, c.style, 'Fighting Style', 'choice', { count: 1, items: [FEATS.archery, FEATS.defense, FEATS.great_weapon, FEATS.two_weapon] })] : []),
-      grant(`${key}_sub`, 3, `${c.name} subclass`, 'choice', { count: 1, items: [sub] }),
+      grant(`${key}_sub`, 3, `${c.name} subclass`, 'pick', { count: 1, from: 'subclass', where: { class_name: c.name } }),
     ],
   });
   return [cls, sub];
@@ -814,6 +815,9 @@ const RULES = [
   rule('Magic', 'Spell Attacks and Save DCs', '**Spell attack bonus** = your spellcasting ability modifier + [[Proficiency Bonus]]. **Spell save DC** = 8 + your spellcasting ability modifier + Proficiency Bonus. Both are on the Spells tab.'),
   rule('Magic', 'Ritual Casting', 'A spell with the Ritual tag can be cast as a ritual: it takes 10 minutes longer and doesn\'t use a spell slot. You must have it prepared.'),
 ];
+
+// Casters pick their cantrips and spells as they level (spell-progression.mjs).
+for (const c of [fighter, wizard, ...MORE_CLASSES].filter((d) => d.kind === 'class')) c.advancement.push(...spellGrants(c.name));
 
 const packs = {
   classes: ['Classes and subclasses', [fighter, wizard, champion, evoker, ...MORE_CLASSES], true],

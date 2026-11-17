@@ -12,6 +12,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { classesOf } from './spell-progression.mjs';
 
 const [src, out, which = 'all'] = process.argv.slice(2);
 if (!src || !out) { console.error('usage: node import-srd.mjs <srd md folder> <system folder> [spells|monsters|items|all]'); process.exit(1); }
@@ -86,6 +87,7 @@ function spells() {
         add_mod: !!dice && /spellcasting ability modifier/i.test(dice[0]), plus: flat,
         per_level: upcast ? Number(upcast[1]) : 0, cantrip: cantrip && level === 0,
         damage_type: DAMAGE.includes(dtype) || dtype === 'healing' ? dtype : 'force',
+        classes: classesOf(head), // for the casters' level-up spell picks
         description: `*${head}*\n\n${text2}`,
       },
     };
