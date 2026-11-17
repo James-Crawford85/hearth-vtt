@@ -224,6 +224,24 @@ pub fn scores(method: &ScoreMethod, entries: &[String], assign: &Assign, rolls: 
     }
 }
 
+/// What level-ups already added to a step's list (a background's +2 and +1, an ability score
+/// improvement…): entry → total. Each `points` grant logs what it raised on the item that gave it
+/// (`flags.core.advancement.<level>.points["abilities.value"]`), so scores set afterwards keep them.
+pub fn granted_raises(step: &CreationStep, items: &[crate::model::Item]) -> BTreeMap<String, i64> {
+    let field = if step.field.is_empty() { "value" } else { step.field.as_str() };
+    let key = format!("{}.{field}", step.path);
+    let mut out = BTreeMap::new();
+    for item in items {
+        let Some(levels) = item.flags.pointer("/core/advancement").and_then(Value::as_object) else { continue };
+        for log in levels.values() {
+            for (entry, n) in log.pointer("/points").and_then(|p| p.get(&key)).and_then(Value::as_object).into_iter().flatten() {
+                *out.entry(entry.clone()).or_insert(0) += n.as_i64().unwrap_or(0);
+            }
+        }
+    }
+    out
+}
+
 /// The data patch that sets the scores (`{ abilities: { str: { value: 15 } … } }`).
 pub fn scores_patch(step: &CreationStep, scores: &BTreeMap<String, i64>) -> Value {
     let field = if step.field.is_empty() { "value" } else { step.field.as_str() };
@@ -299,5 +317,17 @@ mod tests {
         let r = roll_scores(&m("roll"), 3, &mut |f| { seen.push(f.to_string()); Ok(10) }).unwrap();
         assert_eq!((r.len(), seen[0].as_str()), (3, "4d6kh3"));
         assert_eq!(scores_patch(&s, &[("str".to_string(), 15)].into_iter().collect()), json!({ "abilities": { "str": { "value": 15 } } }));
+    }
+
+    #[test]
+    fn raises_from_level_ups_are_found() {
+        let s = step();
+        let item = |flags: Value| -> crate::model::Item { serde_json::from_value(json!({ "id": "i", "name": "x", "kind": "background", "data": {}, "flags": flags })).unwrap() };
+        let items = vec![
+            item(json!({ "core": { "advancement": { "1": { "points": { "abilities.value": { "str": 2, "con": 1 }, "skills.prof": { "athletics": 1 } } } } } })),
+            item(json!({ "core": { "advancement": { "4": { "points": { "abilities.value": { "str": 1 } } }, "1": { "items": [] } } } })),
+            item(json!({})),
+        ];
+        assert_eq!(granted_raises(&s, &items), [("con".to_string(), 1), ("str".to_string(), 3)].into_iter().collect());
     }
 }

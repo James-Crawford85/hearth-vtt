@@ -23,7 +23,8 @@ import { el, escape, openWindow } from './ui.js';
 import { blueprintType, blueprintSheet, itemSheetsOnChange, sheetMode } from './blueprint-sheet.js';
 import { layoutSheet, layoutFor } from './layout-sheet.js';
 import { openItemPicker } from './advancement.js';
-import { creationBar, creationResetButtons } from './creation.js';
+import { creationResetButtons } from './creation.js';
+import { creationGuide } from './creation-guide.js';
 
 const renderers = new Map();
 const templateCache = new Map();
@@ -399,7 +400,7 @@ export function openSheet(actorId, api) {
       content = el('div.error', { text: `Sheet failed to render: ${e.message}` });
     }
     if (mine !== seq) return; // a newer render started
-    win.body.replaceChildren(...[isGM() ? ownersBar(a, api) : null, layoutPicker(a, bpType, api), creationBar(a, api), content].filter(Boolean));
+    win.body.replaceChildren(...[isGM() ? ownersBar(a, api) : null, layoutPicker(a, bpType, api), creationGuide(a, api), content].filter(Boolean));
     hooks.emit('sheet:render', content, a, api);
     win.body.scrollTop = scroll;
     if (focused) win.body.querySelector(`[name="${CSS.escape(focused)}"]`)?.focus();

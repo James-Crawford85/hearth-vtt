@@ -137,9 +137,14 @@ impl Grant {
                 // `name` matches the item's name (a list of feats a bloodline offers); others its data.
                 let name = Value::String(it.name.clone());
                 let have = if k == "name" { &name } else { it.data.get(k).unwrap_or(&Value::Null) };
-                match want {
-                    Value::Array(options) => options.contains(have),
-                    w => w == have,
+                let ok = |h: &Value| match want {
+                    Value::Array(options) => options.contains(h),
+                    w => w == h,
+                };
+                // A list field (a spell's classes) matches when any of its values does.
+                match have {
+                    Value::Array(values) => values.iter().any(ok),
+                    h => ok(h),
                 }
             })
     }
@@ -1010,6 +1015,12 @@ mod tests {
         assert!(!g.allows(&feat("general")), "a fighter's bonus feat must be a combat feat");
         let spell: Item = serde_json::from_value(json!({ "id": "s", "name": "S", "kind": "spell", "data": { "feat_type": "combat" } })).unwrap();
         assert!(!g.allows(&spell), "and a feat at all");
+        // A list field matches when any of its values does: a wizard's level 1 or 2 spells.
+        let g: Grant = serde_json::from_value(json!({ "kind": "pick", "from": "spell", "where": { "classes": "Wizard", "level": [1, 2] } })).unwrap();
+        let sp = |classes: Value, level: u32| -> Item { serde_json::from_value(json!({ "id": "s", "name": "S", "kind": "spell", "data": { "classes": classes, "level": level } })).unwrap() };
+        assert!(g.allows(&sp(json!(["Sorcerer", "Wizard"]), 1)));
+        assert!(!g.allows(&sp(json!(["Cleric"]), 1)));
+        assert!(!g.allows(&sp(json!(["Wizard"]), 3)), "a level 3 spell is too high");
     }
 
     #[test]

@@ -277,7 +277,9 @@ export function pickAllows(g, doc) {
   if (g.from && doc.kind !== g.from) return false;
   return Object.entries(g.where ?? {}).every(([k, want]) => {
     const have = k === 'name' ? doc.name : (doc.data?.[k] ?? null);
-    return Array.isArray(want) ? want.includes(have) : want === have;
+    const ok = (h) => (Array.isArray(want) ? want.includes(h) : want === h);
+    // A list field (a spell's classes) matches when any of its values does.
+    return Array.isArray(have) ? have.some(ok) : ok(have);
   });
 }
 
@@ -401,18 +403,23 @@ export function openDetails(api, doc, from = '') {
 /** A searchable list for a "pick any of a type" grant (any feat…); picked documents go into `chosen`. */
 async function choosePick(api, actor, g, chosen, done) {
   const typeLabel = systemInfo().item_types?.[g.from]?.label ?? g.from;
-  const win = openWindow({ title: `Choose ${typeLabel.toLowerCase()}`, width: 880 });
+  const left = Math.max(1, g.count || 1) - chosen.length;
+  const win = openWindow({ title: `Choose ${typeLabel.toLowerCase()}${left > 1 ? `: ${left} more` : ''}`, width: 880 });
   win.body.replaceChildren(el('p.muted', { text: 'Loading…' }));
   const all = await availableItems(api, [g.from], (d) => pickAllows(g, d));
   const has = (c) => actor.items.some((i) => i.name === c.doc.name && pickAllows(g, i)) || chosen.some((x) => x.name === c.doc.name);
+  const want = Math.max(1, g.count || 1);
   const take = async (c) => {
-    if (has(c)) return;
+    if (has(c) || chosen.length >= want) return;
     // "Weapon Focus": which weapon? (only items that ask; see taken-for.js)
     const doc = await takenFor(api, actor, cleanDoc(c.doc));
     if (!doc) return;
     chosen.push(doc);
-    win.close();
     done();
+    // Several to pick (a wizard's spells): stay open until they're all chosen.
+    if (chosen.length >= want) { win.close(); return; }
+    win.setTitle?.(`Choose ${typeLabel.toLowerCase()}: ${want - chosen.length} more`);
+    f.redraw();
   };
   const f = finder({
     entries: all,
@@ -545,7 +552,7 @@ export async function openItemPicker(api, actorId, kind) {
   const blank = isGM() && !grant
     ? el('button.small', { type: 'button', text: `+ A blank ${typeLabel.toLowerCase()}`, title: 'Make a new, empty one on this character', on: { click: () => { api.create.item(actorId, kind, `New ${typeLabel}`); win.close(); } } })
     : null;
-  win.body.replaceChildren(f.el, blank ? el('div.row', {}, el('span.grow'), blank) : null);
+  win.body.replaceChildren(...[f.el, blank ? el('div.row', {}, el('span.grow'), blank) : null].filter(Boolean));
   f.focus();
   if (await checkRequirements(api, actorId, all)) f.redraw();
 }

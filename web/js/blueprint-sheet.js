@@ -318,13 +318,7 @@ export function blueprintSheet(actor, type, api) {
     root.append(grid);
   }
 
-  // A brand-new character: offer to set them up.
-  const starters = grantTypes();
-  if (canAdvance && starters.length && isCharacterType(actor.kind) && !actor.items.some((i) => starters.some((t) => t.key === i.kind))) {
-    root.append(el('div.new-character', {},
-      el('span.grow', { text: `New character? Add their ${starters.map((t) => t.label.toLowerCase()).join(', ')} to fill in their features.` }),
-      el('button.primary', { type: 'button', text: 'Start', on: { click: () => openAdd(api, actor.id) } })));
-  }
+  // (A brand-new character's setup checklist is drawn above the sheet: creation-guide.js.)
 
   const itemCards = (types) => (types.length ? [el('div.bp-item-sections', {}, ...types.map((t) => itemSection(actor, t, api, editable)))] : []);
   const tabs = tabGroups.map((g) => ({

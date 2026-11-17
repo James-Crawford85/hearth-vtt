@@ -55,6 +55,26 @@ function entriesOf(actor, step) {
     .map((key) => ({ key, name: names[key] ?? key, current: Number(list[key]?.[step.field || 'value'] ?? 0) }));
 }
 
+/**
+ * What level-ups already added to a step's list (a background's +2 and +1…), entry → total: the
+ * points each grant logged on the item that gave it. The server adds these on top of the scores set.
+ */
+export function grantedRaises(actor, step) {
+  const key = `${step.path}.${step.field || 'value'}`;
+  const out = {};
+  for (const item of actor.items ?? []) {
+    for (const log of Object.values(item.flags?.core?.advancement ?? {})) {
+      for (const [entry, n] of Object.entries(log?.points?.[key] ?? {})) out[entry] = (out[entry] ?? 0) + Number(n || 0);
+    }
+  }
+  return out;
+}
+
+/** The step's entries with the actor's current scores ("Strength 17, Dexterity 13…"). */
+export function scoresText(actor, step) {
+  return entriesOf(actor, step).map((e) => `${e.name.slice(0, 3).toUpperCase()} ${e.current}`).join(' · ');
+}
+
 /** Steps this actor still has to do (for its owners). */
 export function pendingSteps(actor) {
   if (!ownsActor(actor.id)) return [];
@@ -73,16 +93,7 @@ export function isCharacterType(kind) {
   return !steps.some((s) => s.actor_types?.length) || steps.some((s) => s.actor_types?.includes(kind));
 }
 
-/** A prompt at the top of a new character's sheet; for the GM, a way to let a player redo a step. */
-export function creationBar(actor, api) {
-  const pending = pendingSteps(actor);
-  if (pending.length) {
-    return el('div.new-character', {},
-      el('span.grow', { text: `New character: set their ${pending.map((s) => (s.label || s.id).toLowerCase()).join(', ')}.` }),
-      el('button.primary', { type: 'button', text: `Set ${(pending[0].label || pending[0].id).toLowerCase()}`, on: { click: () => openCreation(api, actor.id, pending[0].id) } }));
-  }
-  return null;
-}
+// (A new character's sheet lists what's left to do, these steps included: creation-guide.js.)
 
 /** GM: steps this actor has done, with a button to let them do it again. */
 export function creationResetButtons(actor, api) {
@@ -123,6 +134,10 @@ export function openCreation(api, actorId, stepId) {
     if (!m) { win.body.replaceChildren(el('p.muted', { text: 'The GM hasn\'t allowed any way to set these in this world.' })); return; }
     const entries = entriesOf(actor, step);
     const parts = [];
+    // Bonuses a background, species or level up already gave stay on top of what's set here.
+    const bonus = grantedRaises(actor, step);
+    const bonusText = entries.filter((e) => bonus[e.key]).map((e) => `${e.name} +${bonus[e.key]}`).join(', ');
+    if (bonusText) parts.push(el('p.muted.small', { text: `Already given, and added on top of these: ${bonusText}.` }));
     parts.push(el('div.creation-methods', { role: 'radiogroup', 'aria-label': 'Method' }, ...methods.map((x) => el('label', {
       class: x.id === m.id ? 'creation-method on' : 'creation-method', title: rolledWith && x.id !== rolledWith ? 'You\'ve rolled already' : '',
     }, el('input', { type: 'radio', name: `cm-${key}`, checked: x.id === m.id, disabled: !!rolledWith && x.id !== rolledWith, on: { change: () => { st.method = x.id; st.assign = {}; render(); } } }), x.label || x.id))));

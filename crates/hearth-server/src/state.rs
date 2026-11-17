@@ -1460,14 +1460,20 @@ impl AppState {
                 vec![]
             };
             let scores = hearth_core::creation::scores(&method, &entries, assign, &rolls)?;
-            let mut patch = serde_json::json!({ "data": hearth_core::creation::scores_patch(&step, &scores) });
+            // Bonuses already given by a background, species or level up stay on top, whatever the order.
+            let raises = hearth_core::creation::granted_raises(&step, &actor.items);
+            let total: BTreeMap<String, i64> = scores.iter().map(|(k, v)| (k.clone(), v + raises.get(k).copied().unwrap_or(0))).collect();
+            let mut patch = serde_json::json!({ "data": hearth_core::creation::scores_patch(&step, &total) });
             patch["flags"] = serde_json::json!({ "core": { "creation": { step_id: { "method": method_id, "done": true } } } });
             let before = self.resource_maxes(&world, actor_id);
             self.commit(&mut world, &user.id, Op::ActorUpdate { id: actor_id.to_string(), patch }, 0)?;
             self.follow_maxes(&mut world, &user.id, actor_id, &before)?;
             self.dirty.store(true, Ordering::Release);
             // In the system's order, by name: Strength 15, Dexterity 14…
-            let shown: Vec<String> = entries.iter().filter_map(|k| scores.get(k).map(|v| format!("{} {v}", names.get(k).unwrap_or(k)))).collect();
+            let shown: Vec<String> = entries.iter().filter_map(|k| scores.get(k).map(|v| match raises.get(k).copied().unwrap_or(0) {
+                0 => format!("{} {v}", names.get(k).unwrap_or(k)),
+                r => format!("{} {v} (+{r} = {})", names.get(k).unwrap_or(k), v + r),
+            })).collect();
             (actor.name, shown, if method.label.is_empty() { method.id.clone() } else { method.label.clone() })
         };
         let mut msg = Self::message(user, Some(actor_id.to_string()));
