@@ -91,6 +91,9 @@ pub struct TypeDef {
     /// Item types: how the item forge prices, checks and crafts them.
     #[serde(default)]
     pub forge: Option<hearth_core::forge::Forge>,
+    /// Item types: what one sells for in the party's loot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worth: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,7 +319,7 @@ impl Package {
         let types = |t: &BTreeMap<String, TypeDef>| {
             t.iter()
                 .map(|(k, d)| {
-                    (k.clone(), hearth_core::rules::TypeRules { formulas: d.formulas.clone(), resources: d.resources.clone(), actions: d.actions.clone(), effects: d.effects.clone(), levels: d.levels.clone(), separate_levels: d.separate_levels, advancement: d.advancement.clone(), forge: d.forge.clone() })
+                    (k.clone(), hearth_core::rules::TypeRules { formulas: d.formulas.clone(), resources: d.resources.clone(), actions: d.actions.clone(), effects: d.effects.clone(), levels: d.levels.clone(), separate_levels: d.separate_levels, advancement: d.advancement.clone(), forge: d.forge.clone(), worth: d.worth.clone() })
                 })
                 .collect()
         };

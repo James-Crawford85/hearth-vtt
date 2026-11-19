@@ -8,7 +8,12 @@ import { el, openWindow } from './ui.js';
 import { renderMarkdown } from './markdown.js';
 import { accessOf } from './directory.js';
 import { openItemSheet } from './blueprint-sheet.js';
-import { postCard } from './collections.js';
+import { postCard, DOC_MIME } from './collections.js';
+
+const ITEM_MIME = 'application/x-hearth-item';
+const ACTOR_MIME = 'application/x-hearth-actor';
+/** What a result carries when dragged: a monster onto the map, an item onto a sheet. */
+const dragDoc = (kind, doc) => (['item', 'actor'].includes(kind) ? (dt) => dt.setData(DOC_MIME, JSON.stringify({ kind, doc })) : null);
 
 const MAX = 60;
 
@@ -42,29 +47,30 @@ export class Lookup {
     }
     for (const x of Object.values(w.items ?? {})) {
       if (!isGM() && accessOf(x) === 'none') continue;
-      out.push({ name: x.name, type: sys.item_types?.[x.kind]?.label ?? 'Item', from: 'Items', open: () => this.api.items.open(x.id) });
+      out.push({ name: x.name, type: sys.item_types?.[x.kind]?.label ?? 'Item', from: 'Items', open: () => this.api.items.open(x.id), drag: (dt) => dt.setData(ITEM_MIME, x.id) });
     }
     for (const t of Object.values(w.tables ?? {})) {
       if (!isGM() && accessOf(t) === 'none') continue;
       out.push({ name: t.name, type: 'Table', from: 'Rollable tables', open: () => this.api.tables.open(t.id) });
     }
     for (const a of Object.values(w.actors ?? {})) {
+      if (a.flags?.core?.placed) continue; // copies of monsters on the map: the collection's own is listed
       const mine = isGM() || a.owners?.includes(store.user?.id);
-      if (mine) out.push({ name: a.name, type: sys.actor_types?.[a.kind]?.label ?? 'Actor', from: 'Actors', open: () => this.api.sheets.open(a.id) });
+      if (mine) out.push({ name: a.name, type: sys.actor_types?.[a.kind]?.label ?? 'Actor', from: 'Actors', open: () => this.api.sheets.open(a.id), drag: isGM() ? (dt) => dt.setData(ACTOR_MIME, a.id) : null });
       // Items your characters carry (their Magic Missile, with its numbers).
       if (!mine) continue;
       for (const it of a.items ?? []) {
-        out.push({ name: it.name, type: sys.item_types?.[it.kind]?.label ?? it.kind, from: a.name, open: () => openItemSheet(a.id, it.id, this.api) });
+        out.push({ name: it.name, type: sys.item_types?.[it.kind]?.label ?? it.kind, from: a.name, open: () => openItemSheet(a.id, it.id, this.api), drag: dragDoc('item', it) });
       }
     }
     for (const c of Object.values(w.collections ?? {})) {
       if (!isGM() && ['none', 'limited'].includes(accessOf(c))) continue;
       for (const doc of Object.values(c.entries ?? {})) {
-        out.push({ name: doc.name, type: this.typeLabel(c.kind, doc), from: c.name, text: doc.content, open: () => this.showDoc(c.kind, doc, c.name) });
+        out.push({ name: doc.name, type: this.typeLabel(c.kind, doc), from: c.name, text: doc.content, open: () => this.showDoc(c.kind, doc, c.name), drag: dragDoc(c.kind, doc) });
       }
     }
     for (const { doc, kind, pack } of this.packDocs ?? []) {
-      out.push({ name: doc.name, type: this.typeLabel(kind, doc), from: pack.label, text: doc.content ?? doc.data?.description, open: () => this.showDoc(kind, doc, pack.label) });
+      out.push({ name: doc.name, type: this.typeLabel(kind, doc), from: pack.label, text: doc.content ?? doc.data?.description, open: () => this.showDoc(kind, doc, pack.label), drag: dragDoc(kind, doc) });
     }
     return out.filter((r) => r.name);
   }
@@ -124,9 +130,22 @@ export class Lookup {
       sel = Math.min(sel, Math.max(0, results.length - 1));
       list.replaceChildren(...results.map((r, i) => el('li', {
         class: i === sel ? 'lookup-row on' : 'lookup-row', role: 'option', 'aria-selected': String(i === sel),
-        on: { pointerdown: (e) => { e.preventDefault(); this.pick(r); }, pointermove: () => { if (sel !== i) { sel = i; mark(); } } },
+        draggable: r.drag ? 'true' : 'false', title: r.drag ? 'Click to open, or drag it onto the map or a sheet' : '',
+        on: {
+          // Open on click rather than on press, so a press can start a drag instead.
+          click: () => this.pick(r),
+          pointermove: () => { if (sel !== i) { sel = i; mark(); } },
+          dragstart: (e) => {
+            r.drag(e.dataTransfer);
+            e.dataTransfer.setData('text/plain', r.name);
+            e.dataTransfer.effectAllowed = 'copy';
+            // Let the drop reach the map or the sheet underneath; the box closes when the drag ends.
+            setTimeout(() => this.overlay?.classList.add('dragging'));
+          },
+          dragend: () => this.close(),
+        },
       }, el('span.lookup-name', { text: r.name }), el('span.lookup-type', { text: r.type }), el('span.lookup-from', { text: r.from }))));
-      if (!q) hint.textContent = 'Type a name: conditions, spells, items, rules, journal entries, characters. ↑↓ to move, Enter to open, Esc to close.';
+      if (!q) hint.textContent = 'Type a name: conditions, spells, items, rules, journal entries, characters. ↑↓ to move, Enter to open, Esc to close. Drag a monster onto the map, or an item onto a sheet.';
       else if (!results.length) hint.textContent = `Nothing called "${q}".`;
       else hint.textContent = `${results.length}${results.length === MAX ? '+' : ''} found. Enter opens the highlighted one.`;
     };

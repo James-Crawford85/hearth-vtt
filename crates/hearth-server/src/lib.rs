@@ -115,6 +115,7 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<RunningServer> {
         .route("/api/requires", post(http::requires))
         .route("/api/forge/preview", post(http::forge_preview))
         .route("/api/forge/make", post(http::forge_make))
+        .route("/api/loot", post(http::loot))
         // Uploaded files get unique names, so they can be cached for good.
         .nest_service(
             "/assets",

@@ -328,6 +328,16 @@ fieldset.auto legend { text-transform: capitalize; color: var(--muted); }
 .toast { background: var(--panel-3); border: 1px solid var(--border); padding: 8px 14px; border-radius: 8px; box-shadow: var(--shadow); transition: opacity .4s; }
 .toast.error { border-color: var(--danger); }
 .toast.out { opacity: 0; }
+/* New chat while the sidebar is folded: copies of the cards beside the rail, newest at the bottom. */
+.chat-pops { position: fixed; right: calc(var(--sidebar-w) + 10px); bottom: 76px; width: 300px; max-width: calc(100vw - var(--sidebar-w) - 20px);
+  list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; pointer-events: none; z-index: 99999; }
+.chat-pop { pointer-events: auto; background: var(--panel); box-shadow: var(--shadow); transition: opacity .4s; animation: chat-pop-in .18s ease-out; }
+.chat-pop.out { opacity: 0; }
+@keyframes chat-pop-in { from { opacity: 0; transform: translateX(12px); } }
+body.glass .chat-pop { position: relative; isolation: isolate; border-color: var(--glass-edge); box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow); }
+body.glass .chat-pop::before { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none;
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.3); backdrop-filter: blur(var(--glass-blur)) saturate(1.3); }
+body.glass:not(.glass-light) .chat-pop { text-shadow: 0 1px 2px rgba(0, 0, 0, .35); }
 
 /* Phones: the open panel covers the board; the rail and controls stay. */
 @media (max-width: 760px) {
@@ -639,6 +649,8 @@ body.resizing, body.resizing * { user-select: none !important; }
 .lookup-results { list-style: none; margin: 0; padding: 4px; overflow: auto; }
 .lookup-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name type" "from type"; gap: 0 10px; padding: 6px 10px; border-radius: 8px; cursor: pointer; }
 .lookup-row.on { background: var(--panel-3); }
+.lookup-overlay.dragging { pointer-events: none; opacity: 0; }
+.lookup-row[draggable="true"] { cursor: grab; }
 .lookup-name { grid-area: name; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lookup-row.on .lookup-name { color: var(--accent); }
 .lookup-type { grid-area: type; align-self: center; font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
@@ -857,3 +869,85 @@ body.resizing, body.resizing * { user-select: none !important; }
 
 /* Grid alignment panel (grid-align.js). */
 .ga-modes { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.actor-folder { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
+.actor-folder > summary { cursor: pointer; padding: 4px 2px; }
+.actor-folder > .row { margin: 4px 0; }
+.loot { display: flex; flex-direction: column; gap: 6px; min-height: 100%; border-radius: 8px; }
+.loot.drop-on { outline: 2px dashed var(--accent); outline-offset: 2px; }
+.loot-coins { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; background: var(--panel-2, rgba(255,255,255,.04)); border-radius: 8px; }
+.loot h4 { margin: 8px 0 0; }
+.loot-open { color: var(--accent); }
+.loot-item { flex-wrap: wrap; gap: 4px 8px; }
+.loot-item > .grow { min-width: 0; flex: 1 1 0; }
+.loot-actions { order: 3; flex-basis: 100%; display: flex; gap: 4px; align-items: center; padding-left: 40px; }
+.loot-actions .loot-value { width: 7.5em; }
+.loot-gm label.small { display: flex; flex-direction: row; align-items: center; gap: 6px; }
+.loot-name { color: inherit; text-decoration: none; }
+.loot-name:hover { text-decoration: underline; }
+.loot-coin-inputs { display: flex; flex-wrap: wrap; gap: 8px; }
+.loot-coin-inputs input { width: 5em; }
+.loot-pick { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow: auto; }
+.loot button.link { background: none; border: 0; padding: 0 4px; color: var(--accent); cursor: pointer; font-size: 12px; }
+.loot button:disabled { opacity: .45; cursor: default; }
+.loot-gm { display: flex; flex-direction: column; gap: 4px; }
+
+/* ---------------------------------------------------------------- glass appearance
+   A player's own choice (appearance.js): panels, the sidebar and windows turn to
+   frosted glass over the map. The tint, its strength and the blur come from
+   --glass-tint / --glass-alpha / --glass-blur set on <body>. Inner surfaces
+   (--panel-2/3) become faint overlays so they read as layers on the glass. */
+body.glass {
+  --glass-tint: #1f2127; --glass-alpha: 55%; --glass-blur: 14px;
+  --glass-edge: rgba(255, 255, 255, .14);
+  --panel: color-mix(in srgb, var(--glass-tint) var(--glass-alpha), transparent);
+  --panel-2: rgba(255, 255, 255, .07);
+  --panel-3: rgba(255, 255, 255, .12);
+  --border: rgba(255, 255, 255, .16);
+  --sheet-header: rgba(255, 255, 255, .06);
+}
+body.glass.glass-light {
+  --glass-edge: rgba(255, 255, 255, .55);
+  --panel-2: rgba(0, 0, 0, .06);
+  --panel-3: rgba(0, 0, 0, .11);
+  --border: rgba(0, 0, 0, .18);
+  --sheet-header: rgba(0, 0, 0, .05);
+  --text: #1c1d21; --muted: #4a4c55;
+  color-scheme: light;
+}
+/* The surfaces that become glass. The blur sits on a ::before layer so no
+   surface becomes a containing block for fixed-position things inside it. */
+body.glass :is(.panel-area, .rail, .window, .lookup-box, .control-groups, .control-tools, .scene-title,
+  .level-bar, .sketch-bar, .hotbar, .toast, .ng-menu, .opt-pop, .pw-dialog, .join-card) {
+  background: var(--panel); isolation: isolate;
+  border-color: var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-edge), var(--shadow);
+}
+body.glass :is(.panel-area, .rail, .control-groups, .control-tools, .lookup-box, .join-card) { position: relative; }
+body.glass :is(.panel-area, .rail, .window, .lookup-box, .control-groups, .control-tools, .scene-title,
+  .level-bar, .sketch-bar, .hotbar, .toast, .ng-menu, .opt-pop, .pw-dialog, .join-card)::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none;
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.3); backdrop-filter: blur(var(--glass-blur)) saturate(1.3);
+}
+/* The sidebar is one sheet of glass: the rail is a touch denser than the panel. */
+body.glass .rail { background: color-mix(in srgb, var(--glass-tint) min(calc(var(--glass-alpha) + 12%), 100%), transparent); }
+body.glass .panel-area, body.glass .rail { box-shadow: inset 1px 0 0 var(--glass-edge); }
+body.glass .window-header { background: var(--panel-2); }
+/* Text fields stay a little more solid so typing stays easy to read. */
+body.glass :is(input, select, textarea) { background: color-mix(in srgb, var(--glass-tint) 45%, transparent); }
+body.glass.glass-light :is(input, select, textarea) { background: rgba(255, 255, 255, .55); }
+body.glass select option { background: var(--glass-tint); }
+/* Text on the glass gets a soft shadow so it holds up over a bright map. */
+body.glass:not(.glass-light) :is(.panel-area, .window, .lookup-box, .rail, .control-tools, .control-groups) { text-shadow: 0 1px 2px rgba(0, 0, 0, .35); }
+.appearance { display: flex; flex-direction: column; gap: 6px; }
+.appearance-opts { display: flex; flex-direction: column; gap: 6px; padding-left: 24px; }
+.appearance-row { display: grid; grid-template-columns: 52px 1fr auto; gap: 8px; align-items: center; font-size: 13px; }
+.appearance-row input[type=color] { width: 44px; height: 26px; padding: 0; border: 1px solid var(--border); background: none; }
+.appearance-row input[type=range] { padding: 0; border: 0; background: none; }
+.appearance-val { font-size: 12px; min-width: 3em; text-align: right; }
+/* A system's sheet style paints solid colours; on glass they become layers too. */
+body.glass .window { --bg: rgba(0, 0, 0, .14); }
+body.glass .bp-sheet { --panel-2: rgba(255, 255, 255, .07); --panel-3: rgba(255, 255, 255, .12); --border: rgba(255, 255, 255, .16); --bg: rgba(0, 0, 0, .14); background: transparent; }
+body.glass .bp-sheet :is(.bp-group, .bp-show-big, .bp-show-badge, .bp-formula) { background: var(--panel-2); }
+body.glass.glass-light .window { --bg: rgba(255, 255, 255, .25); }
+body.glass.glass-light .bp-sheet { --panel-2: rgba(0, 0, 0, .06); --panel-3: rgba(0, 0, 0, .11); --border: rgba(0, 0, 0, .18); --bg: rgba(255, 255, 255, .25); --text: #1c1d21; --muted: #4a4c55; color: var(--text); }
+body.glass.glass-light .bp-sheet :is(.title-input, .bp-group-title, .bp-tabs button.active, .bp-portrait, .bp-subhead) { color: color-mix(in srgb, var(--accent) 62%, #000); }

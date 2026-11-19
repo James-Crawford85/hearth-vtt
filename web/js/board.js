@@ -1944,14 +1944,22 @@ export class Board {
       }
     });
 
-    // Drag actors from the sidebar onto the board.
+    // Drag actors from the sidebar onto the board, or monsters from a collection or the lookup
+    // (those get a world copy of their own, filed under "On the map" in the Actors tab).
     c.addEventListener('dragover', (e) => {
-      if (e.dataTransfer.types.includes('application/x-hearth-actor')) e.preventDefault();
+      const t = e.dataTransfer.types;
+      if (t.includes('application/x-hearth-actor') || (isGM() && t.includes('application/x-hearth-doc'))) e.preventDefault();
     });
     c.addEventListener('drop', (e) => {
-      const actorId = e.dataTransfer.getData('application/x-hearth-actor');
-      const actor = store.world.actors[actorId];
-      if (!actor || !this.scene) return;
+      if (!this.scene) return;
+      let actor = store.world.actors[e.dataTransfer.getData('application/x-hearth-actor')];
+      if (!actor && isGM()) {
+        try {
+          const { kind, doc } = JSON.parse(e.dataTransfer.getData('application/x-hearth-doc') || '{}');
+          if (kind === 'actor' && doc) actor = this.api.collections?.createPlaced(doc);
+        } catch { /* not ours */ }
+      }
+      if (!actor) return;
       e.preventDefault();
       const w = this.toWorld(e.offsetX, e.offsetY);
       const g = this.grid;

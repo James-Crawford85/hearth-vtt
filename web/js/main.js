@@ -17,6 +17,7 @@ import { Playlists } from './playlists.js';
 import { Collections } from './collections.js';
 import { Builder } from './builder.js';
 import { Lookup } from './lookup.js';
+import { Loot } from './loot.js';
 import { sheetsOnOp, refreshSheets } from './sheets.js';
 import { toast } from './ui.js';
 
@@ -206,6 +207,7 @@ registerGridAlign(api);
     api.collections = new Collections(api);
     api.builder = new Builder(api);
     api.lookup = new Lookup(api);
+    api.loot = new Loot(api);
     document.getElementById('lookup-btn')?.addEventListener('click', () => api.lookup.open());
     api.sidebar = new Sidebar(api);
     api.controls = new Controls(api);

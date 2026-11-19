@@ -185,6 +185,12 @@ pub async fn forge_make(State(state): State<Arc<AppState>>, headers: HeaderMap, 
     state.forge_make(&user, &body).await.map(Json).map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
 
+/// `POST /api/loot` `{ action, … }`: the party's loot pile (put in, give, buy, sell, split; see AppState::loot).
+pub async fn loot(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+    let user = session_of(&state, &headers).await?;
+    state.loot(&user, &body).await.map(Json).map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
 /// The user behind a request's `x-hearth-session` header, or an error.
 async fn session_of(state: &AppState, headers: &HeaderMap) -> Result<hearth_core::User, (StatusCode, String)> {
     let token = headers.get("x-hearth-session").and_then(|v| v.to_str().ok()).unwrap_or("");

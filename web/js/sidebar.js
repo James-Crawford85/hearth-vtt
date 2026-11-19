@@ -14,6 +14,7 @@ import { openBooksSettings } from './books.js';
 import { coverScene } from './grid-align.js';
 import { mediaSize } from './media.js';
 import { openSceneImport } from './scene-import.js';
+import { appearanceSettings } from './appearance.js';
 
 const PANEL_W = 340;
 const RAIL_W = 52;
@@ -37,6 +38,7 @@ export class Sidebar {
     this.addTab({ id: 'scenes', label: 'Scenes', icon: 'scenes', gmOnly: true, render: (p) => this.renderScenes(p) });
     this.addTab({ id: 'actors', label: 'Actors', icon: 'actors', render: (p) => this.renderActors(p) });
     this.addTab({ id: 'items', label: 'Items', icon: 'items', render: (p) => this.api.items.renderPanel(p) });
+    this.addTab({ id: 'loot', label: 'Party loot', icon: 'loot', render: (p) => this.api.loot.renderPanel(p) });
     this.addTab({ id: 'journal', label: 'Journal', icon: 'journal', render: (p) => this.api.journal.renderPanel(p) });
     this.addTab({ id: 'tables', label: 'Rollable Tables', icon: 'tables', render: (p) => this.api.tables.renderPanel(p) });
     this.addTab({ id: 'macros', label: 'Macros', icon: 'macros', render: (p) => this.api.macros.renderPanel(p) });
@@ -99,6 +101,7 @@ export class Sidebar {
     try { localStorage.setItem('hearth.sidebar.collapsed', c ? '1' : '0'); } catch { /* storage blocked */ }
     this.applyLayout();
     if (!c) {
+      this.pops?.replaceChildren();
       this.refresh(this.current);
       this.tabs.get(this.current)?.button.classList.remove('unread');
     }
@@ -133,13 +136,17 @@ export class Sidebar {
         this.log.append(this.chatMessage(op.message));
         this.log.scrollTop = this.log.scrollHeight;
         if (this.current !== 'chat' || this.collapsed) this.tabs.get('chat').button.classList.add('unread');
+        if (this.collapsed) this.popChat(op.message);
       } else this.refresh('chat');
     }
-    if (kind === 'actor' || kind === 'item' || kind === 'user') this.refresh('actors');
+    // Tokens too: the "On the map" folder counts the copies no longer on any scene.
+    if (kind === 'actor' || kind === 'item' || kind === 'user' || ((op.op === 'token_create' || op.op === 'token_delete') && this.current === 'actors')) this.refresh('actors');
     if (kind === 'combat' || kind === 'combatant' || kind === 'token' || kind === 'actor' || kind === 'scene') this.refresh('combat');
     if (kind === 'scene') this.refresh('scenes');
     if (kind === 'playlist') this.refresh('playlists');
     if (kind === 'user' || kind === 'world') this.refresh('settings');
+    // The pile is in the world's settings; members' names and coins are on their actors.
+    if ((kind === 'world' || kind === 'actor' || kind === 'user') && this.current === 'loot') this.refresh('loot');
   }
 
   // ------------------------------------------------------------ chat
@@ -191,6 +198,31 @@ export class Sidebar {
     return li;
   }
 
+  /**
+   * With the panel folded away, a new message shows for a moment beside the rail,
+   * drawn just as in the log. Each card fades on its own timer (paused while the
+   * pointer is on it); only the newest few are kept. Only live messages come here:
+   * the ones loaded on joining arrive with the world, not as chat_create.
+   */
+  popChat(m) {
+    const SHOW_MS = 2000, FADE_MS = 400, MAX = 4;
+    if (!this.pops) {
+      this.pops = el('ol.chat-pops', { 'aria-hidden': 'true' });
+      document.body.append(this.pops);
+    }
+    const card = this.chatMessage(m);
+    card.classList.add('chat-pop');
+    let timer = null;
+    const remove = () => { clearTimeout(timer); card.remove(); };
+    const fade = () => { card.classList.add('out'); timer = setTimeout(remove, FADE_MS); };
+    const start = () => { clearTimeout(timer); card.classList.remove('out'); timer = setTimeout(fade, SHOW_MS); };
+    card.addEventListener('pointerenter', () => { clearTimeout(timer); card.classList.remove('out'); });
+    card.addEventListener('pointerleave', start);
+    this.pops.append(card);
+    while (this.pops.children.length > MAX) this.pops.firstElementChild.remove();
+    start();
+  }
+
   /** Buttons for an action's follow-ups (damage after an attack), for whoever controls the actor. */
   followUps(m) {
     const a = m.flags?.core?.action;
@@ -228,11 +260,16 @@ export class Sidebar {
     const sys = systemInfo();
     // Character types first, so a new actor is a player character unless the GM picks otherwise.
     const types = Object.entries(sys.actor_types ?? {}).sort(([a], [b]) => Number(isCharacterType(b)) - Number(isCharacterType(a)));
-    const actors = Object.values(store.world.actors).sort((a, b) => a.name.localeCompare(b.name));
+    const all = Object.values(store.world.actors).sort((a, b) => a.name.localeCompare(b.name));
+    // Monsters dropped on the map from a collection are copies of their own: kept out of the
+    // main list, in a folder that starts closed, so a long campaign's goblins don't bury everything.
+    const placed = all.filter((a) => a.flags?.core?.placed);
+    const actors = all.filter((a) => !a.flags?.core?.placed);
     const list = el('ul.entity-list');
-    for (const a of actors) {
+    const placedList = el('ul.entity-list');
+    for (const a of all) {
       const mine = a.owners.includes(store.user.id);
-      list.append(el('li.entity', {
+      (a.flags?.core?.placed ? placedList : list).append(el('li.entity', {
         draggable: isGM(),
         on: {
           dragstart: (e) => e.dataTransfer.setData('application/x-hearth-actor', a.id),
@@ -266,8 +303,25 @@ export class Sidebar {
         },
       })), el('p.hint.muted', { text: 'Drag an actor onto the board to place a token (hold Alt to place it hidden).' }));
     }
-    if (!actors.length) children.push(el('p.muted', { text: 'No actors yet.' }));
-    panel.replaceChildren(...children, list);
+    if (!actors.length && !placed.length) children.push(el('p.muted', { text: 'No actors yet.' }));
+    let folder = null;
+    if (placed.length) {
+      const onScene = new Set(Object.values(store.world.scenes ?? {}).flatMap((s) => Object.values(s.tokens ?? {}).map((t) => t.actor_id)));
+      const unused = placed.filter((a) => !onScene.has(a.id));
+      folder = el('details.actor-folder', {
+        open: this.placedOpen ?? false,
+        on: { toggle: (e) => { this.placedOpen = e.currentTarget.open; } },
+      },
+      el('summary', {}, el('span', { text: `📁 On the map (${placed.length})` }),
+        el('small.muted', { text: ' monsters dropped from collections' })),
+      isGM() && unused.length ? el('div.row', {}, el('button.small', {
+        text: `Clear ${unused.length} not on any scene`,
+        title: 'Delete the copies whose tokens have all been removed',
+        on: { click: () => { if (confirm(`Delete ${unused.length} map ${unused.length === 1 ? 'copy' : 'copies'} with no token on any scene? (${unused.map((a) => a.name).slice(0, 8).join(', ')}${unused.length > 8 ? '…' : ''})`)) for (const a of unused) this.api.op({ op: 'actor_delete', id: a.id }); } },
+      })) : null,
+      placedList);
+    }
+    panel.replaceChildren(...children, list, folder ?? '');
   }
 
   // ------------------------------------------------------------ combat
@@ -602,6 +656,7 @@ export class Sidebar {
         el('p.hint.muted', { text: 'Changing the theme or modules reloads every connected client.' }),
       );
     }
+    parts.push(el('h4', { text: 'Appearance' }), appearanceSettings());
     parts.push(el('div.row', {},
       el('button', { text: 'Change my password', on: { click: () => this.api.changePassword?.() } }),
       el('button', { text: 'Leave world', on: { click: () => this.api.leave() } })));

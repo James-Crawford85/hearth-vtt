@@ -14,6 +14,7 @@ pub mod model;
 pub mod ops;
 pub mod creation;
 pub mod forge;
+pub mod loot;
 pub mod patch;
 pub mod protocol;
 pub mod requires;

@@ -192,7 +192,7 @@ export class Collections {
     const sel = this.windows.get(key)?.selected === id;
     const li = el('li.entity', {
       class: sel ? 'entity selected' : 'entity',
-      draggable: c.kind === 'item',
+      draggable: c.kind === 'item' || (c.kind === 'actor' && isGM()),
       on: {
         click: () => select(li),
         dragstart: (e) => {
@@ -383,6 +383,18 @@ export class Collections {
       default:
         return null;
     }
+  }
+
+  /**
+   * A collection actor (a monster) dropped on the map: a world copy of its own, marked as placed so the
+   * Actors tab files it under "On the map" instead of the main list. Returns the new actor (not yet in the store).
+   */
+  createPlaced(doc) {
+    const op = this.createOp('actor', doc);
+    op.actor.id = newId();
+    op.actor.flags = { ...(op.actor.flags ?? {}), core: { ...(op.actor.flags?.core ?? {}), placed: true } };
+    this.api.op(op, rejectToast);
+    return op.actor;
   }
 
   importMany(kind, docs, folder) {

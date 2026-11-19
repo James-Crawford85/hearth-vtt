@@ -91,6 +91,11 @@ pub struct TypeRules {
     /// Item types: how the item forge prices, checks and crafts them (see `crate::forge`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forge: Option<crate::forge::Forge>,
+    /// Item types: what one sells for, a formula in the main coin, or text such as "1,000 gp"
+    /// (Pathfinder: the cost to create a magic item). `@price` is the forge price, where
+    /// the type has a forge. Blank or 0 leaves it to the loot pile's sell rate of its cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worth: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

@@ -225,6 +225,9 @@ pub struct Node {
     /// Item types: how the item forge prices, checks and crafts them (see `hearth_core::forge`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forge: Option<hearth_core::forge::Forge>,
+    /// Item types: what one sells for in the party's loot (see `hearth_core::rules::TypeRules::worth`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worth: Option<String>,
     /// Not shown on the sheet (still in the data and formulas).
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
@@ -333,6 +336,7 @@ pub fn compile(bp: &Blueprint) -> Compiled {
             }
             if is_item {
                 c.def.forge = t.forge.clone();
+                c.def.worth = t.worth.clone().filter(|w| !w.trim().is_empty());
             }
             // Levels: a number field directly in the type.
             if is_item && (t.grants || t.levels.is_some()) {
@@ -638,6 +642,9 @@ pub fn merge_type(built: TypeDef, hand: Option<&TypeDef>) -> TypeDef {
     }
     if hand.forge.is_some() {
         out.forge = hand.forge.clone();
+    }
+    if hand.worth.is_some() {
+        out.worth = hand.worth.clone();
     }
     out
 }

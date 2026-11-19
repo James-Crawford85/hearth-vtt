@@ -1362,6 +1362,242 @@ impl AppState {
         Ok(result)
     }
 
+    // ------------------------------------------------------------------ party loot
+
+    fn loot_pile(world: &World) -> hearth_core::loot::Pile {
+        world.settings.pointer("/core/loot").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+    }
+
+    /// The party: the GM's list, or every actor a player owns.
+    fn loot_members(world: &World, pile: &hearth_core::loot::Pile) -> Vec<Id> {
+        if !pile.members.is_empty() {
+            return pile.members.iter().filter(|id| world.actors.contains_key(*id)).cloned().collect();
+        }
+        let players: HashSet<&Id> = world.users.values().filter(|u| u.role != Role::Gm).map(|u| &u.id).collect();
+        let mut v: Vec<&Actor> = world.actors.values().filter(|a| a.owners.iter().any(|o| players.contains(o))).collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v.into_iter().map(|a| a.id.clone()).collect()
+    }
+
+    fn loot_money(&self, world: &World, members: &[Id]) -> hearth_core::loot::Money {
+        let settings = world.settings.pointer("/core/loot").cloned().unwrap_or(Value::Null);
+        let reg = self.registry();
+        // A member's type, or else any type of the system's that keeps coins.
+        let kind = members.iter().find_map(|id| world.actors.get(id)).map(|a| a.kind.clone()).or_else(|| {
+            let types = &reg.get(&world.system)?.manifest.actor_types;
+            types.iter().find(|(_, t)| t.template.get("currency").is_some()).map(|(k, _)| k.clone())
+        });
+        hearth_core::loot::Money::detect(&settings, &reg.actor_template(&world.system, &kind.unwrap_or_default()))
+    }
+
+    /// The party's loot pile. Actions (each posts a line to chat):
+    /// - `info`: the world's coins and the party's members.
+    /// - `deposit` `{ actor_id, item_ids?, coins? }`: a member puts their things in.
+    /// - `add` `{ item?, coins? }` (GM): found loot.
+    /// - `value` `{ item_id, value }`: what an item sells for ("7 gp 5 sp"; empty clears it).
+    /// - `take` `{ item_id, actor_id, pay }`: give an item to a member, or (`pay`) the member
+    ///   buys it, paying its sell value into the pile; when the pile is split they get their share back.
+    /// - `sell` `{ item_ids }`: sold for their values, into the pile (where the GM has opened the market).
+    /// - `split`: the coins evenly to every member; what doesn't divide stays.
+    /// - `remove` `{ item_id }` (GM), `settings` `{ market?, sell_pct?, members? }` (GM).
+    pub async fn loot(&self, user: &User, body: &Value) -> Result<Value, String> {
+        use hearth_core::loot::{guess_value, set_value, split, value_of};
+        let action = body.get("action").and_then(Value::as_str).unwrap_or("");
+        let s = |k: &str| body.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let gm = user.role == Role::Gm;
+        let msg = {
+            let mut world = self.world.write().await;
+            let mut pile = Self::loot_pile(&world);
+            let members = Self::loot_members(&world, &pile);
+            let money = self.loot_money(&world, &members);
+            if action == "info" {
+                return Ok(serde_json::json!({ "money": money, "members": members }));
+            }
+            if !gm && !members.iter().any(|id| world.owns_actor(user, id)) {
+                return Err("Only the party's members can use the loot pile".into());
+            }
+            let gm_only = || if gm { Ok(()) } else { Err("Only the GM can do that".to_string()) };
+            let actor_named = |id: &str| world.actors.get(id).map(|a| a.name.clone()).unwrap_or_else(|| "someone".into());
+            let coins_in = |k: &str| -> BTreeMap<String, i64> {
+                let given: BTreeMap<String, i64> = body.get(k).cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+                given.into_iter().filter(|(_, n)| *n > 0).collect()
+            };
+            let item_pos = |pile: &hearth_core::loot::Pile, id: &str| pile.items.iter().position(|i| i.id == id).ok_or_else(|| "That isn't in the loot any more".to_string());
+            let mut ops: Vec<Op> = vec![];
+            let text: String;
+            match action {
+                "deposit" => {
+                    let aid = s("actor_id");
+                    if !world.owns_actor(user, &aid) || (!gm && !members.contains(&aid)) {
+                        return Err("You can only put in things from your own party member".into());
+                    }
+                    let actor = world.actors.get(&aid).ok_or("actor not found")?.clone();
+                    let mut what = vec![];
+                    for id in body.get("item_ids").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+                        let mut it = actor.items.iter().find(|i| i.id == id).ok_or("That item isn't on the character")?.clone();
+                        if value_of(&it).is_none() {
+                            let guess = guess_value(&money, &self.rules(), &it, pile.sell_pct);
+                            set_value(&mut it, guess);
+                        }
+                        what.push(it.name.clone());
+                        pile.items.push(it);
+                        ops.push(Op::ItemDelete { actor_id: aid.clone(), id: id.to_string() });
+                    }
+                    let given = coins_in("coins");
+                    if !given.is_empty() {
+                        let mut have = money.of_actor(&actor);
+                        for (k, n) in &given {
+                            let h = have.get_mut(k).ok_or_else(|| format!("There's no {k} coin here"))?;
+                            if *h < *n {
+                                return Err(format!("{} has only {} {k}", actor.name, h));
+                            }
+                            *h -= n;
+                        }
+                        ops.push(Op::ActorUpdate { id: aid.clone(), patch: serde_json::json!({ "data": money.actor_patch(&have) }) });
+                        pile.coins = money.add(&pile.coins, &given);
+                        what.push(money.format_coins(&given).unwrap_or_default());
+                    }
+                    if what.is_empty() {
+                        return Err("Pick something to put in".into());
+                    }
+                    text = format!("{} puts {} in the party's loot.", actor.name, what.join(", "));
+                }
+                "add" => {
+                    gm_only()?;
+                    let mut what = vec![];
+                    if let Some(v) = body.get("item").filter(|v| v.is_object()) {
+                        let mut it: hearth_core::Item = serde_json::from_value(v.clone()).map_err(|e| format!("item: {e}"))?;
+                        it.id = new_id();
+                        if value_of(&it).is_none() {
+                            let guess = guess_value(&money, &self.rules(), &it, pile.sell_pct);
+                            set_value(&mut it, guess);
+                        }
+                        what.push(it.name.clone());
+                        pile.items.push(it);
+                    }
+                    let given = coins_in("coins");
+                    if !given.is_empty() {
+                        pile.coins = money.add(&pile.coins, &given);
+                        what.push(money.format_coins(&given).unwrap_or_default());
+                    }
+                    if what.is_empty() {
+                        return Err("Nothing to add".into());
+                    }
+                    text = format!("{} adds {} to the party's loot.", user.name, what.join(", "));
+                }
+                "value" => {
+                    let i = item_pos(&pile, &s("item_id"))?;
+                    let v = s("value");
+                    let v = if v.trim().is_empty() { None } else { Some(money.parse(&v).ok_or("Write an amount, like 7 gp 5 sp")?.max(0)) };
+                    set_value(&mut pile.items[i], v);
+                    text = String::new();
+                }
+                "take" => {
+                    let aid = s("actor_id");
+                    let pay = body.get("pay").and_then(Value::as_bool).unwrap_or(false);
+                    if !world.actors.contains_key(&aid) || (!gm && !members.contains(&aid)) {
+                        return Err("Pick one of the party".into());
+                    }
+                    if pay && !world.owns_actor(user, &aid) {
+                        return Err("Only their owner can buy for a character".into());
+                    }
+                    let i = item_pos(&pile, &s("item_id"))?;
+                    let mut it = pile.items[i].clone();
+                    if pay {
+                        let v = value_of(&it).ok_or_else(|| format!("{} has no value yet: set one first", it.name))?;
+                        let actor = &world.actors[&aid];
+                        let left = money.pay(&money.of_actor(actor), v).map_err(|e| format!("{} can't afford it: {e}", actor.name))?;
+                        ops.push(Op::ActorUpdate { id: aid.clone(), patch: serde_json::json!({ "data": money.actor_patch(&left) }) });
+                        pile.coins = money.add(&pile.coins, &money.breakdown(v));
+                        text = format!("{} buys {} from the party for {}.", actor.name, it.name, money.format(v));
+                    } else {
+                        text = format!("{} gives {} from the party's loot to {}.", user.name, it.name, actor_named(&aid));
+                    }
+                    pile.items.remove(i);
+                    set_value(&mut it, None);
+                    it.id = String::new();
+                    let mut op = Op::ItemCreate { actor_id: aid, item: it };
+                    self.normalize(&world, user, &mut op)?;
+                    ops.push(op);
+                }
+                "sell" => {
+                    if !gm && !pile.market {
+                        return Err("The party isn't anywhere they can sell right now (the GM opens the market)".into());
+                    }
+                    let ids: Vec<String> = body.get("item_ids").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+                    if ids.is_empty() {
+                        return Err("Pick something to sell".into());
+                    }
+                    let mut total = 0;
+                    let mut names = vec![];
+                    for id in &ids {
+                        let i = item_pos(&pile, id)?;
+                        let it = pile.items.remove(i);
+                        total += value_of(&it).ok_or_else(|| format!("{} has no value yet: set one first", it.name))?;
+                        names.push(it.name);
+                    }
+                    pile.coins = money.add(&pile.coins, &money.breakdown(total));
+                    text = format!("The party sells {} for {}.", names.join(", "), money.format(total));
+                }
+                "split" => {
+                    let (share, left) = split(&money, &pile.coins, members.len());
+                    if share <= 0 {
+                        return Err("There isn't enough to split".into());
+                    }
+                    for id in &members {
+                        let have = money.of_actor(&world.actors[id]);
+                        ops.push(Op::ActorUpdate { id: id.clone(), patch: serde_json::json!({ "data": money.actor_patch(&money.add(&have, &money.breakdown(share))) }) });
+                    }
+                    pile.coins = left;
+                    text = format!(
+                        "The party splits {}: {} each to {}.",
+                        money.format(share * members.len() as i64),
+                        money.format(share),
+                        members.iter().map(|id| actor_named(id)).collect::<Vec<_>>().join(", ")
+                    );
+                }
+                "remove" => {
+                    gm_only()?;
+                    let i = item_pos(&pile, &s("item_id"))?;
+                    let it = pile.items.remove(i);
+                    text = format!("{} takes {} out of the party's loot.", user.name, it.name);
+                }
+                "settings" => {
+                    gm_only()?;
+                    let mut said = String::new();
+                    if let Some(m) = body.get("market").and_then(Value::as_bool) {
+                        if m != pile.market {
+                            said = if m { "The party can sell their loot here.".into() } else { "The party can no longer sell their loot here.".into() };
+                        }
+                        pile.market = m;
+                    }
+                    if let Some(p) = body.get("sell_pct").and_then(Value::as_f64) {
+                        pile.sell_pct = p.clamp(0.0, 1000.0);
+                    }
+                    if let Some(m) = body.get("members").and_then(Value::as_array) {
+                        pile.members = m.iter().filter_map(Value::as_str).filter(|id| world.actors.contains_key(*id)).map(String::from).collect();
+                    }
+                    text = said;
+                }
+                _ => return Err(format!("Unknown loot action: {action}")),
+            }
+            ops.push(Op::WorldUpdate { patch: serde_json::json!({ "settings": { "core": { "loot": pile } } }) });
+            for op in ops {
+                self.commit(&mut world, &user.id, op, 0)?;
+            }
+            self.dirty.store(true, Ordering::Release);
+            (!text.is_empty()).then(|| {
+                let mut m = Self::message(user, None);
+                m.content = text;
+                m
+            })
+        };
+        if let Some(m) = msg {
+            self.post_chat(m).await;
+        }
+        Ok(serde_json::json!({ "ok": true }))
+    }
+
     // ------------------------------------------------------------------ character creation
 
     /// A creation step of the world's system, the world's choices for it, and the
