@@ -37,7 +37,7 @@ pub trait Shared: Clone {
 impl Shared for JournalEntry {
     fn base_access(&self) -> Access { self.access }
     fn player_access(&self) -> &BTreeMap<Id, Access> { &self.players }
-    fn limited(&self) -> Self { JournalEntry { content: String::new(), ..self.clone() } }
+    fn limited(&self) -> Self { JournalEntry { content: String::new(), book: self.cover_only(), ..self.clone() } }
 }
 
 impl Shared for LibraryItem {

@@ -77,6 +77,7 @@ function wiki(body, opts) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'inline-roll';
+    b.dataset.wiki = body; // the source, so an editor can turn it back into Markdown
     b.textContent = `🎲 ${roll[1]}`;
     b.title = `Roll ${roll[1]}`;
     b.addEventListener('click', () => opts.onRoll?.(roll[1]));
@@ -86,6 +87,7 @@ function wiki(body, opts) {
   const a = document.createElement('a');
   a.href = '#';
   a.className = 'content-link';
+  a.dataset.wiki = body;
   a.textContent = label || name;
   if (opts.resolves && !opts.resolves(name)) a.classList.add('broken');
   a.addEventListener('click', (e) => { e.preventDefault(); opts.onLink?.(name); });

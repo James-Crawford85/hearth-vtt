@@ -29,7 +29,8 @@ import { MATERIALS, WALL_STYLES, ROOF_MATERIALS, texture } from './sketch-textur
 import { cellKey, cellOf, withPatch, sketchWalls, plainWalls, sketchLights, sketchLinks, edgeSegment, edgeNear, edgesAlong } from './sketch.js';
 import { sketchOf, skId, levelsOf, levelName } from './levels.js';
 import { LIGHTS, FURNITURE, PROP_GROUPS, propDef, isLight, isHex, propLightColor, drawPropAt, propThumb, propHit, propOutline } from './sketch-props.js';
-import { drawRoof } from './sketch.js';
+import { drawRoof, roundOpening, roundOpeningsOf, roundOpeningAt, ROUND_OPENINGS } from './sketch.js';
+import { ROUND_ROOFS } from './roof-skeleton.js';
 import { recipes } from './texture-recipes.js';
 import { openTextureCreator } from './texture-creator.js';
 
@@ -412,7 +413,25 @@ export function registerSketch(api) {
 
   // ---------------------------------------------------------------- roofs
 
-  const roofAt = (w, sk) => Object.entries(sk.roofs).filter(([, r]) => w.x >= r.x * g() && w.x <= (r.x + r.w) * g() && w.y >= r.y * g() && w.y <= (r.y + r.h) * g()).sort((a, b) => a[1].w * a[1].h - b[1].w * b[1].h)[0]?.[0] ?? null;
+  const isRound = (r) => ROUND_ROOFS.includes(r.shape);
+  const underRoof = (r, w) => {
+    const x = w.x / g(), y = w.y / g();
+    if (isRound(r)) return ((x - r.x - r.w / 2) / (r.w / 2)) ** 2 + ((y - r.y - r.h / 2) / (r.h / 2)) ** 2 <= 1;
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  };
+  const roofAt = (w, sk) => Object.entries(sk.roofs).filter(([, r]) => underRoof(r, w)).sort((a, b) => a[1].w * a[1].h - b[1].w * b[1].h)[0]?.[0] ?? null;
+  const roofOutline = (ctx, r) => {
+    if (isRound(r)) ctx.ellipse((r.x + r.w / 2) * g(), (r.y + r.h / 2) * g(), (r.w / 2) * g(), (r.h / 2) * g(), 0, 0, Math.PI * 2);
+    else ctx.rect(r.x * g(), r.y * g(), r.w * g(), r.h * g());
+  };
+  /** The walled round room under a point, smallest first. */
+  const roundRoomAt = (w, sk) => Object.entries(sk.shapes).filter(([, s]) => s.walled !== false && s.r > 0 && (w.x / g() - s.x) ** 2 + (w.y / g() - s.y) ** 2 <= s.r * s.r).sort((a, b) => a[1].r - b[1].r)[0] ?? null;
+  // A round roof over a round room reaches a little past its wall (the eaves).
+  const EAVES = 0.25;
+  /** What a roof is shaped like: hipped (rectangles that join up) or round. */
+  const roofShapeSelect = (value, set) => el('select', { title: 'The roof\'s shape', on: { change: (e) => set(e.target.value || null) } },
+    ...[['', 'Hipped'], ['cone', 'Round: cone'], ['facets', 'Round: faceted'], ['dome', 'Round: dome']].map(([v, t]) => el('option', { value: v, text: t, selected: (value ?? '') === v })));
+
   board.registerTool('sketch-roof', base({
     cursor: 'crosshair',
     enter() { api.sketchRefit(); api.controls?.render(); },
@@ -420,6 +439,13 @@ export function registerSketch(api) {
       if (e.shiftKey) {
         const hit = roofAt(w, current());
         if (hit) commit({ roofs: { [hit]: null } }); else toast('Shift-click a roof to remove it.');
+        return;
+      }
+      if (st.roofShape) {
+        // Round: dragged out from the middle (a click on a round room roofs it).
+        const snap = free(e) ? fine : half;
+        st.drag = { c: { x: snap(w.x / g()), y: snap(w.y / g()) }, r: 0, start: w };
+        this.move(w, e);
         return;
       }
       const c = cellAt(w);
@@ -430,24 +456,45 @@ export function registerSketch(api) {
       track(w, e);
       const d = st.drag;
       if (!d) { board.invalidate(); return; }
+      if (d.c) {
+        const r = Math.hypot(w.x / g() - d.c.x, w.y / g() - d.c.y);
+        d.r = Math.hypot(w.x - d.start.x, w.y - d.start.y) < 6 / board.cam.z ? 0 : free(e) ? Math.max(0.25, fine(r)) : Math.max(0.5, half(r));
+        d.roof = d.r > 0 ? { x: d.c.x - d.r, y: d.c.y - d.r, w: d.r * 2, h: d.r * 2, material: st.roof, shape: st.roofShape } : null;
+        board.invalidate();
+        return;
+      }
       d.b = cellAt(w);
       const x = Math.min(d.a[0], d.b[0]), y = Math.min(d.a[1], d.b[1]);
       d.roof = { x, y, w: Math.abs(d.a[0] - d.b[0]) + 1, h: Math.abs(d.a[1] - d.b[1]) + 1, material: st.roof };
       board.invalidate();
     },
-    up() {
+    up(w) {
       const d = st.drag;
       st.drag = null;
+      if (d?.c && !d.roof) {
+        // A click: roof the round room under it.
+        const room = roundRoomAt(w ?? d.start, current());
+        if (!room) { toast('Drag out a round roof from its middle, or click a round room to roof it.'); board.invalidate(); return; }
+        const [, s] = room, R = s.r + EAVES;
+        commit({ roofs: { [newId()]: { x: fine(s.x - R), y: fine(s.y - R), w: fine(R * 2), h: fine(R * 2), material: st.roof, shape: st.roofShape } } });
+        return;
+      }
       if (d?.roof) commit({ roofs: { [newId()]: d.roof } });
     },
     draw(ctx) {
       const d = st.drag;
       if (d?.roof) {
         drawRoof(ctx, d.roof, g(), board, 0.8);
-        label(ctx, `${d.roof.w} × ${d.roof.h}`, d.roof.x * g() + 4 / board.cam.z, d.roof.y * g() - 6 / board.cam.z);
+        label(ctx, isRound(d.roof) ? `${d.roof.w} across` : `${d.roof.w} × ${d.roof.h}`, d.roof.x * g() + 4 / board.cam.z, d.roof.y * g() - 6 / board.cam.z);
       } else if (st.hover) {
         const hit = st.mods.shiftKey && roofAt(st.hover, current());
-        if (hit) { const r = current().roofs[hit]; outline(ctx, ERASE, () => ctx.strokeRect(r.x * g(), r.y * g(), r.w * g(), r.h * g())); return; }
+        if (hit) { const r = current().roofs[hit]; outline(ctx, ERASE, () => { ctx.beginPath(); roofOutline(ctx, r); ctx.stroke(); }); return; }
+        if (st.roofShape) {
+          // Over a round room: the roof a click would give it.
+          const room = roundRoomAt(st.hover, current());
+          if (room) { const s = room[1]; outline(ctx, HOVER, () => { ctx.beginPath(); ctx.arc(s.x * g(), s.y * g(), (s.r + EAVES) * g(), 0, Math.PI * 2); ctx.stroke(); }); }
+          return;
+        }
         const [c, r] = cellAt(st.hover);
         outline(ctx, HOVER, () => ctx.strokeRect(c * g(), r * g(), g(), g()));
       }
@@ -469,16 +516,79 @@ export function registerSketch(api) {
 
   // ---------------------------------------------------------------- doors and windows
 
+  /**
+   * The round room wall near a point: { id, shape, a (radians round it), stands (there's wall
+   * or an opening there, not a stretch taken away where it meets another room) }, or null.
+   */
+  function roundWallAt(w, sk, tol = 0.3) {
+    const p = { x: w.x / g(), y: w.y / g() };
+    let best = null, bestD = tol;
+    for (const [id, s] of Object.entries(sk.shapes)) {
+      if (s.walled === false || !(s.r > 0)) continue;
+      const d = Math.abs(Math.hypot(p.x - s.x, p.y - s.y) - s.r);
+      if (d < bestD) { best = { id, shape: s, a: Math.atan2(p.y - s.y, p.x - s.x) }; bestD = d; }
+    }
+    if (!best) return null;
+    const s = best.shape, on = [(s.x + s.r * Math.cos(best.a)) * g(), (s.y + s.r * Math.sin(best.a)) * g()];
+    best.stands = !!roundOpeningAt(s, best.a) || Object.values(sketchWalls(sk, g())).some((x) => x.src?.shape === best.id && segDist({ x: on[0], y: on[1] }, x.a, x.b) < g() * 0.1);
+    return best;
+  }
+  /**
+   * An angle round a round room, in degrees, snapped to about a quarter square along its wall
+   * (steps that go evenly round, through north, east, south and west).
+   */
+  const roundAngle = (a, shape, e) => {
+    const deg = (a * 180) / Math.PI;
+    const step = free(e) ? 0.1 : 360 / Math.max(4, Math.round((2 * Math.PI * shape.r) / 0.25 / 4) * 4);
+    return Math.round(((Math.round(deg / step) * step) % 360 + 360) % 360 * 100) / 100;
+  };
+  /** Would an opening overlap another in the same round wall (but `skip`)? */
+  const roundClash = (shape, op, skip = null) => {
+    const me = roundOpening(shape, op);
+    return roundOpeningsOf(shape).some((o) => {
+      if (o.id === skip) return false;
+      const d = Math.abs((((o.mid - me.mid) % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2) - Math.PI);
+      return d < (o.a1 - o.a0) / 2 + (me.a1 - me.a0) / 2;
+    });
+  };
+  const strokeArc = (ctx, s, a0, a1) => { ctx.lineWidth = 6 / board.cam.z; ctx.lineCap = 'round'; ctx.beginPath(); ctx.arc(s.x * g(), s.y * g(), s.r * g(), a0, a1); ctx.stroke(); };
+
   const openingTool = (kind) => base({
     cursor: 'pointer',
     down(w, e) {
+      const k = kind === 'door' && e.shiftKey ? 'secret_door' : kind;
+      const sk = current();
+      // A round room's wall: the opening follows its curve.
+      const rw = roundWallAt(w, sk);
+      if (rw) {
+        const copy = structuredClone(rw.shape);
+        copy.openings ??= {};
+        const hit = roundOpeningAt(rw.shape, rw.a);
+        if (hit) {
+          if (copy.openings[hit].kind === k) delete copy.openings[hit]; else copy.openings[hit].kind = k;
+        } else {
+          if (!rw.stands) { toast('There\'s no wall there to set it in.'); return; }
+          const op = { at: roundAngle(rw.a, rw.shape, e), width: 1, kind: k };
+          if (roundClash(rw.shape, op)) { toast('Too close to another door or window.'); return; }
+          copy.openings[newId()] = op;
+        }
+        commit({ shapes: { [rw.id]: copy } });
+        return;
+      }
       const edge = edgeNear(w, g());
       if (!edge) return;
-      const k = kind === 'door' && e.shiftKey ? 'secret_door' : kind;
-      commit({ edges: { [edge]: current().edges[edge] === k ? null : k } });
+      commit({ edges: { [edge]: sk.edges[edge] === k ? null : k } });
     },
     move(w, e) { track(w, e); board.invalidate(); },
     draw(ctx) {
+      const rw = st.hover && roundWallAt(st.hover, current());
+      if (rw) {
+        const hit = roundOpeningAt(rw.shape, rw.a);
+        const op = hit ? rw.shape.openings[hit] : { at: roundAngle(rw.a, rw.shape, st.mods), width: 1 };
+        const { a0, a1 } = roundOpening(rw.shape, op);
+        if (hit || rw.stands) outline(ctx, hit ? ERASE : HOVER, () => strokeArc(ctx, rw.shape, a0, a1));
+        return;
+      }
       const edge = st.hover && edgeNear(st.hover, g());
       if (!edge) return;
       const { a, b } = edgeSegment(edge, g());
@@ -647,6 +757,9 @@ export function registerSketch(api) {
     const area = (p) => { const d = propDef(p.kind); return d.w * d.h * (p.scale ?? 1) ** 2; };
     const props = Object.entries(sk.props).filter(([, p]) => propHit(p, g(), w, PAD())).sort((a, b) => area(a[1]) - area(b[1]));
     if (props.length) return { type: 'prop', id: props[0][0] };
+    const rw = roundWallAt(w, sk, 0.25);
+    const rop = rw && roundOpeningAt(rw.shape, rw.a);
+    if (rop) return { type: 'ropening', id: rw.id, oid: rop };
     const edge = edgeNear(w, g(), 0.2);
     if (edge && OPENINGS.includes(sk.edges[edge])) return { type: 'opening', id: edge };
     let best = null, bestD = PAD() + 2;
@@ -672,6 +785,7 @@ export function registerSketch(api) {
     if (sel.type === 'line') return sk.lines[sel.id];
     if (sel.type === 'roof') return sk.roofs[sel.id];
     if (sel.type === 'opening') return OPENINGS.includes(sk.edges[sel.id]) ? { kind: sk.edges[sel.id] } : null;
+    if (sel.type === 'ropening') { const o = sk.shapes[sel.id]?.openings?.[sel.oid]; return o && ROUND_OPENINGS.includes(o.kind) ? o : null; }
     if (sel.type === 'wall') return sel.edges?.length ? {} : null;
     return null;
   };
@@ -701,7 +815,11 @@ export function registerSketch(api) {
     else if (sel.type === 'line') commit({ lines: { [sel.id]: null } });
     else if (sel.type === 'roof') commit({ roofs: { [sel.id]: null } });
     else if (sel.type === 'opening') commit({ edges: { [sel.id]: null } });
-    else if (sel.type === 'wall') {
+    else if (sel.type === 'ropening') {
+      const copy = structuredClone(sk.shapes[sel.id]);
+      delete copy.openings[sel.oid];
+      commit({ shapes: { [sel.id]: copy } });
+    } else if (sel.type === 'wall') {
       const edges = {};
       for (const e of sel.edges) edges[e] = sk.edges[e] === 'wall' ? null : 'open';
       commit({ edges });
@@ -716,7 +834,13 @@ export function registerSketch(api) {
     if (!it) return;
     const copy = structuredClone(it);
     fn(copy);
-    const map = { prop: 'props', shape: 'shapes', line: 'lines', roof: 'roofs' }[sel.type];
+    if (sel.type === 'ropening') {
+      const shape = structuredClone(sk.shapes[sel.id]);
+      shape.openings[sel.oid] = copy;
+      commit({ shapes: { [sel.id]: shape } });
+      return;
+    }
+    const map ={ prop: 'props', shape: 'shapes', line: 'lines', roof: 'roofs' }[sel.type];
     if (map) commit({ [map]: { [sel.id]: copy } });
   }
 
@@ -798,8 +922,20 @@ export function registerSketch(api) {
         patch = { lines: { [sel.id]: l } };
       } else if (sel.type === 'roof') {
         const r = { ...o };
-        if (d.mode === 'move') { r.x = o.x + Math.round(dx); r.y = o.y + Math.round(dy); } else { r.w = Math.max(1, Math.round(w.x / G - o.x)); r.h = Math.max(1, Math.round(w.y / G - o.y)); }
+        if (isRound(o)) {
+          // Round: moved by half squares, sized from its middle (and kept round).
+          const step = free(e) ? 0.01 : 0.5, cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+          if (d.mode === 'move') { r.x = fine(o.x + snapTo(dx, step)); r.y = fine(o.y + snapTo(dy, step)); } else {
+            const rad = Math.max(0.5, snapTo(Math.hypot(w.x / G - cx, w.y / G - cy) / Math.SQRT2, step / 2));
+            r.x = fine(cx - rad); r.y = fine(cy - rad); r.w = r.h = fine(rad * 2);
+          }
+        } else if (d.mode === 'move') { r.x = o.x + Math.round(dx); r.y = o.y + Math.round(dy); } else { r.w = Math.max(1, Math.round(w.x / G - o.x)); r.h = Math.max(1, Math.round(w.y / G - o.y)); }
         patch = { roofs: { [sel.id]: r } };
+      } else if (sel.type === 'ropening') {
+        // Round the wall it's in.
+        const shape = current().shapes[sel.id];
+        const op = { ...o, at: roundAngle(Math.atan2(w.y / G - shape.y, w.x / G - shape.x), shape, e) };
+        patch = roundClash(shape, op, sel.oid) ? null : { shapes: { [sel.id]: { ...shape, openings: { ...shape.openings, [sel.oid]: op } } } };
       } else if (sel.type === 'opening') {
         const target = edgeNear(w, G, 0.5);
         d.target = target && target !== sel.id && !OPENINGS.includes(current().edges[target]) ? target : null;
@@ -850,7 +986,7 @@ export function registerSketch(api) {
         if (dashed) ctx.setLineDash([6 / z, 4 / z]);
         ctx.beginPath();
         if (sel.type === 'roof') {
-          ctx.rect(it.x * g(), it.y * g(), it.w * g(), it.h * g());
+          roofOutline(ctx, it);
         } else if (sel.type === 'prop') {
           const pts = propOutline(it, g());
           pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
@@ -860,6 +996,10 @@ export function registerSketch(api) {
         } else if (sel.type === 'line') {
           ctx.lineWidth = 6 / z;
           ctx.moveTo(it.a[0] * g(), it.a[1] * g()); ctx.lineTo(it.b[0] * g(), it.b[1] * g());
+        } else if (sel.type === 'ropening') {
+          const s = sk.shapes[sel.id], { a0, a1 } = roundOpening(s, it);
+          ctx.lineWidth = 6 / z;
+          ctx.arc(s.x * g(), s.y * g(), s.r * g(), a0, a1);
         } else {
           ctx.lineWidth = 6 / z;
           for (const e of sel.type === 'wall' ? sel.edges : [st.drag?.target ?? sel.id]) { const s = edgeSegment(e, g()); ctx.moveTo(...s.a); ctx.lineTo(...s.b); }
@@ -968,18 +1108,48 @@ export function registerSketch(api) {
     } else if (sel.type === 'roof') {
       const r = sk.roofs[sel.id];
       items = [
-        el('b', { text: `Roof, ${r.w} × ${r.h}` }),
+        el('b', { text: isRound(r) ? `Round roof, ${r.w} across` : `Roof, ${r.w} × ${r.h}` }),
         el('select', { title: 'What it\'s made of', on: { change: (e) => editSelected((x) => { x.material = e.target.value; }) } },
           ...[...ROOF_MATERIALS, ...made()].map((m) => el('option', { value: m.id, text: m.label, selected: r.material === m.id }))),
-        btn('Turn the ridge', 'The ridge runs the other way', () => editSelected((x) => { x.ridge = (x.ridge ?? (x.w >= x.h ? 'h' : 'v')) === 'h' ? 'v' : 'h'; })),
-        del,
+        roofShapeSelect(r.shape, (v) => editSelected((x) => {
+          if (v) {
+            // Round: a circle over the middle of what it covered.
+            const d = Math.max(x.w, x.h);
+            if (x.w !== x.h) { x.x = fine(x.x + (x.w - d) / 2); x.y = fine(x.y + (x.h - d) / 2); x.w = x.h = d; }
+            x.shape = v;
+            delete x.ridge;
+          } else {
+            // Hipped again: back on whole squares.
+            x.x = Math.floor(x.x); x.y = Math.floor(x.y); x.w = Math.max(1, Math.round(x.w)); x.h = Math.max(1, Math.round(x.h));
+            delete x.shape;
+          }
+        })),
       ];
+      if (!isRound(r)) items.push(btn('Turn the ridge', 'The ridge runs the other way (a roof on its own; joined roofs follow the building)', () => editSelected((x) => { x.ridge = (x.ridge ?? (x.w >= x.h ? 'h' : 'v')) === 'h' ? 'v' : 'h'; })));
+      items.push(del);
     } else if (sel.type === 'opening') {
       const kind = sk.edges[sel.id];
       items = [
         el('select', { title: 'What it is', on: { change: (e) => commit({ edges: { [sel.id]: e.target.value } }) } },
           ...[['door', 'Door'], ['secret_door', 'Secret door'], ['window', 'Window'], ['railing', 'Railing']].map(([v, t]) => el('option', { value: v, text: t, selected: kind === v }))),
         el('span.muted', { text: 'Drag it to another edge.' }),
+        del,
+      ];
+    } else if (sel.type === 'ropening') {
+      const s = sk.shapes[sel.id], o = s.openings[sel.oid], wide = o.width ?? 1;
+      // As wide as fits: up to most of the room across, short of the doors and windows beside it.
+      const widen = (d) => editSelected((x) => {
+        const next = Math.max(0.5, Math.min(Math.floor(s.r * 1.8 * 2) / 2, wide + d));
+        if (d > 0 && roundClash(s, { ...x, width: next }, sel.oid)) { toast('No room: another door or window is in the way.'); return; }
+        x.width = next;
+      });
+      items = [
+        el('select', { title: 'What it is', on: { change: (e) => editSelected((x) => { x.kind = e.target.value; }) } },
+          ...[['door', 'Door'], ['secret_door', 'Secret door'], ['window', 'Window']].map(([v, t]) => el('option', { value: v, text: t, selected: o.kind === v }))),
+        btn('−', 'Narrower', () => widen(-0.5)),
+        el('span.muted', { text: `${wide} wide` }),
+        btn('+', 'Wider', () => widen(0.5)),
+        el('span.muted', { text: 'Drag it round the wall.' }),
         del,
       ];
     }
@@ -1083,7 +1253,7 @@ export function registerSketch(api) {
     'sketch-brush': ['floor', 'brush'],
     'sketch-erase': ['brush'],
     'sketch-wall': ['walls'],
-    'sketch-roof': ['roof', 'roofs-shown'],
+    'sketch-roof': ['roof', 'roof-shape', 'roofs-shown'],
     'sketch-place': ['prop'],
   };
   const HINTS = {
@@ -1094,9 +1264,9 @@ export function registerSketch(api) {
     'sketch-erase': '[ ] size',
     'sketch-wall': 'Shift-drag removes · Ctrl: no snapping',
     'sketch-railing': 'Railing: blocks movement, not sight · Shift-drag removes',
-    'sketch-door': 'Door: click a grid edge · Shift: secret door · click again to remove',
-    'sketch-window': 'Window: click a grid edge · click again to remove',
-    'sketch-roof': 'Shift-click removes',
+    'sketch-door': 'Door: click a grid edge or a round wall · Shift: secret door · click again to remove',
+    'sketch-window': 'Window: click a grid edge or a round wall · click again to remove',
+    'sketch-roof': 'Shift-click removes · round roofs: drag from the middle, or click a round room',
     'sketch-place': 'Shift+wheel: size · Alt+wheel: turn (Shift+Alt: 1°) · Ctrl: no snapping · right-click: done',
   };
 
@@ -1120,6 +1290,8 @@ export function registerSketch(api) {
           el('button', { type: 'button', text: '−', title: 'Smaller ([)', on: { click: () => size(-1) } }),
           el('span', { text: `${st.brush} × ${st.brush}` }),
           el('button', { type: 'button', text: '+', title: 'Bigger (])', on: { click: () => size(1) } }));
+      } else if (opt === 'roof-shape') {
+        items.push(roofShapeSelect(st.roofShape ?? null, (v) => { st.roofShape = v; renderBar(); board.invalidate(); }));
       } else if (opt === 'roofs-shown') {
         items.push(el('label.check', { title: 'Roofs show faintly for you; untick to hide them while you work' },
           el('input', { type: 'checkbox', checked: board.showRoofs, on: { change: (e) => { board.showRoofs = e.target.checked; board.invalidate(); } } }), ' Show roofs'));

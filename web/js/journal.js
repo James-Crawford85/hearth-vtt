@@ -1,16 +1,22 @@
-// Journal: notes, handouts and lore. Entries are Markdown (see markdown.js)
-// with an optional image. The GM decides who sees each entry:
-//   none      – hidden
-//   limited   – name and image only
-//   observer  – can read it
-//   owner     – can read and edit it
-// The server only sends players what they may see, so this file just
-// mirrors the rules for showing the right buttons.
+// Journals: books that the GM and players keep of their travels. Each one has a
+// leather cover (a colour and a gold emblem) and parchment pages that are
+// written, illustrated and turned right there in the book (see journal-book.js).
+//
+// A journal entry is { id, name, author, content, img, access, players, book }.
+//   author    who made it: they decide who may read it and write in it (the GM always can)
+//   access    every other player: none (hidden) | limited (cover only) | observer (read) | owner (write)
+//   players   per player, the same levels; a player gets the higher of the two
+//   book      { cover: {color, emblem}, age, pages: {id: {sort, author, font, text, items}} }
+//   content   all the pages' text (Markdown), kept in step so search and [[links]] work
+// Entries from before books (no `book`) show as a book of their text.
+// The server only sends players what they may see, so this file just mirrors
+// the rules to show the right buttons.
 
 import { hooks } from './hooks.js';
 import { store, isGM } from './store.js';
 import { el, toast, openWindow, formDialog } from './ui.js';
-import { renderMarkdown } from './markdown.js';
+import { COVER_COLORS, DEFAULT_COVER, EMBLEMS, emblemSvg } from './journal-art.js';
+import { BookView } from './journal-book.js';
 
 const LEVELS = ['none', 'limited', 'observer', 'owner'];
 export const ACCESS_LABELS = {
@@ -19,18 +25,37 @@ export const ACCESS_LABELS = {
   observer: 'Observer: can read',
   owner: 'Owner: can read and edit',
 };
+/** The same levels, as journals put them. */
+export const BOOK_ACCESS = {
+  none: 'Can\'t see it',
+  limited: 'Sees the cover only',
+  observer: 'Can read it',
+  owner: 'Can read and write in it',
+};
 
 const rank = (a) => Math.max(0, LEVELS.indexOf(a ?? 'none'));
 
-function newId() {
+export function newId() {
   const b = crypto.getRandomValues(new Uint8Array(6));
   return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+/** A book's cover, with defaults for entries made before books. */
+export const coverOf = (e) => ({ ...DEFAULT_COVER, ...(e?.book?.cover ?? {}) });
+
+/** A cover as an element: leather, gold border, emblem and title. `size`: 'shelf' | 'big'. */
+export function coverEl(e, { size = 'shelf', title = e?.name ?? '' } = {}) {
+  const c = coverOf(e);
+  return el(`div.jb-cover.${size}`, { style: `--leather:${c.color}` },
+    el('div.jb-cover-frame', { 'aria-hidden': 'true' }),
+    el('div.jb-cover-emblem', { html: emblemSvg(c.emblem) }),
+    el('div.jb-cover-title', { text: title }));
 }
 
 export class Journal {
   constructor(api) {
     this.api = api;
-    this.open_ = new Map(); // id → { win, editing }
+    this.books = new Map(); // id → BookView (open windows)
     this.filter = '';
     hooks.on('op', (op) => this.onOp(op));
     api.socket.on('core.journal.show', (p) => this.receiveShow(p));
@@ -42,9 +67,12 @@ export class Journal {
   /** This user's access to an entry: 'none' | 'limited' | 'observer' | 'owner'. */
   access(e) {
     if (!e) return 'none';
-    if (isGM()) return 'owner';
+    if (isGM() || e.author === store.user?.id) return 'owner';
     return LEVELS[Math.max(rank(e.access), rank(e.players?.[store.user.id]))];
   }
+  canWrite(e) { return this.access(e) === 'owner'; }
+  /** May this user change who sees the book, its cover, or throw it away? */
+  canManage(e) { return !!e && (isGM() || (!!e.author && e.author === store.user?.id)); }
 
   /** Find a visible entry by name (case-insensitive). */
   byName(name) {
@@ -52,196 +80,206 @@ export class Journal {
     return Object.values(this.entries).find((e) => e.name.trim().toLowerCase() === n) ?? null;
   }
 
-  // ------------------------------------------------------------------ sidebar panel
+  userName(id) { return store.world?.users?.[id]?.name ?? 'Someone'; }
+
+  // ------------------------------------------------------------------ the shelf (sidebar panel)
 
   renderPanel(panel) {
-    if (!this.list || !panel.contains(this.list)) {
+    if (!this.shelf || !panel.contains(this.shelf)) {
       const search = el('input', {
-        type: 'search', placeholder: 'Search entries', value: this.filter, 'aria-label': 'Search journal entries',
+        type: 'search', placeholder: 'Search journals', value: this.filter, 'aria-label': 'Search journals',
         on: { input: (e) => { this.filter = e.target.value; this.renderList(); } },
       });
-      this.list = el('div.journal-list');
-      const top = el('div.row');
-      if (isGM()) top.append(el('button.primary', { text: '+ New entry', on: { click: () => this.createEntry() } }));
-      top.append(search);
-      panel.replaceChildren(top, this.list);
+      this.shelf = el('div.jb-shelves');
+      panel.replaceChildren(el('div.row', {}, el('button.primary', { text: '+ New journal', on: { click: () => this.createBook() } }), search), this.shelf);
     }
     this.renderList();
   }
 
   renderList() {
-    if (!this.list) return;
+    if (!this.shelf) return;
     const q = this.filter.trim().toLowerCase();
+    const me = store.user?.id;
     const entries = Object.values(this.entries)
-      .filter((e) => !q || e.name.toLowerCase().includes(q) || (this.access(e) !== 'limited' && e.content?.toLowerCase().includes(q)))
-      .sort((a, b) => a.name.localeCompare(b.name));
-    const folders = new Map();
+      .filter((e) => !q || e.name.toLowerCase().includes(q) || (this.access(e) !== 'limited' && e.content?.toLowerCase().includes(q)));
+    // Shelves: yours first, then each other author's, then old entries without an author.
+    const shelves = new Map();
+    const shelfOf = (e) => (e.author === me ? 'me' : e.author && store.world?.users?.[e.author] ? e.author : '');
     for (const e of entries) {
-      const f = e.folder?.trim() ?? '';
-      if (!folders.has(f)) folders.set(f, []);
-      folders.get(f).push(e);
+      const k = shelfOf(e);
+      if (!shelves.has(k)) shelves.set(k, []);
+      shelves.get(k).push(e);
     }
-    const names = [...folders.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b));
+    const order = [...shelves.keys()].sort((a, b) => (b === 'me') - (a === 'me') || (a === '') - (b === '') || this.userName(a).localeCompare(this.userName(b)));
     const out = [];
-    for (const f of names) {
-      const ul = el('ul.entity-list', {}, folders.get(f).map((e) => this.row(e)));
-      out.push(f ? el('details.journal-folder', { open: true }, el('summary', { text: `📁 ${f}` }), ul) : ul);
+    for (const k of order) {
+      const books = shelves.get(k).sort((a, b) => a.name.localeCompare(b.name));
+      const title = k === 'me' ? 'Your journals' : k ? `${this.userName(k)}'s journals` : isGM() ? 'Handouts and lore' : 'From the GM';
+      out.push(el('section.jb-shelf', {}, el('h4.jb-shelf-title', { text: title }),
+        el('div.jb-shelf-row', {}, books.map((e) => this.shelfBook(e)),
+          k === 'me' && !q ? el('button.jb-shelf-new', { title: 'Start a new journal', on: { click: () => this.createBook() } }, el('span', { text: '+' }), el('small', { text: 'New journal' })) : null)));
     }
     if (!entries.length) {
-      out.push(el('p.muted', { text: q ? 'No entries match.' : isGM() ? 'No journal entries yet.' : 'The GM hasn\'t shared any journal entries with you yet.' }));
+      out.push(q
+        ? el('p.muted', { text: 'No journals match.' })
+        : el('div.jb-empty', {},
+          el('p', { text: 'Keep a journal of your travels: give it a title, pick a cover, and write in it like a real book.' }),
+          el('button.jb-shelf-new', { on: { click: () => this.createBook() } }, el('span', { text: '+' }), el('small', { text: 'New journal' }))));
     }
-    this.list.replaceChildren(...out);
+    this.shelf.replaceChildren(...out);
   }
 
-  row(e) {
+  shelfBook(e) {
+    const level = this.access(e);
     let badge = null;
-    if (isGM()) {
-      const seen = Math.max(rank(e.access), ...Object.values(e.players ?? {}).map(rank));
-      badge = seen ? el('span.badge', { text: e.access === 'none' ? 'some players' : e.access, title: 'Players can see this entry' }) : el('span.badge.muted', { text: 'hidden' });
-    } else if (this.access(e) === 'owner') badge = el('span.badge', { text: 'yours' });
-    return el('li.entity', {
+    if (e.author === store.user?.id || isGM()) {
+      const shared = Math.max(rank(e.access), ...Object.entries(e.players ?? {}).filter(([u]) => u !== e.author).map(([, a]) => rank(a)));
+      badge = shared >= 3 ? '✎ shared' : shared ? '👁 shared' : null;
+    } else if (level === 'owner') badge = '✎ you can write';
+    else if (level === 'limited') badge = 'cover only';
+    return el('button.jb-shelf-book', {
+      title: `${e.name}${e.author && e.author !== store.user?.id ? ` (${this.userName(e.author)})` : ''}`,
       draggable: true,
       on: {
         click: () => this.open(e.id),
         dragstart: (ev) => ev.dataTransfer.setData('text/plain', `[[${e.name}]]`),
       },
-    },
-    e.img ? el('img.avatar', { src: e.img, alt: '' }) : el('span.avatar', { text: '📜' }),
-    el('span.grow', { text: e.name }),
-    badge);
+    }, coverEl(e), badge ? el('span.jb-ribbon', { text: badge }) : null);
   }
 
-  async createEntry() {
-    const folders = [...new Set(Object.values(this.entries).map((e) => e.folder).filter(Boolean))];
-    const v = await formDialog({
-      title: 'New journal entry',
-      fields: [
-        { name: 'name', label: 'Name', required: true },
-        { name: 'folder', label: folders.length ? `Folder (e.g. ${folders.slice(0, 3).join(', ')})` : 'Folder (optional)' },
-      ],
-      submit: 'Create',
+  // ------------------------------------------------------------------ cover maker
+
+  /** The cover maker: title, leather, emblem (and, for a new one, who can see it). */
+  coverDialog({ title = 'New journal', name = '', cover = DEFAULT_COVER, age = 0, plate = {}, author = '', submit = 'Create', isNew = true } = {}) {
+    return new Promise((resolve) => {
+      const win = openWindow({ id: 'journal-cover', title, width: 600 });
+      let done = false;
+      const finish = (v) => { if (done) return; done = true; resolve(v); win.close(); };
+      win.onClose(() => { if (!done) { done = true; resolve(null); } });
+      const state = { name, color: cover.color, emblem: cover.emblem, age, share: 'none', plate: { ...plate } };
+      const preview = el('div.jb-maker-preview');
+      const draw = () => preview.replaceChildren(coverEl({ name: state.name || 'Untitled', book: { cover: state } }, { size: 'big' }));
+      const nameInput = el('input', { value: name, placeholder: 'e.g. The Road to Thornwall', maxlength: 80, required: true, on: { input: (e) => { state.name = e.target.value; draw(); } } });
+      const swatches = el('div.jb-swatches', {}, COVER_COLORS.map(([c, label]) => el('button.jb-swatch', {
+        type: 'button', title: label, 'aria-label': label, style: `--leather:${c}`, 'aria-pressed': String(c === state.color),
+        on: { click: (ev) => { state.color = c; swatches.querySelectorAll('.jb-swatch').forEach((b) => b.setAttribute('aria-pressed', String(b === ev.currentTarget))); draw(); } },
+      })));
+      const emblems = el('div.jb-emblems', {}, Object.entries(EMBLEMS).map(([k, [label]]) => el('button.jb-emblem-pick', {
+        type: 'button', title: label, 'aria-label': label, 'aria-pressed': String(k === state.emblem), html: emblemSvg(k),
+        on: { click: (ev) => { state.emblem = k; emblems.querySelectorAll('.jb-emblem-pick').forEach((b) => b.setAttribute('aria-pressed', String(b === ev.currentTarget))); draw(); } },
+      })));
+      const extra = [];
+      if (isNew) {
+        extra.push(el('label', {}, 'Who else can see it',
+          el('select', { on: { change: (e) => { state.share = e.target.value; } } },
+            el('option', { value: 'none', text: 'Only me (and the GM)' }),
+            el('option', { value: 'observer', text: 'Everyone can read it' }),
+            el('option', { value: 'owner', text: 'Everyone can read and write in it' }))),
+          el('small.muted', { text: 'You can choose people one by one later, from the book.' }));
+      } else {
+        extra.push(el('label', {}, 'Wear and age',
+          el('input', { type: 'range', min: 0, max: 1, step: 0.05, value: age, on: { input: (e) => { state.age = Number(e.target.value); } } }),
+          el('span.jb-age-ends', {}, el('small', { text: 'New' }), el('small', { text: 'Found in a crypt' }))));
+        // The bookplate inside the cover: two lines around the title, or none at all.
+        const lines = el('div.jb-plate-lines', { hidden: !!state.plate.hidden },
+          el('label', {}, 'Above the title', el('input', { value: state.plate.top ?? 'Ex libris', maxlength: 60, placeholder: 'Ex libris',
+            on: { input: (e) => { state.plate.top = e.target.value; } } })),
+          el('label', {}, 'Below the title', el('input', { value: state.plate.bottom ?? (author ? `kept by ${author}` : ''), maxlength: 80, placeholder: 'e.g. kept by Sir Aldric of Thornwall (or leave it empty)',
+            on: { input: (e) => { state.plate.bottom = e.target.value; } } })));
+        extra.push(el('div.jb-maker-label', { text: 'Bookplate inside the cover' }),
+          el('label.check', {}, el('input', { type: 'checkbox', checked: !state.plate.hidden,
+            on: { change: (e) => { state.plate.hidden = !e.target.checked; lines.hidden = !e.target.checked; } } }), 'Show a bookplate'),
+          lines);
+      }
+      const form = el('form.jb-maker-form', {
+        on: { submit: (ev) => { ev.preventDefault(); if (!state.name.trim()) { nameInput.focus(); return; } finish({ ...state, name: state.name.trim() }); } },
+      },
+      el('label', {}, 'Title', nameInput),
+      el('div.jb-maker-label', { text: 'Cover' }), swatches,
+      el('div.jb-maker-label', { text: 'Emblem' }), emblems,
+      ...extra,
+      el('div.row', {}, el('span.grow'), el('button', { type: 'button', text: 'Cancel', on: { click: () => finish(null) } }), el('button.primary', { type: 'submit', text: submit })));
+      win.body.replaceChildren(el('div.jb-maker', {}, preview, form));
+      draw();
+      nameInput.focus();
     });
+  }
+
+  async createBook() {
+    const v = await this.coverDialog();
     if (!v) return;
     const id = newId();
-    this.api.op({ op: 'journal_create', entry: { id, name: v.name.trim(), folder: v.folder.trim(), content: '', img: null, access: 'none', players: {} } },
-      (why) => toast(why, 'error'));
-    this.open(id, { edit: true });
+    const page = newId();
+    const me = store.user?.id;
+    const entry = {
+      id, name: v.name, folder: '', content: '', img: null, access: v.share, players: {},
+      book: { cover: { color: v.color, emblem: v.emblem }, age: 0, pages: { [page]: { sort: 1, author: me, font: localFont(), text: '', items: {} } } },
+    };
+    this.api.op({ op: 'journal_create', entry }, (why) => toast(why, 'error'));
+    this.open(id, { edit: page });
   }
 
-  // ------------------------------------------------------------------ entry window
-
-  open(id, { edit = false } = {}) {
-    let o = this.open_.get(id);
-    if (!o) {
-      const win = openWindow({ id: `journal-${id}`, title: this.entry(id)?.name ?? 'Journal', width: 560 });
-      win.el.classList.add('journal-window');
-      o = { win, editing: false };
-      this.open_.set(id, o);
-      win.onClose(() => this.open_.delete(id));
-    } else {
-      openWindow({ id: `journal-${id}` }); // brings it to the front
-    }
-    if (edit) o.editing = true;
-    this.renderWindow(id);
-    return o.win;
-  }
-
-  renderWindow(id) {
-    const o = this.open_.get(id);
-    if (!o) return;
+  async editCover(id) {
     const e = this.entry(id);
-    const { win } = o;
-    o.loaded = !!e;
-    if (!e) { win.body.replaceChildren(el('p.muted', { text: 'Loading…' })); return; }
-    win.setTitle(e.name);
-    if (o.editing && this.access(e) === 'owner') { this.renderEditor(id, o); return; }
-    o.editing = false;
-
-    const level = this.access(e);
-    const actions = el('div.row.journal-actions');
-    if (level === 'owner') actions.append(el('button', { text: '✎ Edit', on: { click: () => { o.editing = true; this.renderWindow(id); } } }));
-    if (isGM()) {
-      actions.append(
-        el('button', { text: '👁 Show to players', on: { click: () => this.show(id) } }),
-        el('button', { text: '🔒 Access', on: { click: () => this.editAccess(id) } }),
-        this.api.collections?.addButton('journal', () => this.entry(id)) ?? '',
-        el('span.grow'),
-        el('button.danger', { text: 'Delete', on: { click: () => this.remove(id) } }),
-      );
-    }
-    const root = el('article.journal-text');
-    root.append(el('h1', { text: e.name }));
-    if (e.img) root.append(el('img.journal-img', { src: e.img, alt: '' }));
-    if (level === 'limited') {
-      root.append(el('p.muted', { text: 'You can see this entry\'s name and image, but not its text.' }));
-    } else if (e.content?.trim()) {
-      root.append(renderMarkdown(e.content, {
-        onLink: (name) => this.follow(name),
-        onRoll: (formula) => this.api.roll(formula, { flavor: e.name }),
-        resolves: (name) => !!(this.byName(name) || this.actorByName(name)),
-      }));
-    } else {
-      root.append(el('p.muted', { text: level === 'owner' ? 'This entry is empty. Press Edit to write it.' : 'This entry is empty.' }));
-    }
-    win.body.replaceChildren(...(actions.childElementCount ? [actions] : []), root);
-    hooks.emit('journal:render', root, e, this.api);
-  }
-
-  renderEditor(id, o) {
-    const e = this.entry(id);
-    const name = el('input', { value: e.name, required: true });
-    const folder = el('input', { value: e.folder ?? '', placeholder: 'none' });
-    const img = el('input', { value: e.img ?? '', placeholder: 'https://… or upload' });
-    const text = el('textarea.journal-source', { rows: 18, spellcheck: true });
-    text.value = e.content ?? '';
-    const preview = el('div.journal-text.journal-preview', { hidden: true });
-    const previewBtn = el('button', {
-      type: 'button', text: 'Preview',
-      on: {
-        click: () => {
-          const showing = !preview.hidden;
-          preview.hidden = showing;
-          text.hidden = !showing;
-          previewBtn.textContent = showing ? 'Preview' : 'Write';
-          if (!showing) preview.replaceChildren(renderMarkdown(text.value, { resolves: (n) => !!(this.byName(n) || this.actorByName(n)) }));
-        },
-      },
+    if (!e) return;
+    const v = await this.coverDialog({
+      title: `Cover: ${e.name}`, name: e.name, cover: coverOf(e), age: e.book?.age ?? 0,
+      plate: e.book?.plate ?? {}, author: e.author ? this.userName(e.author) : '', submit: 'Save', isNew: false,
     });
-    const imgRow = el('div.row', {}, el('label.grow', {}, 'Image', img));
-    if (isGM()) {
-      const file = el('input', { type: 'file', accept: 'image/*', hidden: true, on: { change: async () => {
-        if (!file.files[0]) return;
-        try { img.value = await this.api.upload(file.files[0]); } catch (err) { toast(`Upload failed: ${err.message ?? err}`, 'error'); }
-      } } });
-      imgRow.append(file, el('button', { type: 'button', text: 'Upload…', on: { click: () => file.click() } }));
-    }
-    const form = el('form.form', {
-      on: {
-        submit: (ev) => {
-          ev.preventDefault();
-          const patch = {
-            name: name.value.trim() || e.name,
-            folder: folder.value.trim(),
-            img: img.value.trim() || null,
-            content: text.value,
-          };
-          this.api.op({ op: 'journal_update', id, patch }, (why) => toast(why, 'error'));
-          o.editing = false;
-          this.renderWindow(id);
-        },
-        keydown: (ev) => { if ((ev.ctrlKey || ev.metaKey) && ev.key === 's') { ev.preventDefault(); form.requestSubmit(); } },
-      },
-    },
-    el('div.row', {}, el('label.grow', {}, 'Name', name), el('label', {}, 'Folder', folder)),
-    imgRow,
-    el('div.row', {}, el('span.grow.muted.small', { text: 'Markdown: # heading, **bold**, *italic*, - list, > quote, [[Entry name]] links, [[/r 1d20]] rolls' }), previewBtn),
-    text, preview,
-    el('div.row', {},
-      el('span.grow'),
-      el('button', { type: 'button', text: 'Cancel', on: { click: () => { o.editing = false; this.renderWindow(id); } } }),
-      el('button.primary', { type: 'submit', text: 'Save' })));
-    o.win.body.replaceChildren(form);
-    text.focus();
+    if (!v) return;
+    const plate = { hidden: !!v.plate.hidden };
+    if (v.plate.top != null) plate.top = v.plate.top.trim();
+    if (v.plate.bottom != null) plate.bottom = v.plate.bottom.trim();
+    this.update(id, { name: v.name, book: { cover: { color: v.color, emblem: v.emblem }, age: v.age, plate } });
+  }
+
+  // ------------------------------------------------------------------ sharing
+
+  async editAccess(id) {
+    const e = this.entry(id);
+    if (!e) return;
+    const players = Object.values(store.world.users).filter((u) => u.role !== 'gm' && u.id !== e.author).sort((a, b) => a.name.localeCompare(b.name));
+    const opts = Object.entries(BOOK_ACCESS);
+    const v = await formDialog({
+      title: `Who can see "${e.name}"`,
+      fields: [
+        { name: 'access', label: 'Everyone', type: 'select', options: opts, value: e.access ?? 'none' },
+        ...players.map((u) => ({
+          name: `p_${u.id}`, label: u.name, type: 'select',
+          options: [['', 'Same as everyone'], ...opts], value: e.players?.[u.id] ?? '',
+        })),
+      ],
+    });
+    if (!v || !this.entry(id)) return;
+    const patch = { access: v.access, players: {} };
+    for (const u of players) patch.players[u.id] = v[`p_${u.id}`] || null;
+    this.update(id, patch);
+    toast(`Saved who can see "${e.name}". The GM always can.`);
+  }
+
+  // ------------------------------------------------------------------ changes
+
+  update(id, patch) { this.api.op({ op: 'journal_update', id, patch }, (why) => toast(why, 'error')); }
+
+  remove(id) {
+    const e = this.entry(id);
+    if (!e || !confirm(`Throw away "${e.name}"? Every page goes with it, and this can't be undone.`)) return;
+    this.api.op({ op: 'journal_delete', id }, (why) => toast(why, 'error'));
+  }
+
+  // ------------------------------------------------------------------ the open book
+
+  /** Open a book. `edit`: a page id to start writing on. `page`: a page id to open at. */
+  open(id, { edit = null, page = null } = {}) {
+    let b = this.books.get(id);
+    if (!b) {
+      b = new BookView(this, id);
+      this.books.set(id, b);
+      b.onClose(() => this.books.delete(id));
+    } else b.focus();
+    if (page || edit) b.goTo(page ?? edit);
+    if (edit) b.editWhenReady(edit);
+    return b;
   }
 
   actorByName(name) {
@@ -249,7 +287,7 @@ export class Journal {
     return Object.values(store.world?.actors ?? {}).find((a) => a.name.trim().toLowerCase() === n) ?? null;
   }
 
-  /** Follow a [[Name]] link: a journal entry, else an actor. */
+  /** Follow a [[Name]] link: a journal, else an actor. */
   follow(name) {
     const e = this.byName(name);
     if (e) { this.open(e.id); return; }
@@ -258,53 +296,27 @@ export class Journal {
     toast(`Nothing called "${name}" that you can see.`);
   }
 
-  // ------------------------------------------------------------------ GM actions
+  // ------------------------------------------------------------------ GM: show to players
 
-  /** Pop the entry up for every player who can see it (offering to share it first). */
+  /** Pop the book up for every player who can see it (offering to share it first). */
   show(id) {
     const e = this.entry(id);
     if (!e) return;
-    const anyone = rank(e.access) > 0 || Object.values(e.players ?? {}).some((a) => rank(a) > 0);
+    const anyone = rank(e.access) > 0 || Object.entries(e.players ?? {}).some(([u, a]) => u !== e.author && rank(a) > 0);
     if (!anyone) {
       if (!confirm(`Players can't see "${e.name}" yet. Let every player read it, and show it to them?`)) return;
-      this.api.op({ op: 'journal_update', id, patch: { access: 'observer' } });
+      this.update(id, { access: 'observer' });
     }
-    this.api.socket.emit('core.journal.show', { id });
+    this.api.socket.emit('core.journal.show', { id, page: this.books.get(id)?.currentPageId() ?? null });
     toast(`Showing "${e.name}" to players.`);
   }
 
-  receiveShow({ id } = {}) {
+  receiveShow({ id, page } = {}, from) {
+    if (from && store.world?.users?.[from]?.role !== 'gm') return;
     const e = this.entry(id);
     if (!e) return; // not shared with this player
-    this.open(id);
+    this.open(id, { page });
     toast(`The GM shows you "${e.name}".`);
-  }
-
-  async editAccess(id) {
-    const e = this.entry(id);
-    if (!e) return;
-    const players = Object.values(store.world.users).filter((u) => u.role !== 'gm').sort((a, b) => a.name.localeCompare(b.name));
-    const opts = Object.entries(ACCESS_LABELS);
-    const v = await formDialog({
-      title: `Who can see "${e.name}"`,
-      fields: [
-        { name: 'access', label: 'All players', type: 'select', options: opts, value: e.access ?? 'none' },
-        ...players.map((u) => ({
-          name: `p_${u.id}`, label: u.name, type: 'select',
-          options: [['', 'Same as all players'], ...opts], value: e.players?.[u.id] ?? '',
-        })),
-      ],
-    });
-    if (!v || !this.entry(id)) return;
-    const patch = { access: v.access, players: {} };
-    for (const u of players) patch.players[u.id] = v[`p_${u.id}`] || null;
-    this.api.op({ op: 'journal_update', id, patch }, (why) => toast(why, 'error'));
-  }
-
-  remove(id) {
-    const e = this.entry(id);
-    if (!e || !confirm(`Delete the journal entry "${e.name}"? This can't be undone.`)) return;
-    this.api.op({ op: 'journal_delete', id }, (why) => toast(why, 'error'));
   }
 
   // ------------------------------------------------------------------ sync
@@ -312,11 +324,17 @@ export class Journal {
   onOp(op) {
     if (!op.op.startsWith('journal_') && op.op !== 'user_upsert' && op.op !== 'actor_create' && op.op !== 'actor_delete') return;
     const id = op.entry?.id ?? op.id;
-    if (op.op === 'journal_delete') {
-      this.open_.get(id)?.win.close();
-    }
-    // Re-render open entries: this one changed, or a name that links point at did.
-    for (const [wid, o] of this.open_) if (!o.editing || !o.loaded) this.renderWindow(wid);
+    if (op.op === 'journal_delete') this.books.get(id)?.close();
+    for (const b of this.books.values()) b.changed(op.op.startsWith('journal_') ? id : null);
     this.renderList();
   }
+}
+
+const FONT_KEY = 'hearth.journal.font';
+/** The font this person last wrote in (new pages start in it). */
+export function localFont(set) {
+  try {
+    if (set) localStorage.setItem(FONT_KEY, set);
+    return localStorage.getItem(FONT_KEY) || 'hand';
+  } catch { return set || 'hand'; }
 }

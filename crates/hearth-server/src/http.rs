@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Multipart, Path, Request, State};
+use axum::extract::{Multipart, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -11,6 +11,9 @@ use tower_http::services::ServeDir;
 use crate::state::AppState;
 
 const ALLOWED_EXT: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "avif", "mp3", "ogg", "oga", "opus", "m4a", "flac", "wav", "webm", "mp4"];
+/// What players may upload (pictures for their journals), and how big.
+const PLAYER_EXT: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
+const MAX_PLAYER_UPLOAD: usize = 10 * 1024 * 1024;
 
 /// Public information shown on the join page (no secrets: names, roles and
 /// colours of accounts, world description, who's online).
@@ -78,22 +81,30 @@ fn sanitize(name: &str) -> Option<(String, String)> {
     Some((stem, ext))
 }
 
-/// `POST /api/upload` (multipart field `file`). GM only: send either header
+/// `POST /api/upload` (multipart field `file`). The GM sends either header
 /// `x-hearth-session` (a GM's session token) or `x-hearth-key` (the GM key).
-/// Returns `{ "url": "/assets/<name>" }`.
+/// Players (their session token) may upload pictures only, into assets/journals/<their id>/.
+/// Returns `{ "url": "/assets/<name>" }`. `?folder=sounds/tavern` puts the
+/// file in a subfolder of the assets (made if needed), e.g. to keep a
+/// soundboard library together.
 pub async fn upload(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     mut form: Multipart,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-    let by_session = match header("x-hearth-session") {
-        s if s.is_empty() => false,
-        s => state.session_user(&s).await.is_some_and(|u| u.role == hearth_core::Role::Gm),
+    let session_user = match header("x-hearth-session") {
+        s if s.is_empty() => None,
+        s => state.session_user(&s).await,
     };
-    if !by_session && !state.check_gm_key(&header("x-hearth-key")) {
-        return Err((StatusCode::FORBIDDEN, "Only a GM can upload files".into()));
-    }
+    let gm = session_user.as_ref().is_some_and(|u| u.role == hearth_core::Role::Gm) || state.check_gm_key(&header("x-hearth-key"));
+    // Players may upload pictures for their journals: images only, into a folder of their own.
+    let player = match (&session_user, gm) {
+        (Some(u), false) => Some(u.id.clone()),
+        (None, false) => return Err((StatusCode::FORBIDDEN, "Join the game first".into())),
+        _ => None,
+    };
     while let Some(field) = form.next_field().await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))? {
         if field.name() != Some("file") {
             continue;
@@ -101,16 +112,105 @@ pub async fn upload(
         let original = field.file_name().unwrap_or("upload").to_string();
         let (stem, ext) =
             sanitize(&original).ok_or((StatusCode::UNSUPPORTED_MEDIA_TYPE, "file type not allowed".into()))?;
+        if player.is_some() && !PLAYER_EXT.contains(&ext.as_str()) {
+            return Err((StatusCode::FORBIDDEN, "Players can upload pictures (png, jpg, webp, gif)".into()));
+        }
         let bytes = field.bytes().await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        if player.is_some() && bytes.len() > MAX_PLAYER_UPLOAD {
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, "That picture is too big (10 MB at most)".into()));
+        }
+        let folder = match &player {
+            Some(id) => sanitize_folder(&format!("journals/{id}")),
+            None => query.get("folder").map(|f| sanitize_folder(f)).unwrap_or_default(),
+        };
         let name = format!("{stem}-{}.{ext}", &hearth_core::new_id()[..6]);
-        let path = state.world_dir.join("assets").join(&name);
+        let rel = if folder.is_empty() { name } else { format!("{folder}/{name}") };
+        let path = state.world_dir.join("assets").join(&rel);
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
         tokio::fs::write(&path, &bytes)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        tracing::info!(file = %name, bytes = bytes.len(), "asset uploaded");
-        return Ok(Json(json!({ "url": format!("/assets/{name}") })));
+        tracing::info!(file = %rel, bytes = bytes.len(), "asset uploaded");
+        return Ok(Json(json!({ "url": format!("/assets/{rel}") })));
     }
     Err((StatusCode::BAD_REQUEST, "missing 'file' field".into()))
+}
+
+/// A safe relative folder for uploads: at most four plain segments, no `..`.
+fn sanitize_folder(f: &str) -> String {
+    f.split(['/', '\\'])
+        .map(|seg| {
+            let s: String = seg
+                .trim()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                .take(40)
+                .collect();
+            s.trim_matches('-').to_string()
+        })
+        .filter(|seg| !seg.is_empty())
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+const AUDIO_EXT: &[&str] = &["mp3", "ogg", "oga", "opus", "m4a", "flac", "wav", "webm"];
+const MAX_SOUNDS_LISTED: usize = 5000;
+
+/// `GET /api/sounds` (GM): every audio file in the world's assets, subfolders
+/// included, so a library dropped into `assets/sounds/…` can be browsed.
+/// `[{ url, name, folder, bytes }]`, sorted by folder then name.
+pub async fn sounds(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Value>, (StatusCode, String)> {
+    gm_of(&state, &headers).await?;
+    let root = state.world_dir.join("assets");
+    let mut list = tokio::task::spawn_blocking(move || list_sounds(&root))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    list.sort_by(|a, b| (a["folder"].as_str(), a["name"].as_str()).cmp(&(b["folder"].as_str(), b["name"].as_str())));
+    Ok(Json(Value::Array(list)))
+}
+
+fn list_sounds(root: &std::path::Path) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), String::new(), 0u8)];
+    while let Some((dir, rel, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            if meta.is_dir() {
+                if depth < 6 {
+                    stack.push((entry.path(), path, depth + 1));
+                }
+            } else if name.rsplit_once('.').is_some_and(|(_, e)| AUDIO_EXT.contains(&e.to_ascii_lowercase().as_str())) {
+                let url = format!("/assets/{}", path.split('/').map(url_segment).collect::<Vec<_>>().join("/"));
+                out.push(json!({ "url": url, "name": name, "folder": rel, "bytes": meta.len() }));
+                if out.len() >= MAX_SOUNDS_LISTED {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Percent-encode one path segment (files dropped in by hand may have spaces).
+fn url_segment(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Minimal %XX decoding, so `packs%2Fx.json` can't sneak past the pack check.
@@ -449,7 +549,32 @@ pub async fn books(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::{percent_decode, sanitize};
+    use super::{list_sounds, percent_decode, sanitize, sanitize_folder, url_segment};
+
+    #[test]
+    fn sanitizes_folders() {
+        assert_eq!(sanitize_folder("sounds/Tavern Night"), "sounds/Tavern-Night");
+        assert_eq!(sanitize_folder("../../etc"), "etc");
+        assert_eq!(sanitize_folder(r"a\b/./c/d/e/f"), "a/b/c/d");
+        assert_eq!(sanitize_folder(""), "");
+        assert_eq!(url_segment("rain on roof.ogg"), "rain%20on%20roof.ogg");
+    }
+
+    #[test]
+    fn lists_audio_in_subfolders() {
+        let dir = std::env::temp_dir().join(format!("hearth-sounds-{}", hearth_core::new_id()));
+        std::fs::create_dir_all(dir.join("sounds/tavern")).unwrap();
+        std::fs::write(dir.join("map.png"), b"x").unwrap();
+        std::fs::write(dir.join("door.wav"), b"x").unwrap();
+        std::fs::write(dir.join("sounds/tavern/crowd noise.OGG"), b"xy").unwrap();
+        let mut list = list_sounds(&dir);
+        list.sort_by_key(|v| v["url"].as_str().unwrap().to_string());
+        let urls: Vec<_> = list.iter().map(|v| v["url"].as_str().unwrap()).collect();
+        assert_eq!(urls, ["/assets/door.wav", "/assets/sounds/tavern/crowd%20noise.OGG"]);
+        assert_eq!(list[1]["folder"], "sounds/tavern");
+        assert_eq!(list[1]["bytes"], 2);
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn decodes_percent_escapes() {

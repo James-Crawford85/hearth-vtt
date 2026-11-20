@@ -43,7 +43,8 @@ export class Playlists {
       on: { input: (e) => a.setVolume(kind, Number(e.target.value)) },
     }));
     return el('details.volumes', { open: !isGM() }, el('summary', { text: '🔊 Your volume' }),
-      el('div.volume-grid', {}, slider('music', 'Music'), slider('ambience', 'Ambience'), slider('environment', 'Map sounds')));
+      el('div.volume-grid', {}, slider('music', 'Music'), slider('ambience', 'Ambience'), slider('environment', 'Map sounds'),
+        el('label', {}, 'Soundboard', el('input', { type: 'range', min: 0, max: 1, step: 0.05, value: this.api.soundboard?.local ?? 0.8, 'aria-label': 'Soundboard volume', on: { input: (e) => this.api.soundboard?.setLocalVolume(Number(e.target.value)) } }))));
   }
 
   playlistBlock(pl) {

@@ -115,9 +115,39 @@ const MAX_TABLE_RESULTS: usize = 1000;
 
 /// Longest journal entry text, in bytes.
 const MAX_JOURNAL_TEXT: usize = 256 * 1024;
+/// Largest journal book (its pages' text and the placing of pictures; pictures themselves are files).
+const MAX_BOOK: usize = 1024 * 1024;
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// The soundboard (settings.core.soundboard): layers that start playing get
+/// the server's clock in `started`, like playlist tracks, so everyone (and
+/// anyone joining later) hears the same moment. A layer already playing the
+/// same file keeps its time, so recalling a preset that shares it doesn't
+/// restart it; `restart: true` in the patch forces a fresh start.
+fn stamp_soundboard(world: &World, patch: &mut Value, now: u64) {
+    let Some(layers) = patch.pointer_mut("/settings/core/soundboard/layers").and_then(|v| v.as_object_mut()) else { return };
+    let existing = world.settings.pointer("/core/soundboard/layers");
+    for (lid, v) in layers.iter_mut() {
+        let Some(o) = v.as_object_mut() else { continue };
+        let old = existing.and_then(|e| e.get(lid)).filter(|x| x.is_object());
+        if old.is_none() {
+            o.insert("id".into(), serde_json::json!(lid));
+        }
+        let restart = o.remove("restart").and_then(|r| r.as_bool()) == Some(true);
+        if o.get("playing").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let was_playing = old.and_then(|x| x.get("playing")).and_then(Value::as_bool) == Some(true);
+        let same_src = o.get("src").is_none_or(|src| old.and_then(|x| x.get("src")) == Some(src));
+        if was_playing && same_src && !restart {
+            o.remove("started");
+        } else {
+            o.insert("started".into(), serde_json::json!(now));
+        }
+    }
 }
 
 /// Look up `a.b.c` in a JSON value and coerce it to an integer.
@@ -549,16 +579,28 @@ impl AppState {
                     deny()
                 }
             }
-            // Owners of a journal entry may edit its text, but not who can see it.
+            // Anyone can start a journal of their own (normalize makes them its author).
+            Op::JournalCreate { .. } => Ok(()),
+            // A journal's author also decides who may read and write in it; others who may
+            // write in it (owners) change only what's in it.
             Op::JournalUpdate { id, patch } => {
                 let entry = world.journal.get(id).ok_or("journal entry not found")?;
-                let text_only = patch
-                    .as_object()
-                    .is_some_and(|p| p.keys().all(|k| matches!(k.as_str(), "name" | "folder" | "content" | "img")));
-                if entry.access_for(user) == Access::Owner && text_only {
+                let keys = |allowed: &[&str]| patch.as_object().is_some_and(|p| p.keys().all(|k| allowed.contains(&k.as_str())));
+                let author = entry.author.as_deref() == Some(user.id.as_str());
+                if author && keys(&["name", "folder", "content", "img", "book", "access", "players"]) {
+                    Ok(())
+                } else if entry.access_for(user) == Access::Owner && keys(&["name", "folder", "content", "img", "book"]) {
                     Ok(())
                 } else {
                     deny()
+                }
+            }
+            Op::JournalDelete { id } => {
+                let entry = world.journal.get(id).ok_or("journal entry not found")?;
+                if entry.author.as_deref() == Some(user.id.as_str()) {
+                    Ok(())
+                } else {
+                    Err("Only the journal's author (or the GM) can throw it away".into())
                 }
             }
             // Players make chat macros of their own and put macros on their hotbar.
@@ -704,6 +746,7 @@ impl AppState {
             }
             // Tracks that start now are stamped with the server's clock, so
             // everyone (and anyone joining later) hears the same moment.
+            Op::WorldUpdate { patch } => stamp_soundboard(world, patch, now_ms()),
             Op::PlaylistUpdate { id, patch } => {
                 let existing = world.playlists.get(id).ok_or("playlist not found")?;
                 let now = now_ms();
@@ -784,16 +827,47 @@ impl AppState {
                 if entry.id.is_empty() {
                     entry.id = new_id();
                 }
+                // Create replaces an entry with the same id: only the GM may do that.
+                if user.role != Role::Gm && world.journal.contains_key(&entry.id) {
+                    return Err("That journal already exists".into());
+                }
                 if entry.name.trim().is_empty() {
                     entry.name = "New entry".into();
                 }
                 if entry.content.len() > MAX_JOURNAL_TEXT {
                     return Err("That entry is too long".into());
                 }
+                // Whoever makes a journal is its author, and can always read and write in it.
+                entry.author = Some(user.id.clone());
+                if user.role != Role::Gm {
+                    entry.players.insert(user.id.clone(), Access::Owner);
+                }
+                if serde_json::to_vec(&entry.book).map_or(0, |b| b.len()) > MAX_BOOK {
+                    return Err("That journal is too big".into());
+                }
             }
-            Op::JournalUpdate { patch, .. } => {
+            Op::JournalUpdate { id, patch } => {
                 if patch.get("content").and_then(|c| c.as_str()).is_some_and(|c| c.len() > MAX_JOURNAL_TEXT) {
                     return Err("That entry is too long".into());
+                }
+                let entry = world.journal.get(id).ok_or("journal entry not found")?;
+                // The author can't lock themselves out of their own journal.
+                if let Some(author) = entry.author.as_deref().filter(|a| *a == user.id && user.role != Role::Gm) {
+                    if let Some(players) = patch.get_mut("players").and_then(|p| p.as_object_mut()) {
+                        players.remove(author);
+                    }
+                }
+                if let Some(book) = patch.get("book") {
+                    let now = serde_json::to_vec(&entry.book).map_or(0, |b| b.len());
+                    let more = serde_json::to_vec(book).map_or(0, |b| b.len());
+                    if now + more > MAX_BOOK && more > 0 {
+                        // Only refuse growth: a patch that's all removals is small and always allowed.
+                        let mut merged = entry.book.clone();
+                        merge_patch(&mut merged, book);
+                        if serde_json::to_vec(&merged).map_or(0, |b| b.len()) > MAX_BOOK {
+                            return Err("This journal is full: take some pictures or pages out first".into());
+                        }
+                    }
                 }
             }
             Op::ActorCreate { actor } => {
@@ -2112,7 +2186,7 @@ mod journal_tests {
         }
         let entry = JournalEntry {
             id: "j1".into(), name: "Secret".into(), folder: String::new(), content: "the butler".into(),
-            img: None, access: Access::None, players: BTreeMap::new(),
+            img: None, access: Access::None, players: BTreeMap::new(), author: None, book: Value::Null,
         };
         let gm: Id = "gm".into();
         let step = |w: &mut World, op: Op| {
@@ -2149,7 +2223,7 @@ mod journal_tests {
     fn view_for_strips_hidden_and_limited_entries() {
         let mut w = World::new("T", "freeform");
         let mk = |id: &str, access| JournalEntry {
-            id: id.into(), name: id.into(), folder: String::new(), content: "text".into(), img: None, access, players: BTreeMap::new(),
+            id: id.into(), name: id.into(), folder: String::new(), content: "text".into(), img: None, access, players: BTreeMap::new(), author: None, book: Value::Null,
         };
         for e in [mk("hidden", Access::None), mk("limited", Access::Limited), mk("open", Access::Observer)] {
             w.journal.insert(e.id.clone(), e);
@@ -2159,6 +2233,100 @@ mod journal_tests {
         assert_eq!(v.journal["limited"].content, "");
         assert_eq!(v.journal["open"].content, "text");
         assert_eq!(w.view_for(&user("g", Role::Gm)).journal.len(), 3);
+    }
+
+    #[test]
+    fn players_keep_journals_of_their_own() {
+        let mut w = World::new("T", "freeform");
+        let (gm, ann, bob) = (user("gm", Role::Gm), user("ann", Role::Player), user("bob", Role::Player));
+        for u in [&gm, &ann, &bob] {
+            w.users.insert(u.id.clone(), u.clone());
+        }
+        let state = AppState::new(w, hearth_packages::Registry::default(), "k".into(), std::env::temp_dir().join("hearth-journal-test"));
+        let run = |u: &User, op: Op| {
+            let mut world = state.world.blocking_write();
+            AppState::permitted(&world, u, &op)?;
+            let mut op = op;
+            state.normalize(&world, u, &mut op)?;
+            world.apply(&op).map_err(|e| e.to_string())
+        };
+        let book = json!({ "cover": { "color": "#6b2e2e", "emblem": "dragon" }, "pages": { "p1": { "sort": 1, "text": "Day one." } } });
+        let entry = JournalEntry {
+            id: "j1".into(), name: "Ann's travels".into(), folder: String::new(), content: "Day one.".into(),
+            img: None, access: Access::None, players: BTreeMap::new(), author: Some("bob".into()), book,
+        };
+        run(&ann, Op::JournalCreate { entry: entry.clone() }).unwrap();
+        {
+            let world = state.world.blocking_read();
+            let e = &world.journal["j1"];
+            assert_eq!(e.author.as_deref(), Some("ann"), "the server decides who the author is");
+            assert_eq!(e.access_for(&ann), Access::Owner);
+            assert!(world.view_for(&bob).journal.is_empty(), "private until Ann shares it");
+        }
+        // Bob can't overwrite it, edit it or throw it away.
+        assert!(run(&bob, Op::JournalCreate { entry }).is_err());
+        assert!(run(&bob, Op::JournalUpdate { id: "j1".into(), patch: json!({ "content": "x" }) }).is_err());
+        assert!(run(&bob, Op::JournalDelete { id: "j1".into() }).is_err());
+        // Ann lets Bob write in it, and can't take herself off.
+        run(&ann, Op::JournalUpdate { id: "j1".into(), patch: json!({ "players": { "bob": "owner", "ann": null } }) }).unwrap();
+        // Bob writes a page, but may not change who can see it, or delete it.
+        run(&bob, Op::JournalUpdate { id: "j1".into(), patch: json!({ "book": { "pages": { "p2": { "sort": 2, "text": "Bob was here." } } } }) }).unwrap();
+        assert!(run(&bob, Op::JournalUpdate { id: "j1".into(), patch: json!({ "access": "observer" }) }).is_err());
+        assert!(run(&bob, Op::JournalDelete { id: "j1".into() }).is_err());
+        {
+            let world = state.world.blocking_read();
+            let e = &world.journal["j1"];
+            assert_eq!(e.access_for(&ann), Access::Owner);
+            assert_eq!(e.book["pages"]["p2"]["text"], "Bob was here.");
+            // "Cover only" readers see the cover but no pages.
+            assert!(e.cover_only().get("pages").is_none());
+            assert_eq!(e.cover_only()["cover"]["emblem"], "dragon");
+        }
+        // A book can't grow past the limit.
+        let big = "x".repeat(MAX_BOOK + 10);
+        assert!(run(&ann, Op::JournalUpdate { id: "j1".into(), patch: json!({ "book": { "pages": { "p3": { "text": big } } } }) }).is_err());
+        // The GM can do anything; Ann throws it away.
+        run(&gm, Op::JournalUpdate { id: "j1".into(), patch: json!({ "players": { "ann": "observer" } }) }).unwrap();
+        run(&ann, Op::JournalDelete { id: "j1".into() }).unwrap();
+        assert!(state.world.blocking_read().journal.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod soundboard_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn layers_get_the_server_clock_when_they_start() {
+        let mut w = World::new("T", "freeform");
+        let mut p = json!({"settings": {"core": {"soundboard": {"layers": {"a": {"src": "/assets/rain.ogg", "playing": true, "started": 5}}}}}});
+        stamp_soundboard(&w, &mut p, 1000);
+        let a = &p["settings"]["core"]["soundboard"]["layers"]["a"];
+        assert_eq!(a["started"], 1000);
+        assert_eq!(a["id"], "a");
+        w.apply(&Op::WorldUpdate { patch: p }).unwrap();
+
+        // Still playing the same file: keeps its time.
+        let mut p = json!({"settings": {"core": {"soundboard": {"layers": {"a": {"src": "/assets/rain.ogg", "playing": true, "volume": 0.3}}}}}});
+        stamp_soundboard(&w, &mut p, 2000);
+        assert!(p["settings"]["core"]["soundboard"]["layers"]["a"].get("started").is_none());
+
+        // A new file, or a forced restart, starts it again.
+        let mut p = json!({"settings": {"core": {"soundboard": {"layers": {"a": {"src": "/assets/wind.ogg", "playing": true}}}}}});
+        stamp_soundboard(&w, &mut p, 3000);
+        assert_eq!(p["settings"]["core"]["soundboard"]["layers"]["a"]["started"], 3000);
+        let mut p = json!({"settings": {"core": {"soundboard": {"layers": {"a": {"playing": true, "restart": true}}}}}});
+        stamp_soundboard(&w, &mut p, 4000);
+        let a = &p["settings"]["core"]["soundboard"]["layers"]["a"];
+        assert_eq!(a["started"], 4000);
+        assert!(a.get("restart").is_none());
+
+        // Stopping, removing, and unrelated settings are left alone.
+        let mut p = json!({"settings": {"core": {"soundboard": {"layers": {"a": {"playing": false}, "b": null}}, "loot": {}}}});
+        let before = p.clone();
+        stamp_soundboard(&w, &mut p, 5000);
+        assert_eq!(p, before);
     }
 }
 

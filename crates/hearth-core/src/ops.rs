@@ -1006,6 +1006,29 @@ mod sketch_tests {
     }
 
     #[test]
+    fn round_rooms_keep_their_doors_and_roofs_their_shape() {
+        let mut w = World::new("T", "freeform");
+        let sid = w.active_scene.clone().unwrap();
+        let patch = json!({
+            "shapes": {"c": {"x": 3, "y": 3, "r": 2, "material": "stone", "openings": {"d": {"at": 90, "kind": "door"}, "n": {"at": 200.5, "width": 1.5, "kind": "window"}}}},
+            "roofs": {"r": {"x": 0.75, "y": 0.75, "w": 4.5, "h": 4.5, "material": "slate", "shape": "cone"}, "h": {"x": 6, "y": 0, "w": 4, "h": 2, "material": "slate"}},
+        });
+        w.apply(&Op::SketchUpdate { scene_id: sid.clone(), patch, walls: None, lights: None, links: None, level: String::new() }).unwrap();
+        let sk = w.scenes[&sid].sketch.as_ref().unwrap();
+        let ops = &sk.shapes["c"].openings;
+        assert_eq!((ops["d"].at, ops["d"].width, ops["d"].kind.as_str()), (90.0, 1.0, "door"), "an opening is a square wide at first");
+        assert_eq!(ops["n"].width, 1.5);
+        assert_eq!(sk.roofs["r"].shape.as_deref(), Some("cone"));
+        assert!(sk.roofs["h"].shape.is_none());
+        // Taking a door out leaves the other; a round room without openings and a hipped roof
+        // serialize as before.
+        w.apply(&Op::SketchUpdate { scene_id: sid.clone(), patch: json!({"shapes": {"c": {"openings": {"d": null, "n": null}}}}), walls: None, lights: None, links: None, level: String::new() }).unwrap();
+        let sk = w.scenes[&sid].sketch.as_ref().unwrap();
+        let v = serde_json::to_value(sk).unwrap();
+        assert!(v["shapes"]["c"].get("openings").is_none() && v["roofs"]["h"].get("shape").is_none());
+    }
+
+    #[test]
     fn scenes_without_a_sketch_serialize_as_before() {
         let mut w = World::new("T", "freeform");
         let sid = w.active_scene.clone().unwrap();

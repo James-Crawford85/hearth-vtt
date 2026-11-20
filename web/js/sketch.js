@@ -6,7 +6,11 @@
 //   floor   { "col,row": material }   floor without walls (porches, paths, water)
 //   edges   { "h:col,row" | "v:col,row": "wall" | "open" | "door" | "secret_door" | "window" }
 //           a square's top (h) or left (v) edge, as the GM set it; "open" takes a room's wall away
-//   shapes  { id: { kind: "circle", x, y, r, material, walled } }   round rooms and floors
+//   shapes  { id: { kind: "circle", x, y, r, material, walled, openings } }   round rooms and floors;
+//           openings { id: { at (degrees round, 0 = east, clockwise), width (squares), kind } }
+//           are doors and windows set in a round room's curved wall
+//   roofs   { id: { x, y, w, h, material, ridge, shape } }   roofs; touching ones join up, and
+//           `shape` ("cone", "facets", "dome") makes one round
 //   lines   { id: { a: [x, y], b: [x, y], kind } }                walls off the grid lines
 //   props   { id: { kind, x, y } }                                  light sources (torch, …)
 //   outside material | null,  walls: bool (rooms get walls),  size: grid px the walls are for
@@ -16,6 +20,7 @@
 // (sketchWalls, sketchLights) and sent with each change; the server only stores them:
 //   sk-w-<n>  walls along rooms and round rooms   sk-e-<n>  edges set to wall   sk-x-<id>  a line
 //   sk-d-<edge>  a door    sk-n-<edge>  a window    sk-p-<id>  a light source's light
+//   (a door or window in a round wall has o:<shape>:<opening> for its edge)
 
 import { texture, TILE_SQUARES, TILE_SIZE } from './sketch-textures.js';
 import { isGM } from './store.js';
@@ -23,6 +28,7 @@ import { hooks } from './hooks.js';
 import { macroOf, macroPattern } from './texture-recipes.js';
 import { propDef, isLight, propOutline, drawPropAt, propLightColor } from './sketch-props.js';
 import { skId, onLevel, sketchOf } from './levels.js';
+import { groupRects, roofShape, ROUND_ROOFS } from './roof-skeleton.js';
 
 /** "col,row" → [col, row]. */
 export const cellOf = (k) => k.split(',').map(Number);
@@ -169,10 +175,24 @@ export function sketchWalls(sk, g, level = '') {
     addRuns('sk-w-', whole);
     for (const [id, c] of circles) {
       const sides = Math.max(16, Math.ceil(2 * Math.PI * c.r * 4));
-      const pt = (i) => [(c.x + c.r * Math.cos((i / sides) * 2 * Math.PI)) * g, (c.y + c.r * Math.sin((i / sides) * 2 * Math.PI)) * g];
+      const pt = (a) => [(c.x + c.r * Math.cos(a)) * g, (c.y + c.r * Math.sin(a)) * g];
+      // The wall runs round, broken where doors and windows are set in it.
+      const ops = roundOpeningsOf(c);
+      const angles = Array.from({ length: sides + 1 }, (_, i) => (i / sides) * 2 * Math.PI);
+      for (const op of ops) angles.push(turn(op.a0), turn(op.a1));
+      angles.sort((a, b) => a - b);
       const cut = [];
-      for (let i = 0; i < sides; i++) pieces(pt(i), pt(i + 1), cut);
+      for (let i = 0; i + 1 < angles.length; i++) {
+        const a = angles[i], b = angles[i + 1];
+        if (b - a < 1e-9 || ops.some((op) => within((a + b) / 2, op))) continue;
+        pieces(pt(a), pt(b), cut);
+      }
       for (const s of cut) add(`sk-w-${n++}`, s, 'wall', c.wall_style || base, { shape: id });
+      for (const op of ops) {
+        const key = `o:${id}:${op.id}`, seg = { a: pt(op.a0), b: pt(op.a1) };
+        if (op.kind === 'window') add(`sk-n-${key}`, seg, 'window', null, { opening: key, shape: id });
+        else add(`sk-d-${key}`, seg, op.kind, null, { opening: key, shape: id });
+      }
     }
   }
   n = 0;
@@ -327,7 +347,7 @@ function vary(ctx, m, g, fill) {
   ctx.restore();
 }
 
-function fillFor(ctx, m, g, board) {
+function fillFor(ctx, m, g, board, turn = null) {
   let pats = patterns.get(ctx);
   if (!pats) patterns.set(ctx, (pats = new Map()));
   let entry = pats.get(m);
@@ -341,7 +361,9 @@ function fillFor(ctx, m, g, board) {
     entry = { pat: ctx.createPattern(src, 'repeat'), span: tex ? TILE_SIZE / TILE_SQUARES : (src.naturalWidth || 256) / 4 };
     pats.set(m, entry);
   }
-  entry.pat.setTransform(new DOMMatrix().scale(g / entry.span));
+  // `turn`: { x, y, deg } — the pattern turned about a point (a roof plane's rows along its eave).
+  const mat = turn ? new DOMMatrix().translate(turn.x, turn.y).rotate(turn.deg) : new DOMMatrix();
+  entry.pat.setTransform(mat.scale(g / entry.span));
   return entry.pat;
 }
 
@@ -432,7 +454,7 @@ export function drawSketch(ctx, s, board, { level = '', draft = null } = {}) {
   ctx.lineCap = 'round';
   drawRailings(ctx, geo.railings, g);
 
-  drawOpenings(ctx, s, g, level, board ? board.gmView : isGM());
+  drawOpenings(ctx, s, g, level, board ? board.gmView : isGM(), sk);
   drawProps(geo.props[2]);
   ctx.restore();
 }
@@ -516,6 +538,37 @@ export function onOverhang(s, level, pt) {
   return Object.values(sk.shapes ?? {}).some((x) => x.walled === false && (pt.x / g - x.x) ** 2 + (pt.y / g - x.y) ** 2 <= x.r * x.r);
 }
 
+/** What can be set in a round room's wall. */
+export const ROUND_OPENINGS = ['door', 'secret_door', 'window'];
+const TAU = Math.PI * 2;
+/** An angle (radians) brought into 0 … 2π. */
+const turn = (a) => ((a % TAU) + TAU) % TAU;
+/** Is an angle inside an opening's arc? */
+const within = (a, op) => turn(a - op.a0) < op.a1 - op.a0;
+
+/**
+ * Where a door or window sits in a round room's wall: the arc it fills, from `a0` to `a1`
+ * (radians, clockwise on the map), centred on `mid`.
+ */
+export function roundOpening(shape, op) {
+  const mid = ((op.at ?? 0) * Math.PI) / 180;
+  const half = Math.asin(Math.min(1, (op.width ?? 1) / 2 / Math.max(shape.r, 0.01)));
+  return { a0: mid - half, a1: mid + half, mid };
+}
+
+/** A round room's doors and windows: [{ id, kind, at, width, a0, a1, mid }]. */
+export function roundOpeningsOf(shape) {
+  if (shape.walled === false) return [];
+  return Object.entries(shape.openings ?? {})
+    .filter(([, o]) => o && ROUND_OPENINGS.includes(o.kind))
+    .map(([id, o]) => ({ id, ...o, ...roundOpening(shape, o) }));
+}
+
+/** Is an angle (radians) inside one of a round room's openings? Its id if so. */
+export function roundOpeningAt(shape, a) {
+  return roundOpeningsOf(shape).find((op) => within(a, op))?.id ?? null;
+}
+
 /** Every roof on the scene: [{ id, level, roof }] (roofs live in the levels' sketches). */
 export function roofsOf(s, levels) {
   const out = [];
@@ -523,38 +576,167 @@ export function roofsOf(s, levels) {
   return out;
 }
 
-/** Draw a roof: its material, the far side shaded, a ridge line and an ink edge. */
+/**
+ * The scene's roofs as buildings: roof rectangles on one level, of one material, that overlap
+ * or share an edge make one roof; round roofs come after them, each on its own.
+ * [{ level, ids, rects, material, ridge, round }]
+ */
+export function roofGroupsOf(s, levels) {
+  const out = [];
+  for (const l of levels) {
+    const byMat = new Map(), round = [];
+    for (const [id, roof] of Object.entries(sketchOf(s, l.id)?.roofs ?? {})) {
+      if (!(roof?.w > 0 && roof?.h > 0)) continue;
+      // A round roof stands on its own (a tower's, above the roofs round it).
+      if (ROUND_ROOFS.includes(roof.shape)) { round.push({ level: l.id, ids: [id], rects: [{ ...roof, id }], material: roof.material, round: roof.shape }); continue; }
+      if (!byMat.has(roof.material)) byMat.set(roof.material, []);
+      byMat.get(roof.material).push({ ...roof, id });
+    }
+    for (const [material, rects] of byMat) {
+      for (const group of groupRects(rects)) {
+        out.push({ level: l.id, ids: group.map((r) => r.id), rects: group, material, ridge: group.length === 1 ? group[0].ridge : undefined });
+      }
+    }
+    out.push(...round);
+  }
+  return out;
+}
+
+// Light falls from the top left: planes facing it are lit, planes facing away shaded.
+const LIGHT = (() => { const x = -0.45, y = -1, l = Math.hypot(x, y); return { x: x / l, y: y / l }; })();
+
+/** Draw a roof rectangle on its own (as while dragging one out). */
 export function drawRoof(ctx, roof, g, board, alpha = 1) {
-  const x = roof.x * g, y = roof.y * g, w = roof.w * g, h = roof.h * g;
-  const along = roof.ridge ?? (roof.w >= roof.h ? 'h' : 'v');
+  drawRoofGroup(ctx, { rects: [roof], material: roof.material, ridge: roof.ridge, round: ROUND_ROOFS.includes(roof.shape) ? roof.shape : null }, g, board, alpha);
+}
+
+/**
+ * Draw a building's roof (from `roofGroupsOf`): one roof over the whole footprint, each plane
+ * in the material with its rows along its eave and shaded by which way it slopes; ridges,
+ * hips and valleys inked where planes meet, and an ink edge round the eaves.
+ */
+export function drawRoofGroup(ctx, group, g, board, alpha = 1) {
+  const shape = roofShape(group.rects, group.ridge, group.round);
+  const path = (pts, dx = 0, dy = 0, p = new Path2D()) => {
+    pts.forEach((q, i) => (i ? p.lineTo(q.x * g + dx, q.y * g + dy) : p.moveTo(q.x * g + dx, q.y * g + dy)));
+    p.closePath();
+    return p;
+  };
+  const whole = (dx = 0, dy = 0) => { const p = new Path2D(); for (const l of shape.loops) path(l, dx, dy, p); return p; };
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.fillRect(x + g * 0.15, y + g * 0.15, w, h);
-  ctx.fillStyle = fillFor(ctx, roof.material, g * 0.8, board);
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = 'rgba(0,0,0,0.22)';
-  if (along === 'h') ctx.fillRect(x, y + h / 2, w, h / 2); else ctx.fillRect(x + w / 2, y, w / 2, h);
-  ctx.fillStyle = 'rgba(255,255,255,0.08)';
-  if (along === 'h') ctx.fillRect(x, y, w, h / 2); else ctx.fillRect(x, y, w / 2, h);
+  ctx.fill(whole(g * 0.15, g * 0.15), 'evenodd');
+  if (shape.dome) {
+    drawDome(ctx, shape.dome, whole(), group.material, g, board);
+  } else if (!shape.faces) {
+    // An outline the roof can't be worked out for: covered flat.
+    ctx.fillStyle = fillFor(ctx, group.material, g * 0.8, board);
+    ctx.fill(whole(), 'evenodd');
+  } else {
+    // Whole first, so the planes' clipped edges leave no hairline gaps.
+    ctx.fillStyle = fillFor(ctx, group.material, g * 0.8, board);
+    ctx.fill(whole(), 'evenodd');
+    for (const f of shape.faces) {
+      const p = path(f.poly);
+      const down = { x: -f.n.x, y: -f.n.y }; // which way the plane slopes
+      const a = f.poly[0];
+      ctx.save();
+      ctx.clip(p);
+      ctx.fillStyle = fillFor(ctx, group.material, g * 0.8, board, { x: a.x * g, y: a.y * g, deg: (Math.atan2(-down.x, down.y) * 180) / Math.PI });
+      ctx.fill(p);
+      const lit = down.x * LIGHT.x + down.y * LIGHT.y;
+      ctx.fillStyle = lit >= 0 ? `rgba(255,255,255,${(0.1 * lit).toFixed(3)})` : `rgba(0,0,0,${(0.26 * -lit).toFixed(3)})`;
+      ctx.fill(p);
+      // A little shade along the eave and light up at the ridge, so each plane reads as a slope.
+      const depth = Math.max(...f.poly.map((q) => (q.x - a.x) * f.n.x + (q.y - a.y) * f.n.y)) * g;
+      if (depth > 0) {
+        const grad = ctx.createLinearGradient(a.x * g, a.y * g, a.x * g + f.n.x * depth, a.y * g + f.n.y * depth);
+        grad.addColorStop(0, 'rgba(0,0,0,0.12)');
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grad;
+        ctx.fill(p);
+      }
+      ctx.restore();
+    }
+  }
   ctx.strokeStyle = INK;
+  ctx.lineCap = 'round';
   ctx.lineWidth = Math.max(1.5, g * 0.05);
   ctx.beginPath();
-  if (along === 'h') { ctx.moveTo(x, y + h / 2); ctx.lineTo(x + w, y + h / 2); } else { ctx.moveTo(x + w / 2, y); ctx.lineTo(x + w / 2, y + h); }
-  // Hips: from the corners to the ridge's ends.
-  const r = Math.min(w, h) / 2;
-  if (along === 'h') { ctx.moveTo(x, y); ctx.lineTo(x + r, y + h / 2); ctx.lineTo(x, y + h); ctx.moveTo(x + w, y); ctx.lineTo(x + w - r, y + h / 2); ctx.lineTo(x + w, y + h); } else { ctx.moveTo(x, y); ctx.lineTo(x + w / 2, y + r); ctx.lineTo(x + w, y); ctx.moveTo(x, y + h); ctx.lineTo(x + w / 2, y + h - r); ctx.lineTo(x + w, y + h); }
+  for (const [a, b] of shape.lines) { ctx.moveTo(a.x * g, a.y * g); ctx.lineTo(b.x * g, b.y * g); }
   ctx.stroke();
   ctx.lineWidth = Math.max(2, g * 0.08);
-  ctx.strokeRect(x, y, w, h);
+  ctx.lineJoin = 'round';
+  ctx.stroke(whole());
+  if (shape.peak) {
+    // A finial at the top of a round roof.
+    const px = shape.peak.x * g, py = shape.peak.y * g, pr = Math.max(3, g * 0.12);
+    const shine = ctx.createRadialGradient(px - pr * 0.4, py - pr * 0.4, 0, px, py, pr);
+    shine.addColorStop(0, '#9a8f80');
+    shine.addColorStop(1, '#2e2925');
+    ctx.fillStyle = shine;
+    ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+    ctx.lineWidth = Math.max(1, g * 0.03);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
-/** Doors (in their frames, swung open when open) and windows, from the scene's walls. */
-function drawOpenings(ctx, s, g, level, gm) {
+/**
+ * A dome seen from above: courses of the material in rings (closer together towards the rim,
+ * where the dome is steep), ribs up to the top, and lit like a ball from the top left.
+ */
+function drawDome(ctx, { c, rx, ry }, outline, material, g, board) {
+  const cx = c.x * g, cy = c.y * g, RX = rx * g, RY = ry * g, R = Math.max(RX, RY);
+  ctx.save();
+  ctx.clip(outline);
+  ctx.fillStyle = fillFor(ctx, material, g * 0.6, board);
+  ctx.fill(outline);
+  ctx.strokeStyle = 'rgba(20, 15, 10, 0.45)';
+  ctx.lineWidth = Math.max(1, g * 0.025);
+  const courses = Math.max(3, Math.round(Math.min(rx, ry) * 2.5));
+  ctx.beginPath();
+  for (let k = 1; k < courses; k++) {
+    const f = Math.cos(((k / courses) * Math.PI) / 2);
+    ctx.moveTo(cx + RX * f, cy);
+    ctx.ellipse(cx, cy, RX * f, RY * f, 0, 0, Math.PI * 2);
+  }
+  const ribs = Math.min(rx, ry) < 1.5 ? 8 : 12;
+  for (let i = 0; i < ribs; i++) {
+    const a = (i / ribs) * Math.PI * 2;
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + RX * Math.cos(a), cy + RY * Math.sin(a));
+  }
+  ctx.stroke();
+  const ball = ctx.createRadialGradient(cx + LIGHT.x * R * 0.4, cy + LIGHT.y * R * 0.4, 0, cx + LIGHT.x * R * 0.15, cy + LIGHT.y * R * 0.15, R * 1.15);
+  ball.addColorStop(0, 'rgba(255,255,255,0.22)');
+  ball.addColorStop(0.45, 'rgba(255,255,255,0)');
+  ball.addColorStop(0.75, 'rgba(0,0,0,0.12)');
+  ball.addColorStop(1, 'rgba(0,0,0,0.45)');
+  ctx.fillStyle = ball;
+  ctx.fill(outline);
+  ctx.restore();
+}
+
+/**
+ * Doors (in their frames, swung open when open) and windows, from the scene's walls; those
+ * in round rooms' walls from the sketch (`sk`), following the curve.
+ */
+function drawOpenings(ctx, s, g, level, gm, sk) {
+  for (const [sid, shape] of Object.entries(sk?.shapes ?? {})) {
+    if (!(shape.r > 0)) continue;
+    for (const op of roundOpeningsOf(shape)) {
+      const key = `o:${sid}:${op.id}`;
+      const win = op.kind === 'window';
+      const w = s.walls?.[skId(`${win ? 'sk-n-' : 'sk-d-'}${key}`, level)];
+      drawRoundOpening(ctx, shape, op, g, gm, !win && !!w?.open);
+    }
+  }
   for (const [id, w] of Object.entries(s.walls ?? {})) {
     const win = id.startsWith('sk-n-');
     if ((!win && !id.startsWith('sk-d-')) || !onLevel(w, level)) continue;
+    if (id.startsWith('o:', 5)) continue; // in a round wall: drawn above
     const ax = w.a[0], ay = w.a[1], bx = w.b[0], by = w.b[1];
     const len = Math.hypot(bx - ax, by - ay);
     ctx.strokeStyle = INK;
@@ -587,4 +769,66 @@ function drawOpenings(ctx, s, g, level, gm) {
     }
     ctx.restore();
   }
+}
+
+/**
+ * A door or window in a round room's wall, bent to the wall's curve between posts. An open
+ * door swings in, straight, from its first post.
+ */
+function drawRoundOpening(ctx, shape, op, g, gm, open) {
+  const cx = shape.x * g, cy = shape.y * g, R = shape.r * g;
+  const t = g * 0.16, post = g * 0.12;
+  const dp = Math.min(post / R, (op.a1 - op.a0) / 4); // a post's share of the arc
+  const b0 = op.a0 + dp, b1 = op.a1 - dp;
+  const at = (a, r = R) => [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+  const band = (w) => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, R + w / 2, b0, b1);
+    ctx.arc(cx, cy, Math.max(0, R - w / 2), b1, b0, true);
+    ctx.closePath();
+  };
+  ctx.save();
+  ctx.strokeStyle = INK;
+  if (op.kind === 'secret_door' && !gm && !open) {
+    // A plain wall to players.
+    ctx.lineWidth = Math.max(2, g * 0.08);
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(cx, cy, R, op.a0, op.a1); ctx.stroke();
+    ctx.restore();
+    return;
+  }
+  // Posts, square to the wall.
+  ctx.fillStyle = INK;
+  for (const [a, back] of [[op.a0, false], [op.a1, true]]) {
+    ctx.save();
+    ctx.translate(...at(a));
+    ctx.rotate(a + Math.PI / 2);
+    ctx.fillRect(back ? -post + 1 : -1, -t * 0.75, post, t * 1.5);
+    ctx.restore();
+  }
+  ctx.lineWidth = Math.max(1, g * 0.03);
+  if (op.kind === 'window') {
+    // Curved glass in a thin frame, with a mullion.
+    band(t * 0.6);
+    ctx.fillStyle = 'rgba(170, 215, 235, 0.9)';
+    ctx.fill();
+    ctx.stroke();
+    const mid = (b0 + b1) / 2;
+    ctx.beginPath(); ctx.moveTo(...at(mid, R - t * 0.3)); ctx.lineTo(...at(mid, R + t * 0.3)); ctx.stroke();
+  } else if (!open) {
+    band(t);
+    ctx.fillStyle = op.kind === 'secret_door' ? '#5a4a6e' : '#8a5a2e';
+    ctx.fill();
+    ctx.stroke();
+  } else {
+    // Swung into the room: a straight leaf as long as the gap, from the first post.
+    const [hx, hy] = at(b0), [ex, ey] = at(b1);
+    const span = Math.hypot(ex - hx, ey - hy);
+    ctx.translate(hx, hy);
+    ctx.rotate(Math.atan2(ey - hy, ex - hx) + Math.PI * 0.45);
+    ctx.fillStyle = op.kind === 'secret_door' ? '#5a4a6e' : '#8a5a2e';
+    ctx.fillRect(0, -t / 2, span, t);
+    ctx.strokeRect(0, -t / 2, span, t);
+  }
+  ctx.restore();
 }

@@ -338,10 +338,23 @@ pub struct SketchShape {
     /// Its wall's style, if not the sketch's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_style: Option<String>,
+    /// Doors and windows set in its curved wall.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub openings: BTreeMap<Id, ShapeOpening>,
 }
 
 fn circle() -> String {
     "circle".into()
+}
+
+/// A door or window in a round room's wall, centred `at` degrees round it (0 = east, turning
+/// clockwise on the map), `width` squares across: `door`, `secret_door` or `window`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ShapeOpening {
+    pub at: f64,
+    #[serde(default = "one")]
+    pub width: f64,
+    pub kind: String,
 }
 
 /// A wall from corner `a` to corner `b`, in squares.
@@ -386,7 +399,8 @@ pub struct SketchProp {
 }
 
 /// A roof: a rectangle of `w` × `h` squares from `x, y`, its ridge along the longer side
-/// unless `ridge` says (`h` or `v`).
+/// unless `ridge` says (`h` or `v`). With `shape` (`cone`, `facets` or `dome`) it is a round
+/// roof filling that rectangle instead.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SketchRoof {
     pub x: f64,
@@ -396,6 +410,8 @@ pub struct SketchRoof {
     pub material: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ridge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
 }
 
 /// Walls and lights drawn from a scene's sketch have ids with this prefix.
@@ -1151,6 +1167,26 @@ pub struct JournalEntry {
     /// Per-player access; a player gets the higher of this and `access`.
     #[serde(default)]
     pub players: BTreeMap<Id, Access>,
+    /// Who made it. A player's own journal: they decide who may read it and write in it
+    /// (the GM always can). `None` for entries made before journals had authors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<Id>,
+    /// The journal as a book: `{ cover: {color, emblem}, age, pages: {id: {sort, author,
+    /// font, text, items}} }` (see web/js/journal.js). Each page's `text` is Markdown, and
+    /// `content` mirrors all the pages so search and links keep working. Null for an entry
+    /// that hasn't been opened as a book yet.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub book: Value,
+}
+
+impl JournalEntry {
+    /// The book with its pages taken out (the cover and wear stay): what "limited" shows.
+    pub fn cover_only(&self) -> Value {
+        match &self.book {
+            Value::Object(b) => Value::Object(b.iter().filter(|(k, _)| k.as_str() != "pages").map(|(k, v)| (k.clone(), v.clone())).collect()),
+            _ => Value::Null,
+        }
+    }
 }
 
 /// An item in the world's Items directory (not owned by an actor). Drag it

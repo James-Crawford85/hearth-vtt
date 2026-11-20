@@ -43,6 +43,7 @@ export class Sidebar {
     this.addTab({ id: 'tables', label: 'Rollable Tables', icon: 'tables', render: (p) => this.api.tables.renderPanel(p) });
     this.addTab({ id: 'macros', label: 'Macros', icon: 'macros', render: (p) => this.api.macros.renderPanel(p) });
     this.addTab({ id: 'playlists', label: 'Playlists', icon: 'playlists', render: (p) => this.api.playlists.renderPanel(p) });
+    this.addTab({ id: 'soundboard', label: 'Soundboard', icon: 'soundboard', render: (p) => this.api.soundboard.mount(p) });
     this.addTab({ id: 'collections', label: 'Collections', icon: 'collections', render: (p) => this.api.collections.renderPanel(p) });
     this.addTab({ id: 'settings', label: 'Settings', icon: 'settings', render: (p) => this.renderSettings(p) });
     this.select('chat', { toggle: false, open: !this.collapsed });

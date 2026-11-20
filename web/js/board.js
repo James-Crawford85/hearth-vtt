@@ -32,7 +32,8 @@ import { lightDialog, animState, drawAnimOverlay, animColor, isAnimated, seedOf,
 import { soundDialog } from './audio.js';
 import { drawDrawing, drawSelection, hitDrawing, simplify } from './drawings.js';
 import { isVideo, sizeOf, animatedMaps } from './media.js';
-import { drawSketch, sketchChanged, drawOverhang, onOverhang, roofsOf, drawRoof } from './sketch.js';
+import { drawSketch, sketchChanged, drawOverhang, onOverhang, roofGroupsOf, drawRoofGroup } from './sketch.js';
+import { insideRoof, insetRects } from './roof-skeleton.js';
 import { levelsOf, levelOf, levelNext, onLevel, levelName } from './levels.js';
 
 export class Board {
@@ -394,11 +395,12 @@ export class Board {
     if (curL.elevation < 0) return;
     const gm = this.gmView;
     if (gm && !this.showRoofs) return;
-    const roofs = roofsOf(s, levels.filter((l) => l.elevation >= 0));
+    // Roof rectangles that touch make one building's roof: hidden, seen and cut out together.
+    const roofs = roofGroupsOf(s, levels.filter((l) => l.elevation >= 0));
     if (!roofs.length) return;
     const g = this.grid;
     const mine = gm ? [] : this.seeing ?? Object.values(s.tokens).filter((t) => t.actor_id && ownsActor(t.actor_id));
-    const inside = (r, pt) => pt.x >= r.x * g && pt.x <= (r.x + r.w) * g && pt.y >= r.y * g && pt.y <= (r.y + r.h) * g;
+    const inside = (b, pt) => insideRoof(b, pt.x / g, pt.y / g);
     const limited = this.visionLimited();
     // A player sees in under a roof where their sight reaches inside (an open door, a window,
     // a porch), with vision on or off: the roofs go on a layer of their own, with that cut out.
@@ -416,20 +418,22 @@ export class Board {
       ctx.clearRect(0, 0, rc.width, rc.height);
       ctx.setTransform(this.ctx.getTransform());
     }
-    for (const { roof, level } of roofs) {
-      const roofElev = levelOf(s, level)?.elevation ?? 0;
-      if (mine.some((t) => (levelOf(s, t.level)?.elevation ?? 0) <= roofElev && inside(roof, this.center(t)))) continue;
+    for (const building of roofs) {
+      const roofElev = levelOf(s, building.level)?.elevation ?? 0;
+      if (mine.some((t) => (levelOf(s, t.level)?.elevation ?? 0) <= roofElev && inside(building, this.center(t)))) continue;
       if (!gm && limited) {
-        // Seen if some of its edge is in sight.
+        // Seen if some of its edge is in sight (just outside the eaves).
         const pts = [];
-        for (let i = 0; i <= 8; i++) {
-          const fx = roof.x + (roof.w * i) / 8, fy = roof.y + (roof.h * i) / 8;
-          pts.push({ x: fx * g, y: (roof.y - 0.2) * g }, { x: fx * g, y: (roof.y + roof.h + 0.2) * g }, { x: (roof.x - 0.2) * g, y: fy * g }, { x: (roof.x + roof.w + 0.2) * g, y: fy * g });
+        for (const roof of building.rects) {
+          for (let i = 0; i <= 8; i++) {
+            const fx = roof.x + (roof.w * i) / 8, fy = roof.y + (roof.h * i) / 8;
+            pts.push({ x: fx * g, y: (roof.y - 0.2) * g }, { x: fx * g, y: (roof.y + roof.h + 0.2) * g }, { x: (roof.x - 0.2) * g, y: fy * g }, { x: (roof.x + roof.w + 0.2) * g, y: fy * g });
+          }
         }
-        if (!pts.some((pt) => this.sources.some((src) => this.canSee(src, pt)))) continue;
+        if (!pts.some((pt) => !inside(building, pt) && this.sources.some((src) => this.canSee(src, pt)))) continue;
       }
-      drawRoof(ctx, roof, g, this, gm ? 0.4 : 1);
-      shown.push(roof);
+      drawRoofGroup(ctx, building, g, this, gm ? 0.4 : 1);
+      shown.push(building);
     }
     if (!cut || !shown.length) return;
     // Cut what's in sight, inside each roof only (a little in from its edge, so the eaves seen
@@ -438,7 +442,13 @@ export class Board {
     ctx.globalCompositeOperation = 'destination-out';
     ctx.beginPath();
     const inset = g * 0.12;
-    for (const r of shown) ctx.rect(r.x * g + inset, r.y * g + inset, r.w * g - inset * 2, r.h * g - inset * 2);
+    for (const b of shown) {
+      if (b.round) {
+        const r = b.rects[0];
+        ctx.moveTo((r.x + r.w) * g - inset, (r.y + r.h / 2) * g);
+        ctx.ellipse((r.x + r.w / 2) * g, (r.y + r.h / 2) * g, Math.max(0, (r.w / 2) * g - inset), Math.max(0, (r.h / 2) * g - inset), 0, 0, Math.PI * 2);
+      } else for (const r of insetRects(b.rects, inset / g)) ctx.rect(r.x * g, r.y * g, r.w * g, r.h * g);
+    }
     ctx.clip();
     for (const src of this.roofSight) {
       ctx.save();

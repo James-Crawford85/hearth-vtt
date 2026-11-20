@@ -281,21 +281,29 @@ hearth.update.token(sceneId, tokenId, { level: 'up' })                // GM: any
 
 ## Journal
 
-Entries live in `hearth.world.journal[id] = { name, folder, content, img, access, players }`. `content` is Markdown (`# heading`, `**bold**`, `*italic*`, lists, `> quote`, `---`, `[text](url)`, `![alt](url)`), plus `[[Entry name]]` or `[[Entry name|label]]` links (to a journal entry, else an actor) and `[[/r 1d20 + 2]]` roll buttons. It's rendered without HTML, so entries can't inject markup.
+Journals are books: a leather cover with a gold emblem, and parchment pages turned and written in like a real book. Anyone can start one. An entry is `hearth.world.journal[id] = { name, author, content, img, access, players, book }`:
 
-Who sees an entry: `access` applies to every player, `players[userId]` raises it for one player. Levels: `none` (hidden), `limited` (name and image), `observer` (read), `owner` (read and edit). The server only sends players what they may see; limited entries arrive with empty `content`.
+- `author`: who made it. They (and the GM) choose who may read it and write in it, change its cover, and throw it away.
+- `book`: `{ cover: { color, emblem }, age, pages: { id: { sort, author, font, text, items } } }`. `age` (0–1) is how worn the pages look. Each page's `text` is Markdown; `items` are pictures, stamps and damage placed on the page (`{ kind, x, y, w, rot, z, src, mask, look }`, positions as a share of the page).
+- `content`: every page's text joined together, kept in step by the book so search and links work. Entries made before books have only `content` (and `img`); they show as a book of their text and become a real book when someone writes in them.
+
+Markdown: `# heading`, `**bold**`, `*italic*`, lists, `> quote`, `---`, `[text](url)`, `![alt](url)` (in a book the alt text places and dresses the picture: `left`, `right` or `full`, a mask such as `torn` or `oval`, a look such as `sepia` or `ink`), plus `[[Entry name]]` or `[[Entry name|label]]` links (to a journal, else an actor) and `[[/r 1d20 + 2]]` roll buttons. It's rendered without HTML, so pages can't inject markup.
+
+Who sees a journal: `access` applies to every player, `players[userId]` raises it for one player. Levels: `none` (hidden), `limited` (the cover only), `observer` (read), `owner` (read and write in it). The author always has `owner`, and the GM sees everything. The server only sends players what they may see; cover-only journals arrive without pages or `content`.
 
 ```js
-hearth.journal.open(id)            // open an entry (if you can see it)
-hearth.journal.byName('The Keep')  // find an entry you can see
-hearth.journal.access(entry)       // your level for an entry
+hearth.journal.open(id, { page })  // open a book (if you can see it), optionally at a page
+hearth.journal.byName('The Keep')  // find a journal you can see
+hearth.journal.access(entry)       // your level for a journal
 hearth.journal.show(id)            // GM: pop it up for every player who can see it
-hearth.op({ op: 'journal_create', entry: { id: '', name: 'Notes', folder: 'Lore', content: '', access: 'none', players: {} } })   // GM
-hearth.op({ op: 'journal_update', id, patch: { content: '…' } })   // owners: name, folder, img, content only
-hearth.op({ op: 'journal_delete', id })                              // GM
+hearth.op({ op: 'journal_create', entry: { id: '', name: 'Notes', content: '', access: 'none', players: {}, book: { cover: { color: '#5a3b22', emblem: 'quill' }, pages: {} } } })   // anyone: you become its author
+hearth.op({ op: 'journal_update', id, patch: { book: { pages: { p1: { text: '…' } } }, content: '…' } })   // writers: name, folder, img, content, book; the author also access, players
+hearth.op({ op: 'journal_delete', id })                              // the author or the GM
 ```
 
-The `journal:render` hook (`root, entry, hearth`) runs after an entry is drawn, for modules that decorate entries.
+Players can upload pictures for their journals (png, jpg, webp or gif, 10 MB at most); they go in `assets/journals/<their id>/`.
+
+The `journal:render` hook (`root, entry, hearth`) runs after each page is drawn (`root` is the page's text), for modules that decorate journals.
 
 ## Items directory
 
